@@ -44,6 +44,10 @@ extern "C" {
 void boot_progress_poll (void) __attribute__((weak));
 volatile uint32_t native_ufs_probe_calls = 0;
 volatile uint32_t native_ufs_matched = 0;
+// Set when probe() accepted a provider by its 'compatible' value instead of by the platform
+// expert class. IODTPlatformExpert only ever creates IOPlatformDevice nubs, so the
+// NativeUfsRoot personality never matches on this platform and start() must accept this path.
+volatile uint32_t native_ufs_compatible_matched = 0;
 volatile uint32_t native_ufs_probe_requested = 0;
 volatile uint32_t native_ufs_mapped = 0;
 volatile uint32_t native_ufs_status = 0;
@@ -110,17 +114,31 @@ IOService *NativeUfs::probe (IOService *provider, SInt32 *score)
 {
   native_ufs_probe_calls = native_ufs_probe_calls + 1;
   // PICASSO-DIAG: print the provider identity for every match attempt so the bring-up log shows
-  // exactly which nubs the two personalities reach and why a match is rejected.
+  // exactly which nubs the personalities reach and what their compatible bytes really are.
   if (native_ufs_probe_calls <= 40 && provider) {
-    OSString *nodeName = OSDynamicCast (OSString, provider->getProperty ("name"));
     OSObject *compatible = provider->getProperty ("compatible");
     OSString *compatibleString = OSDynamicCast (OSString, compatible);
-    IOLog ("NativeUfs match[%u]: class=%s name=%s compatible=%s\n",
+    OSData *compatibleData = OSDynamicCast (OSData, compatible);
+    const char *bytes = nullptr;
+    unsigned length = 0;
+    if (compatibleData) {
+      bytes = static_cast<const char *> (compatibleData->getBytesNoCopy ());
+      length = compatibleData->getLength ();
+    } else if (compatibleString) {
+      bytes = compatibleString->getCStringNoCopy ();
+      length = compatibleString->getLength ();
+    }
+    char printable[80];
+    unsigned shown = length < sizeof (printable) - 1 ? length : unsigned (sizeof (printable) - 1);
+    for (unsigned index = 0; index < shown; index++) {
+      char value = bytes ? bytes[index] : 0;
+      printable[index] = (value >= 0x20 && value < 0x7f) ? value : '.';
+    }
+    printable[shown] = 0;
+    IOLog ("NativeUfs match[%u]: class=%s len=%u compat=%s\n",
            native_ufs_probe_calls,
            provider->getMetaClass () ? provider->getMetaClass ()->getClassName () : "?",
-           nodeName ? nodeName->getCStringNoCopy () : "-",
-           compatibleString ? compatibleString->getCStringNoCopy () :
-           (OSDynamicCast (OSData, compatible) ? "<data>" : "-"));
+           length, printable);
   }
   if (OSDynamicCast (IOPlatformExpertDevice, provider)) {
     // Second personality (KernelConfigTables: IOMatchCategory NativeUfsRoot): attaches to the
@@ -139,16 +157,20 @@ IOService *NativeUfs::probe (IOService *provider, SInt32 *score)
   if (data) {
     const char *text = static_cast<const char *> (data->getBytesNoCopy ());
     match = text && (contains (text, data->getLength (), "qcom,sm8550-ufshc") ||
-                     contains (text, data->getLength (), "qcom,sm7250-ufshc"));
+                     contains (text, data->getLength (), "qcom,sm7250-ufshc") ||
+                     contains (text, data->getLength (), "ufshc"));
   } else if (string) {
     const char *text = string->getCStringNoCopy ();
     match = text && (contains (text, string->getLength (), "qcom,sm8550-ufshc") ||
-                     contains (text, string->getLength (), "qcom,sm7250-ufshc"));
+                     contains (text, string->getLength (), "qcom,sm7250-ufshc") ||
+                     contains (text, string->getLength (), "ufshc"));
   }
   if (!match) {
     return nullptr;
   }
+  IOLog ("NativeUfs: provider accepted by compatible\n");
   native_ufs_matched = 1;
+  native_ufs_compatible_matched = 1;
   if (score) {
     *score = 1000;
   }
@@ -1759,8 +1781,20 @@ bool NativeUfs::start (IOService *provider)
          probe, rootMode, OSDynamicCast (IOPlatformExpertDevice, provider) ? 1 : 0);
   // Default: match for observability only, never touch the controller. Hardware work runs once,
   // from the root-device personality; the ufshc nub match stays observation-only.
-  if ((!probe && !rootMode) || !OSDynamicCast (IOPlatformExpertDevice, provider)) {
+  //
+  // PICASSO: IODTPlatformExpert::createNub() only ever builds IOPlatformDevice nubs (see
+  // iokit/Kernel/IOPlatformExpert.cpp), so the NativeUfsRoot personality has nothing to attach
+  // to and never starts. Accept the nub that probe() accepted by its 'compatible' value instead,
+  // but only for the explicit probe/root boot arguments -- a plain match stays observation-only.
+  bool expert = OSDynamicCast (IOPlatformExpertDevice, provider) != nullptr;
+  if (!probe && !rootMode) {
     return false;
+  }
+  if (!expert && !native_ufs_compatible_matched) {
+    return false;
+  }
+  if (!expert) {
+    IOLog ("NativeUfs: starting from the compatible-matched platform device\n");
   }
   unsigned diagnostic = 0;
   PE_parse_boot_argn ("native-ufs-diagnostics", &diagnostic, sizeof (diagnostic));
