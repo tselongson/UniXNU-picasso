@@ -109,6 +109,19 @@ static bool contains (const char *data, size_t length, const char *needle)
 IOService *NativeUfs::probe (IOService *provider, SInt32 *score)
 {
   native_ufs_probe_calls = native_ufs_probe_calls + 1;
+  // PICASSO-DIAG: print the provider identity for every match attempt so the bring-up log shows
+  // exactly which nubs the two personalities reach and why a match is rejected.
+  if (native_ufs_probe_calls <= 40 && provider) {
+    OSString *nodeName = OSDynamicCast (OSString, provider->getProperty ("name"));
+    OSObject *compatible = provider->getProperty ("compatible");
+    OSString *compatibleString = OSDynamicCast (OSString, compatible);
+    IOLog ("NativeUfs match[%u]: class=%s name=%s compatible=%s\n",
+           native_ufs_probe_calls,
+           provider->getMetaClass () ? provider->getMetaClass ()->getClassName () : "?",
+           nodeName ? nodeName->getCStringNoCopy () : "-",
+           compatibleString ? compatibleString->getCStringNoCopy () :
+           (OSDynamicCast (OSData, compatible) ? "<data>" : "-"));
+  }
   if (OSDynamicCast (IOPlatformExpertDevice, provider)) {
     // Second personality (KernelConfigTables: IOMatchCategory NativeUfsRoot): attaches to the
     // root device, which starts before the platform expert publishes IOResources, so the
@@ -1739,6 +1752,11 @@ bool NativeUfs::start (IOService *provider)
   PE_parse_boot_argn ("native-ufs-probe", &probe, sizeof (probe));
   PE_parse_boot_argn ("native-ufs-root", &rootMode, sizeof (rootMode));
   native_ufs_probe_requested = probe != 0;
+  // PICASSO-DIAG: start() is reached only when probe() accepted the provider; print what the
+  // boot arguments decoded to and whether the provider satisfies the platform-expert gate.
+  IOLog ("NativeUfs start: class=%s probe=%u root=%u expert=%u\n",
+         provider->getMetaClass () ? provider->getMetaClass ()->getClassName () : "?",
+         probe, rootMode, OSDynamicCast (IOPlatformExpertDevice, provider) ? 1 : 0);
   // Default: match for observability only, never touch the controller. Hardware work runs once,
   // from the root-device personality; the ufshc nub match stays observation-only.
   if ((!probe && !rootMode) || !OSDynamicCast (IOPlatformExpertDevice, provider)) {
