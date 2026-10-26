@@ -681,11 +681,12 @@ void NativeUfs::adoptAndRead (unsigned level)
     inqWord[index] = getBe32 (virt + dataOffset + 8 + index * 4);
   }
   // LBA 1 of LUN 0 holds the GPT header when the block size is 4096 (or 512).
-  uint32_t gptStatus = 0xee, sig0 = 0, sig1 = 0;
+  uint32_t gptStatus = 0xee, sig0 = 0, sig1 = 0, gptSeg = 0xdeadbeef;
   if (blockSize[0] >= 512 && blockSize[0] <= 4096) {
     uint8_t read10[10] = { 0x28, 0, 0, 0, 0, 1, 0, 0, 1, 0 };
     UfsResult g = command (0, read10, 10, true, blockSize[0]);
     gptStatus = (g.ocs << 16) | (g.response << 8) | g.scsi;
+    gptSeg = g.seg;
     if (g.ocs == 0 && g.scsi == 0) {
       sig0 = *reinterpret_cast<uint32_t *> (virt + dataOffset);
       sig1 = *reinterpret_cast<uint32_t *> (virt + dataOffset + 4);
@@ -696,6 +697,24 @@ void NativeUfs::adoptAndRead (unsigned level)
   // this board. Keep it compact enough for one screen line pair.
   IOLog ("NativeUfs adopt: RESULT hcs %08x->%08x gpt=%06x sig=%08x %08x\n",
          hcsBefore, hcsAfter, gptStatus, sig0, sig1);
+  // Where did the data actually go? Residual from the response UPIU, the response header, and
+  // the first dwords of the three candidate buffers.
+  {
+    const uint8_t *rspRaw = virt + ucdOffset + rspOffset;
+    IOLog ("NativeUfs adopt: gptseg=%x rsp %08x %08x %08x %08x\n", gptSeg,
+           getBe32 (rspRaw), getBe32 (rspRaw + 4), getBe32 (rspRaw + 8), getBe32 (rspRaw + 12));
+    IOLog ("NativeUfs adopt: data8k %08x %08x %08x %08x | data4k %08x %08x %08x %08x\n",
+           getBe32 (virt + dataOffset), getBe32 (virt + dataOffset + 4),
+           getBe32 (virt + dataOffset + 8), getBe32 (virt + dataOffset + 12),
+           getBe32 (virt + ucdOffset), getBe32 (virt + ucdOffset + 4),
+           getBe32 (virt + ucdOffset + 8), getBe32 (virt + ucdOffset + 12));
+    auto le32 = [] (const uint8_t *at) {
+      return uint32_t (at[0]) | (uint32_t (at[1]) << 8) | (uint32_t (at[2]) << 16) | (uint32_t (at[3]) << 24);
+    };
+    IOLog ("NativeUfs adopt: utrd %08x %08x %08x %08x %08x %08x %08x %08x\n",
+           le32 (virt + 0), le32 (virt + 4), le32 (virt + 8), le32 (virt + 12),
+           le32 (virt + 16), le32 (virt + 20), le32 (virt + 24), le32 (virt + 28));
+  }
   IOLog ("NativeUfs adopt: RESULT inq=%06x %08x %08x %08x %08x L0 st=%06x bs=%08x last=%08x\n",
          (inq.ocs << 16) | (inq.response << 8) | inq.scsi, inqWord[0], inqWord[1], inqWord[2],
          inqWord[3], status[0], blockSize[0], last[0]);
