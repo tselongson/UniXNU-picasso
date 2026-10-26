@@ -1938,7 +1938,7 @@ bool NativeUfs::startRoot (IOService *provider)
 {
   const char *why = "";
   native_ufs_root_step = 1;
-  IOLog ("NativeUfs: startRoot enter\n");
+  IOLog ("NativeUfs: startRoot enter (clock=%llu)\n", mach_absolute_time ());
   if (!hostBringUp (&why)) {
     rootDiagnosticFailure (why);
     IOLog ("NativeUfs: root bring-up failed: %s\n", why);

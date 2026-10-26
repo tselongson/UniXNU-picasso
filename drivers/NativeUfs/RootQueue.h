@@ -2,12 +2,14 @@
 // Root queue takeover; shared with the host fault-injection harness.
 static bool hostWaitRegister (unsigned offset, uint32_t mask, uint32_t value)
 {
-  uint64_t deadline;
-  clock_interval_to_deadline (100, kMillisecondScale, &deadline);
-  do {
+  // PICASSO-DIAG: bound by iteration count, not by the monotonic clock. Every deadline-based
+  // wait in this driver exits only through mach_absolute_time(); if that clock is not running
+  // this early in boot the comparison never becomes false and the platform-expert thread wedges
+  // with no output. 2000 x 10us is the same 20ms the deadline intended.
+  for (unsigned spins = 0; spins < 2000; spins++) {
     if ((read32 (gHost.hc, offset) & mask) == value) return true;
     IODelay (10);
-  } while (mach_absolute_time () < deadline);
+  }
   return false;
 }
 
