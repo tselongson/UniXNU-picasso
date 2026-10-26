@@ -1887,7 +1887,10 @@ bool NativeUfs::start (IOService *provider)
     return true;
   }
   if (probe == 12) {
+    IOLog ("NativeUfs: dispatching probe=12 to startRoot\n");
     bool published = startRoot (provider);
+    IOLog ("NativeUfs: startRoot returned %u (blocks=%u step=%u)\n",
+           published ? 1 : 0, native_ufs_blocks_published, native_ufs_root_step);
     if (!published) {
       panic ("NATIVE_UFS media report: root start failed (blocks=%u)", native_ufs_blocks_published);
     }
@@ -1909,11 +1912,13 @@ bool NativeUfs::startRoot (IOService *provider)
 {
   const char *why = "";
   native_ufs_root_step = 1;
+  IOLog ("NativeUfs: startRoot enter\n");
   if (!hostBringUp (&why)) {
     rootDiagnosticFailure (why);
     IOLog ("NativeUfs: root bring-up failed: %s\n", why);
     return false;
   }
+  IOLog ("NativeUfs: host bring-up ok\n");
   native_ufs_root_step = 2;
   RootLayout *layout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
   if (!layout || !findRootLayout (layout, &why)) {
@@ -1922,6 +1927,9 @@ bool NativeUfs::startRoot (IOService *provider)
     if (layout) IOFree (layout, sizeof (RootLayout));
     return false;
   }
+  IOLog ("NativeUfs: root layout first=%llx last=%llx manifest=%u windows=%u magic=%08x %08x\n",
+         layout->userdataFirst, layout->userdataLast, layout->manifestStatus, layout->windows,
+         layout->magic0, layout->magic1);
   native_ufs_root_step = 3;
   if (layout->manifestStatus != 0) {
     rootDiagnosticFailure ("root manifest rejected");
