@@ -153,7 +153,14 @@ kernel_args = [
   # panics with the full media report (GPT/userdata geometry) after a
   # short delay -- the stage-6 data we need, without the shim. If AMFI
   # then panics "No PMGR", the shim port becomes the next task.
-  "native-ufs-probe=12",
+  #
+  # PICASSO 2026-10-26: startRoot's own request list never completes a
+  # transfer on this controller (the queue stop/restart leaves it unable to
+  # fetch the UTRD), so probe=4 takes the adopt path instead: it reuses the
+  # request list the firmware already programmed at UTRBA, which is the one
+  # region the controller is known to DMA to, and then panics with per-LUN
+  # status, block sizes, INQUIRY vendor/product and the GPT signature.
+  "native-ufs-probe=4",
   "native-ufs-diagnostics=1",
   # IOKit matching trace: kIOLogMatch(0x10) | kIOLogProbe(0x2) |
   # kIOLogConfig(0x20) | kIOLogCatalogue(0x200). Three silent runs in a row

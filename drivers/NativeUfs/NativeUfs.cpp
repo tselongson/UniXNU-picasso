@@ -408,7 +408,11 @@ void NativeUfs::adoptAndRead (unsigned level)
   unsigned stopLoops = 10000;
   while ((read32 (hc, 0x60) & 1) && stopLoops--) IODelay (10);
   if (read32 (hc, 0x60) & 1) panic ("NATIVE_UFS adopt: request list did not stop");
-  smmuBypassStream (0x60, smmuMap, smmuReport, phys, 16384);
+  // PICASSO: ufshc has no 'iommus', so the firmware list is reached by physical address and the
+  // sheng apps_smmu window must not be touched.
+  if (gUfsSmmuNeeded) {
+    smmuBypassStream (0x60, smmuMap, smmuReport, phys, 16384);
+  }
   write32 (hc, 0x50, static_cast<uint32_t> (phys));
   write32 (hc, 0x54, static_cast<uint32_t> (phys >> 32));
   write32 (hc, 0x20, 0xffffffffU);  // clear stale status
