@@ -87,6 +87,20 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   gRootDiagnostic.isSeen = state.interruptSeen;
   *ocs = state.ocs;
   if (end != UfsTransferEnd::Completed) {
+    // PICASSO-DIAG: dump the controller state at the exact point the transfer gives up.
+    IOLog ("NativeUfs: transfer end=%u polls=%u db=%u is=%u ocs=%u dma=%llx\n",
+           static_cast<unsigned> (end), state.polls, state.doorbellSeen, state.interruptSeen,
+           state.ocs, gHost.phys);
+    IOLog ("NativeUfs: CAP=%08x VER=%08x HCS=%08x HCE=%08x IS=%08x\n",
+           read32 (gHost.hc, 0x00), read32 (gHost.hc, 0x08), read32 (gHost.hc, 0x30),
+           read32 (gHost.hc, 0x34), read32 (gHost.hc, 0x20));
+    IOLog ("NativeUfs: UTRLBA=%08x%08x DBR=%08x UECPA=%08x UECDL=%08x\n",
+           read32 (gHost.hc, 0x54), read32 (gHost.hc, 0x50), read32 (gHost.hc, 0x58),
+           read32 (gHost.hc, 0x60), read32 (gHost.hc, 0x64));
+    if (gHost.smmu) {
+      IOLog ("NativeUfs: SMMU GFSR=%08x FSR=%08x SCTLR=%08x\n",
+             read32 (gHost.smmu, 0x48), gRootDiagnostic.fsrBefore, gRootDiagnostic.sctlr);
+    }
     // No cancel/reset/retry: the controller may still own the buffer, even
     // with DB=0. Keep it allocated and prohibit all subsequent CPU writes.
     gHost.poisoned = true;

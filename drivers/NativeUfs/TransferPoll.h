@@ -23,6 +23,10 @@ static UfsTransferEnd pollUfsTransfer(Port &port, UfsTransferPoll &state)
       if (state.ocs != 15) return UfsTransferEnd::Completed;
     }
     if (port.expired()) return UfsTransferEnd::Timeout;
+    // PICASSO-DIAG: hard iteration cap. The deadline alone is the only exit today, so a broken
+    // timebase (or a controller that never completes) wedges the platform-expert thread with no
+    // output at all. Bail out by poll count as well so the caller can dump registers.
+    if (state.polls >= 4000000u) return UfsTransferEnd::Timeout;
     port.delay();
   }
 }
