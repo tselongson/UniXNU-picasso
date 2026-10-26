@@ -365,18 +365,26 @@ static void smmuBypassStream (uint16_t stream, OSSharedPtr<IOMemoryMap> &keep, u
 
 void NativeUfs::adoptAndRead (unsigned level)
 {
+  IOLog ("NativeUfs adopt: enter level=%u\n", level);
   OSSharedPtr<IOMemoryMap> hcMap;
   uintptr_t hc = mapPhys (UFS_HC_BASE, UFS_HC_SIZE, hcMap);
   if (!hc) {
     panic ("NATIVE_UFS adopt: controller map failed");
   }
+  // PICASSO-DIAG: one line per step, so the log shows whether the panic below is reached and
+  // whether the panic itself is visible on this board.
+  IOLog ("NativeUfs adopt: hc mapped at %llx hcs=%08x hce=%08x is=%08x db=%08x\n",
+         static_cast<uint64_t> (hc), read32 (hc, 0x30), read32 (hc, 0x34), read32 (hc, 0x20),
+         read32 (hc, 0x58));
   // The controller's own request list is the one region its DMA is known to reach
   // (hardware 2026-10-17: a kernel-allocated buffer at 0xf080f000 reset the system when the
   // first command was issued, and nothing below 0xc8000000 is allocatable). The firmware
   // zeroed it; use 16 KiB from UTRLBA as ordinary cached memory (the DT marks the host
   // dma-coherent). Test instrument only: the kernel may also own these pages.
   uint64_t fwList = (uint64_t (read32 (hc, 0x54)) << 32) | read32 (hc, 0x50);
+  IOLog ("NativeUfs adopt: firmware list base=%llx\n", fwList);
   if (!fwList || (fwList & 0xfff)) {
+    IOLog ("NativeUfs adopt: rejecting firmware list base=%llx, panicking next\n", fwList);
     panic ("NATIVE_UFS adopt: no usable firmware list base=%llx", fwList);
   }
   IOMemoryDescriptor *region = IOMemoryDescriptor::withPhysicalAddress (fwList, 16384, kIODirectionInOut);
@@ -390,6 +398,8 @@ void NativeUfs::adoptAndRead (unsigned level)
   }
   uint8_t *virt = reinterpret_cast<uint8_t *> (regionMap->getVirtualAddress ());
   uint64_t phys = fwList;
+  IOLog ("NativeUfs adopt: region mapped virt=%llx phys=%llx\n",
+         static_cast<uint64_t> (reinterpret_cast<uintptr_t> (virt)), phys);
   zero32 (virt, 16384);
   cacheClean (virt, 16384);
   // Layout: [0,4096) request list (slot 0 used), [4096,5120) command + response UPIU +
@@ -397,6 +407,8 @@ void NativeUfs::adoptAndRead (unsigned level)
   const uint32_t ucdOffset = 4096, rspOffset = 512, prdtOffset = 1024, dataOffset = 8192;
   uint32_t hcsBefore = read32 (hc, 0x30);
   uint32_t doorbellBefore = read32 (hc, 0x58);
+  IOLog ("NativeUfs adopt: hcs=%08x doorbell=%08x doorbell2=%08x\n",
+         hcsBefore, doorbellBefore, read32 (hc, 0x78));
   if (doorbellBefore != 0 || read32 (hc, 0x78) != 0) {
     panic ("NATIVE_UFS adopt: firmware request outstanding doorbell=%08x hcs=%08x", doorbellBefore, hcsBefore);
   }
@@ -407,6 +419,7 @@ void NativeUfs::adoptAndRead (unsigned level)
   __asm__ volatile ("dsb sy" ::: "memory");
   unsigned stopLoops = 10000;
   while ((read32 (hc, 0x60) & 1) && stopLoops--) IODelay (10);
+  IOLog ("NativeUfs adopt: stop loops left=%u hce=%08x\n", stopLoops, read32 (hc, 0x60));
   if (read32 (hc, 0x60) & 1) panic ("NATIVE_UFS adopt: request list did not stop");
   // PICASSO: ufshc has no 'iommus', so the firmware list is reached by physical address and the
   // sheng apps_smmu window must not be touched.
@@ -418,8 +431,11 @@ void NativeUfs::adoptAndRead (unsigned level)
   write32 (hc, 0x20, 0xffffffffU);  // clear stale status
   write32 (hc, 0x60, 1);
   if (!waitSet (hc, 0x30, 0x2, 100000)) {
+    IOLog ("NativeUfs adopt: list did not arm, hcs=%08x\n", read32 (hc, 0x30));
     panic ("NATIVE_UFS adopt: request list not ready hcs=%08x", read32 (hc, 0x30));
   }
+  IOLog ("NativeUfs adopt: list armed hcs=%08x ba=%08x%08x\n", read32 (hc, 0x30),
+         read32 (hc, 0x54), read32 (hc, 0x50));
   if (level == 3) {
     panic ("NATIVE_UFS adopt: list replaced\n"
            "phys=%llx hcs=%08x->%08x\n"
@@ -676,6 +692,13 @@ void NativeUfs::adoptAndRead (unsigned level)
     }
   }
   hcsAfter = read32 (hc, 0x30);
+  // PICASSO-DIAG: the same facts through IOLog, in case the panic screen is not rendered on
+  // this board. Keep it compact enough for one screen line pair.
+  IOLog ("NativeUfs adopt: RESULT hcs %08x->%08x gpt=%06x sig=%08x %08x\n",
+         hcsBefore, hcsAfter, gptStatus, sig0, sig1);
+  IOLog ("NativeUfs adopt: RESULT inq=%06x %08x %08x %08x %08x L0 st=%06x bs=%08x last=%08x\n",
+         (inq.ocs << 16) | (inq.response << 8) | inq.scsi, inqWord[0], inqWord[1], inqWord[2],
+         inqWord[3], status[0], blockSize[0], last[0]);
   panic ("NATIVE_UFS adopt+read\n"
          "hcs %08x->%08x pwr %08x->%08x ssu=%06x\n"
          "L0 st=%06x last=%08x bs=%08x sns=%06x\n"
