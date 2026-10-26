@@ -48,6 +48,10 @@ volatile uint32_t native_ufs_matched = 0;
 // expert class. IODTPlatformExpert only ever creates IOPlatformDevice nubs, so the
 // NativeUfsRoot personality never matches on this platform and start() must accept this path.
 volatile uint32_t native_ufs_compatible_matched = 0;
+// Whether this platform routes the UFS DMA through an SMMU. Taken from the provider's own
+// 'iommus' property: the picasso ADT declares ufshc without one (only the GPU has iommus), and
+// the firmware that read the boot image already left whatever bypass it needs in place.
+static bool gUfsSmmuNeeded = true;
 volatile uint32_t native_ufs_probe_requested = 0;
 volatile uint32_t native_ufs_mapped = 0;
 volatile uint32_t native_ufs_status = 0;
@@ -967,15 +971,23 @@ static bool hostBringUp (const char **why)
   gRootDiagnostic.stage = "SMMU and request list";
   IOLog ("NativeUfs: stage %s\n", gRootDiagnostic.stage);
   if (!hostStopQueue (why)) return false;
-  smmuBypassStream (0x60, gHost.smmuMap, report, gHost.phys, kDmaBytes);
-  gHost.smmu = gHost.smmuMap->getVirtualAddress ();
-  uint32_t idr1 = read32 (gHost.smmu, 0x24);
-  gHost.cb = gHost.smmu + ((1U << (((idr1 >> 28) & 7) + 1)) + (report[0] >> 16)) * 4096;
-  if (gRootDiagnosticEnabled) {
-    gRootDiagnostic.gfsrBefore = read32 (gHost.smmu, 0x48);
-    gRootDiagnostic.fsrBefore = read32 (gHost.cb, 0x58);
-    gRootDiagnostic.smmuId2 = read32 (gHost.smmu, 0x28);
-    gRootDiagnostic.cba2r = read32 (gHost.smmu, 0x1800 + 4 * (report[0] >> 16));
+  if (gUfsSmmuNeeded) {
+    smmuBypassStream (0x60, gHost.smmuMap, report, gHost.phys, kDmaBytes);
+    gHost.smmu = gHost.smmuMap->getVirtualAddress ();
+    uint32_t idr1 = read32 (gHost.smmu, 0x24);
+    gHost.cb = gHost.smmu + ((1U << (((idr1 >> 28) & 7) + 1)) + (report[0] >> 16)) * 4096;
+    if (gRootDiagnosticEnabled) {
+      gRootDiagnostic.gfsrBefore = read32 (gHost.smmu, 0x48);
+      gRootDiagnostic.fsrBefore = read32 (gHost.cb, 0x58);
+      gRootDiagnostic.smmuId2 = read32 (gHost.smmu, 0x28);
+      gRootDiagnostic.cba2r = read32 (gHost.smmu, 0x1800 + 4 * (report[0] >> 16));
+    }
+  } else {
+    // PICASSO: the ADT gives ufshc no 'iommus', so the controller DMAs to physical addresses and
+    // the firmware that loaded the boot image already owns any SMMU state. Programming the
+    // sheng apps_smmu window here (0x15000000, stream 0x60) reaches an unrelated block and its
+    // command-queue sync never acknowledges.
+    IOLog ("NativeUfs: ufshc declares no iommus, using direct physical DMA at %llx\n", gHost.phys);
   }
   if (!hostStartQueue (why)) return false;
   gRootDiagnostic.stage = "NOP OUT";
@@ -1803,6 +1815,13 @@ bool NativeUfs::start (IOService *provider)
   if (!expert) {
     IOLog ("NativeUfs: starting from the compatible-matched platform device\n");
   }
+  gUfsSmmuNeeded = provider->getProperty ("iommus") != nullptr;
+  unsigned smmuOverride = 1;
+  if (PE_parse_boot_argn ("native-ufs-smmu", &smmuOverride, sizeof (smmuOverride))) {
+    gUfsSmmuNeeded = smmuOverride != 0;
+  }
+  IOLog ("NativeUfs: iommus=%u smmu=%u\n", provider->getProperty ("iommus") ? 1 : 0,
+         gUfsSmmuNeeded ? 1 : 0);
   unsigned diagnostic = 0;
   PE_parse_boot_argn ("native-ufs-diagnostics", &diagnostic, sizeof (diagnostic));
   gRootDiagnosticEnabled = diagnostic == 1;
