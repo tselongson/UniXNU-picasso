@@ -928,6 +928,7 @@ static bool hostBringUp (const char **why)
     return true;
   }
   gRootDiagnostic.stage = "controller map";
+  IOLog ("NativeUfs: stage %s\n", gRootDiagnostic.stage);
   gHost.hc = mapPhys (UFS_HC_BASE, UFS_HC_SIZE, gHost.hcMap);
   if (!gHost.hc) {
     *why = "controller map";
@@ -940,6 +941,7 @@ static bool hostBringUp (const char **why)
     gRootDiagnostic.hce = read32 (gHost.hc, 0x34);
   }
   gRootDiagnostic.stage = "DMA allocation";
+  IOLog ("NativeUfs: stage %s\n", gRootDiagnostic.stage);
   gHost.dma = IOBufferMemoryDescriptor::inTaskWithOptions (
     kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
     static_cast<IOOptionBits> (kIOMemoryMapperNone),
@@ -963,6 +965,7 @@ static bool hostBringUp (const char **why)
   cacheCivac (gHost.virt, kDmaBytes);
   uint32_t report[3] = { 0, 0, 0 };
   gRootDiagnostic.stage = "SMMU and request list";
+  IOLog ("NativeUfs: stage %s\n", gRootDiagnostic.stage);
   if (!hostStopQueue (why)) return false;
   smmuBypassStream (0x60, gHost.smmuMap, report, gHost.phys, kDmaBytes);
   gHost.smmu = gHost.smmuMap->getVirtualAddress ();
@@ -976,6 +979,7 @@ static bool hostBringUp (const char **why)
   }
   if (!hostStartQueue (why)) return false;
   gRootDiagnostic.stage = "NOP OUT";
+  IOLog ("NativeUfs: stage %s\n", gRootDiagnostic.stage);
   // NOP OUT proves the transport before touching the SCSI layer.
   if (hostNop () != kIOReturnSuccess) {
     gHost.ready = false;
@@ -984,6 +988,7 @@ static bool hostBringUp (const char **why)
   }
   uint32_t power = 0;
   gRootDiagnostic.stage = "power mode query";
+  IOLog ("NativeUfs: stage %s\n", gRootDiagnostic.stage);
   if (hostQueryRead (0x03, 0x02, &power) != kIOReturnSuccess) {
     gHost.ready = false;
     *why = "power mode query";
@@ -992,6 +997,7 @@ static bool hostBringUp (const char **why)
   gRootDiagnostic.power = power;
   if ((power & 0xff) != 0x11) {
     gRootDiagnostic.stage = "device wake";
+    IOLog ("NativeUfs: stage %s\n", gRootDiagnostic.stage);
     // START STOP UNIT, power condition ACTIVE, to the UFS Device well-known LU (as Linux resumes).
     uint8_t ssu[6] = { 0x1b, 0, 0, 0, 0x10, 0 };
     uint32_t scsi = 0;
@@ -1003,6 +1009,7 @@ static bool hostBringUp (const char **why)
     IOSleep (50);
   }
   gRootDiagnostic.stage = "LUN ready";
+  IOLog ("NativeUfs: stage %s\n", gRootDiagnostic.stage);
   for (unsigned attempt = 0; attempt < 20; attempt++) {
     uint8_t tur[6] = { 0, 0, 0, 0, 0, 0 };
     uint32_t scsi = 0;
