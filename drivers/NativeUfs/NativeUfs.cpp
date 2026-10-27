@@ -2204,10 +2204,28 @@ bool NativeUfs::start (IOService *provider)
 }
 
 // Boot the root image's windows as block devices. Soft-fails (logs, publishes nothing).
+// PICASSO-DIAG: a boot argument, not a rebuild, selects how far root publication gets before it
+// panics. The panic screen always renders, so it answers "was this step reached" even if IOLog
+// has stopped producing output. Change native-ufs-marker in the boot image's command line and
+// reboot; each step costs one boot instead of one build.
+static int gUfsMarker = -1;
+
+static void ufsMarker (int step, const char *label)
+{
+  if (gUfsMarker == step) {
+    panic ("UFS MARK %d reached: %s", step, label);
+  }
+}
+
 bool NativeUfs::startRoot (IOService *provider)
 {
   const char *why = "";
   native_ufs_root_step = 1;
+  int marker = -1;
+  if (PE_parse_boot_argn ("native-ufs-marker", &marker, sizeof (marker))) {
+    gUfsMarker = marker;
+    IOLog ("NativeUfs: marker %d\n", marker);
+  }
   IOLog ("NativeUfs: startRoot enter (clock=%llu)\n", mach_absolute_time ());
   if (!hostBringUp (&why)) {
     rootDiagnosticFailure (why);
@@ -2261,7 +2279,9 @@ bool NativeUfs::startRoot (IOService *provider)
       gRootDiagnostic.windowBytes = layout->window[index].size;
       IOLog ("NativeUfs: prepare %u enter offset=%llx size=%llx\n", index,
              layout->window[index].offset, layout->window[index].size);
+      ufsMarker (1, "before OSTypeAlloc");
       NativeUfsBlock *device = OSTypeAlloc (NativeUfsBlock);
+      ufsMarker (2, "after OSTypeAlloc");
       IOLog ("NativeUfs: prepare %u allocated %llx\n", index,
              static_cast<uint64_t> (reinterpret_cast<uintptr_t> (device)));
       gPendingDevice[index] = device;
@@ -2269,13 +2289,16 @@ bool NativeUfs::startRoot (IOService *provider)
       gPendingUuid[index][0] = 0;
       uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
       bool inited = device && device->init (static_cast<OSDictionary *> (nullptr));
+      ufsMarker (3, "after init");
       IOLog ("NativeUfs: prepare %u init=%u\n", index, inited ? 1 : 0);
       if (!inited) return false;
       bool configured = device->configure (layout->window[index].name, absolute, layout->window[index].size);
+      ufsMarker (4, "after configure");
       IOLog ("NativeUfs: prepare %u configure=%u\n", index, configured ? 1 : 0);
       if (!configured) return false;
       gRootDiagnostic.stage = "root window attachment";
       bool attached = device->attach (owner);
+      ufsMarker (5, "after attach");
       IOLog ("NativeUfs: prepare %u attach=%u\n", index, attached ? 1 : 0);
       if (!attached) return false;
       gPendingAttached[index] = true;
@@ -2285,6 +2308,7 @@ bool NativeUfs::startRoot (IOService *provider)
     }
     bool validate () {
       IOLog ("NativeUfs: validate enter pending=%u\n", gPending);
+      ufsMarker (6, "validate enter");
       gRootDiagnostic.stage = "signed window identities";
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Identity);
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
@@ -2300,6 +2324,7 @@ bool NativeUfs::startRoot (IOService *provider)
     }
     bool schedule () {
       IOLog ("NativeUfs: schedule enter\n");
+      ufsMarker (7, "schedule enter");
       gRootDiagnostic.stage = "root publisher thread";
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Schedule);
       gRootDiagnostic.publicationWindow = 0xffffffff;
