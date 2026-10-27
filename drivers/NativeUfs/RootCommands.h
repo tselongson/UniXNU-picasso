@@ -71,7 +71,7 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   words[6] = (512U >> 2) | ((kRspOffset >> 2) << 16);
   // DW7: PRDT length and offset are in BYTES (UfsDxe: SgSegs * sizeof(UfsPrdt)),
   // unlike the response UPIU length/offset above, which are in dwords.
-  words[7] = (dataBytes ? 16U : 0U) | (kPrdtOffset << 16);
+  words[7] = (dataBytes ? 1U : 0U) | (kPrdtOffset << 16);
   if (dataBytes) {
     uint64_t dataPhys = gHost.phys + kDataOffset;
     uint32_t *prd = reinterpret_cast<uint32_t *> (gHost.virt + kUcdOffset + kPrdtOffset);

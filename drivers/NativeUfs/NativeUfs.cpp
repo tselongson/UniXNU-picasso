@@ -475,7 +475,7 @@ void NativeUfs::adoptAndRead (unsigned level)
     *reinterpret_cast<uint32_t *> (utrd + 20) = static_cast<uint32_t> (ucdPhys >> 32);
     *reinterpret_cast<uint32_t *> (utrd + 24) = (512U >> 2) | ((rspOffset >> 2) << 16);   // response length | offset (dwords)
     uint32_t prdEntries = length ? 1U : 0U;
-    *reinterpret_cast<uint32_t *> (utrd + 28) = (prdEntries * 16U) | (prdtOffset << 16);
+    *reinterpret_cast<uint32_t *> (utrd + 28) = prdEntries | (prdtOffset << 16);
     if (length) {
       uint64_t dataPhys = phys + dataOffset;
       uint8_t *prd = ucd + prdtOffset;
