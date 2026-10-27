@@ -417,7 +417,7 @@ void NativeUfs::adoptAndRead (unsigned level)
   // data-in write into it resets the SoC, while a descriptor in our own buffer is never fetched
   // at all (probe=12 stalls at NOP OUT). So keep the descriptor where the controller can read it
   // and point the PRDT at a buffer we allocate ourselves.
-  OSSharedPtr<IOBufferMemoryDescriptor> adoptData;
+  IOBufferMemoryDescriptor *adoptData = nullptr;
   uint8_t *dmaVirt = virt + dataOffset;
   uint64_t dmaPhys = phys + dataOffset;
   if (level == 4 || level == 5) {
