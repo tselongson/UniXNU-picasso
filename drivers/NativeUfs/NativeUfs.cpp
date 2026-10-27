@@ -1185,8 +1185,11 @@ static bool hostBringUp (const char **why)
     *why = "DMA address/contiguity";
     return false;
   }
-  bzero (gHost.virt, kDataOffset);
-  cacheCivac (gHost.virt, kDataOffset);
+  // The firmware region is mapped as device memory, where bzero's 16-byte vector stores fault with
+  // "Unaligned kernel data abort" (_bzero + 0x44 in the panic). Word stores are fine there, which is
+  // what the adopt path has been using all along.
+  zero32 (gHost.virt, kDataOffset);
+  cacheClean (gHost.virt, kDataOffset);
   bzero (gHost.dataVirt, kDataMax);
   cacheCivac (gHost.dataVirt, kDataMax);
   uint32_t report[3] = { 0, 0, 0 };
