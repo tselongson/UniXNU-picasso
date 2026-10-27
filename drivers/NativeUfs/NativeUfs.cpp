@@ -567,7 +567,11 @@ void NativeUfs::adoptAndRead (unsigned level)
   // (ufshcd_set_dev_pwr_mode); no user data is touched.
   uint32_t powerBefore = 0, powerAfter = 0, queryResp = 0, ignoredValue = 0;
   uint32_t wakeStatus = 0xee;
-  if (level == 5 || level == 9) {
+  // PICASSO: level 4 proved that a SCSI command completes (TEST UNIT READY returned ocs=0 and the
+  // controller wrote a 0x21 RESPONSE UPIU). Level 5 then wedged on the very next step, the power
+  // mode Query request, which has never been exercised here. Keep the query on level 9 only so
+  // level 5 goes straight to the data commands the root path actually needs.
+  if (level == 9) {
     query (1, 0x03, 0x02, &powerBefore, &queryResp);     // READ ATTRIBUTE bCurrentPowerMode
     uint8_t ssu[6] = { 0x1b, 0, 0, 0, 0x10, 0 };          // START STOP UNIT, power condition ACTIVE
     UfsResult w = command (0xd0, ssu, 6, false, 0);
