@@ -460,13 +460,13 @@ void NativeUfs::adoptAndRead (unsigned level)
     }
     uint64_t ucdPhys = phys + ucdOffset;
     uint32_t direction = length ? (toHost ? 2U : 1U) : 0U;
-    *reinterpret_cast<uint32_t *> (utrd + 0) = 0x10000000U | (direction << 25);
+    *reinterpret_cast<uint32_t *> (utrd + 0) = (direction << 25) | 0x01000000U;
     *reinterpret_cast<uint32_t *> (utrd + 8) = 0x0fU;     // OCS: not completed
     *reinterpret_cast<uint32_t *> (utrd + 16) = static_cast<uint32_t> (ucdPhys);
     *reinterpret_cast<uint32_t *> (utrd + 20) = static_cast<uint32_t> (ucdPhys >> 32);
     *reinterpret_cast<uint32_t *> (utrd + 24) = (512U >> 2) | ((rspOffset >> 2) << 16);   // response length | offset (dwords)
     uint32_t prdEntries = length ? 1U : 0U;
-    *reinterpret_cast<uint32_t *> (utrd + 28) = prdEntries | ((prdtOffset >> 2) << 16);
+    *reinterpret_cast<uint32_t *> (utrd + 28) = (prdEntries * 16U) | (prdtOffset << 16);
     if (length) {
       uint64_t dataPhys = phys + dataOffset;
       uint8_t *prd = ucd + prdtOffset;
@@ -520,12 +520,12 @@ void NativeUfs::adoptAndRead (unsigned level)
     }
     ucd[3] = 1;                     // task tag
     uint64_t ucdPhys = phys + ucdOffset;
-    *reinterpret_cast<uint32_t *> (utrd + 0) = 0x10000000U;
+    *reinterpret_cast<uint32_t *> (utrd + 0) = 0x01000000U;
     *reinterpret_cast<uint32_t *> (utrd + 8) = 0x0fU;
     *reinterpret_cast<uint32_t *> (utrd + 16) = static_cast<uint32_t> (ucdPhys);
     *reinterpret_cast<uint32_t *> (utrd + 20) = static_cast<uint32_t> (ucdPhys >> 32);
     *reinterpret_cast<uint32_t *> (utrd + 24) = (512U >> 2) | ((rspOffset >> 2) << 16);
-    *reinterpret_cast<uint32_t *> (utrd + 28) = (prdtOffset >> 2) << 16;
+    *reinterpret_cast<uint32_t *> (utrd + 28) = prdtOffset << 16;
     cacheClean (virt, 16384);
     write32 (hc, 0x20, 0xffffffffU);
     write32 (hc, 0x58, 1);
