@@ -690,6 +690,50 @@ void NativeUfs::adoptAndRead (unsigned level)
     if (g.ocs == 0 && g.scsi == 0) {
       sig0 = *reinterpret_cast<uint32_t *> (virt + dataOffset);
       sig1 = *reinterpret_cast<uint32_t *> (virt + dataOffset + 4);
+      // PICASSO-DIAG: a valid GPT header also carries the partition geometry this board still
+      // needs. board.toml's [userdata] is 0x0/0x0 because the numbers were never measured, and
+      // a guessed geometry would put an 8 GiB image at the wrong offset. Print the entry array
+      // instead, so one boot answers both "is the transport alive" and "where is userdata".
+      if (sig0 == 0x45464920U && sig1 == 0x50415254U) {
+        auto le32 = [] (const uint8_t *at) {
+          return uint32_t (at[0]) | (uint32_t (at[1]) << 8) | (uint32_t (at[2]) << 16) | (uint32_t (at[3]) << 24);
+        };
+        auto le64 = [&] (const uint8_t *at) {
+          return uint64_t (le32 (at)) | (uint64_t (le32 (at + 4)) << 32);
+        };
+        const uint8_t *hdr = virt + dataOffset;
+        uint32_t entryLba = le32 (hdr + 72);
+        uint32_t entryCount = le32 (hdr + 80);
+        uint32_t entrySize = le32 (hdr + 84);
+        IOLog ("NativeUfs adopt: gpt entries at %u count=%u size=%u\n", entryLba, entryCount, entrySize);
+        if (entryLba && entrySize >= 128 && entrySize <= 512 && entryCount) {
+          uint8_t readEntries[10] = { 0x28, 0, static_cast<uint8_t> (entryLba >> 24),
+                                      static_cast<uint8_t> (entryLba >> 16),
+                                      static_cast<uint8_t> (entryLba >> 8),
+                                      static_cast<uint8_t> (entryLba), 0, 0, 1, 0 };
+          UfsResult e = command (0, readEntries, 10, true, blockSize[0]);
+          if (e.ocs == 0 && e.scsi == 0) {
+            for (unsigned index = 0; index < entryCount && index < 8; index++) {
+              const uint8_t *at = virt + dataOffset + index * entrySize;
+              bool used = false;
+              for (unsigned byte = 0; byte < 16; byte++) used = used || at[byte] != 0;
+              if (!used) continue;
+              char name[17];
+              unsigned chars = 0;
+              for (; chars < 16; chars++) {
+                uint8_t low = at[56 + chars * 2];
+                if (!low) break;
+                name[chars] = (low >= 0x20 && low < 0x7f) ? char (low) : '.';
+              }
+              name[chars] = 0;
+              IOLog ("NativeUfs adopt: part[%u] %llx..%llx %s\n", index,
+                     le64 (at + 32), le64 (at + 40), name);
+            }
+          } else {
+            IOLog ("NativeUfs adopt: gpt entry read failed ocs=%u scsi=%u\n", e.ocs, e.scsi);
+          }
+        }
+      }
     }
   }
   hcsAfter = read32 (hc, 0x30);
