@@ -410,10 +410,7 @@ void NativeUfs::adoptAndRead (unsigned level)
   cacheClean (virt, 16384);
   // Layout: [0,4096) request list (slot 0 used), [4096,5120) command + response UPIU +
   // PRDT, [8192,16384) data.
-  // PICASSO: the descriptor and the response UPIU live in the first two pages of the adopted
-  // region and both work, but a data-in command at +8192 resets the SoC, which points at
-  // the firmware's mapping ending before that page. Keep the data buffer beside the UTRD.
-  const uint32_t ucdOffset = 4096, rspOffset = 512, prdtOffset = 1024, dataOffset = 512;
+  const uint32_t ucdOffset = 4096, rspOffset = 512, prdtOffset = 1024, dataOffset = 8192;
   uint32_t hcsBefore = read32 (hc, 0x30);
   uint32_t doorbellBefore = read32 (hc, 0x58);
   IOLog ("NativeUfs adopt: hcs=%08x doorbell=%08x doorbell2=%08x\n",
@@ -458,7 +455,7 @@ void NativeUfs::adoptAndRead (unsigned level)
     uint8_t *ucd = virt + ucdOffset;
     zero32 (utrd, 32);
     zero32 (ucd, 1024 + 16);
-    zero32 (virt + dataOffset, 2048);
+    zero32 (virt + dataOffset, 8192);
     ucd[0] = 0x01;                  // COMMAND UPIU
     ucd[1] = toHost ? 0x40 : 0x00;  // flags: read
     ucd[2] = lun;
@@ -469,13 +466,13 @@ void NativeUfs::adoptAndRead (unsigned level)
     }
     uint64_t ucdPhys = phys + ucdOffset;
     uint32_t direction = length ? (toHost ? 2U : 1U) : 0U;
-    *reinterpret_cast<uint32_t *> (utrd + 0) = (direction << 25) | 0x01000000U;
+    *reinterpret_cast<uint32_t *> (utrd + 0) = 0x10000000U | (direction << 25);
     *reinterpret_cast<uint32_t *> (utrd + 8) = 0x0fU;     // OCS: not completed
     *reinterpret_cast<uint32_t *> (utrd + 16) = static_cast<uint32_t> (ucdPhys);
     *reinterpret_cast<uint32_t *> (utrd + 20) = static_cast<uint32_t> (ucdPhys >> 32);
     *reinterpret_cast<uint32_t *> (utrd + 24) = (512U >> 2) | ((rspOffset >> 2) << 16);   // response length | offset (dwords)
     uint32_t prdEntries = length ? 1U : 0U;
-    *reinterpret_cast<uint32_t *> (utrd + 28) = prdEntries | (prdtOffset << 16);
+    *reinterpret_cast<uint32_t *> (utrd + 28) = prdEntries | ((prdtOffset >> 2) << 16);
     if (length) {
       uint64_t dataPhys = phys + dataOffset;
       uint8_t *prd = ucd + prdtOffset;
@@ -538,12 +535,12 @@ void NativeUfs::adoptAndRead (unsigned level)
     }
     ucd[3] = 1;                     // task tag
     uint64_t ucdPhys = phys + ucdOffset;
-    *reinterpret_cast<uint32_t *> (utrd + 0) = 0x01000000U;
+    *reinterpret_cast<uint32_t *> (utrd + 0) = 0x10000000U;
     *reinterpret_cast<uint32_t *> (utrd + 8) = 0x0fU;
     *reinterpret_cast<uint32_t *> (utrd + 16) = static_cast<uint32_t> (ucdPhys);
     *reinterpret_cast<uint32_t *> (utrd + 20) = static_cast<uint32_t> (ucdPhys >> 32);
     *reinterpret_cast<uint32_t *> (utrd + 24) = (512U >> 2) | ((rspOffset >> 2) << 16);
-    *reinterpret_cast<uint32_t *> (utrd + 28) = prdtOffset << 16;
+    *reinterpret_cast<uint32_t *> (utrd + 28) = (prdtOffset >> 2) << 16;
     cacheClean (virt, 16384);
     write32 (hc, 0x20, 0xffffffffU);
     write32 (hc, 0x58, 1);

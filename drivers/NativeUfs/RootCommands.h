@@ -61,17 +61,12 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   for (unsigned index = 0; index < 8; index++) {
     words[index] = 0;
   }
-  // DW0: direction bits only. 0x10000000 is UTP_NATIVE_UFS_COMMAND, which makes the
-  // controller run a native UPIU and skip the SCSI data phase entirely (picasso UfsDxe
-  // sets UTP_SCSI_COMMAND = 0x00000000 and only ORs UTP_REQ_DESC_INT_CMD).
-  words[0] = (direction << 25) | 0x01000000U;
+  words[0] = 0x10000000U | (direction << 25);
   words[2] = 0x0fU;
   words[4] = static_cast<uint32_t> (ucdPhys);
   words[5] = static_cast<uint32_t> (ucdPhys >> 32);
   words[6] = (512U >> 2) | ((kRspOffset >> 2) << 16);
-  // DW7: PRDT length and offset are in BYTES (UfsDxe: SgSegs * sizeof(UfsPrdt)),
-  // unlike the response UPIU length/offset above, which are in dwords.
-  words[7] = (dataBytes ? 1U : 0U) | (kPrdtOffset << 16);
+  words[7] = (dataBytes ? 1U : 0U) | ((kPrdtOffset >> 2) << 16);
   if (dataBytes) {
     uint64_t dataPhys = gHost.phys + kDataOffset;
     uint32_t *prd = reinterpret_cast<uint32_t *> (gHost.virt + kUcdOffset + kPrdtOffset);
