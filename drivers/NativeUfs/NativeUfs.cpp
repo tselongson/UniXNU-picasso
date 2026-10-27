@@ -2213,7 +2213,17 @@ static int gUfsMarker = -1;
 static void ufsMarker (int step, const char *label)
 {
   if (gUfsMarker == step) {
-    panic ("UFS MARK %d reached: %s", step, label);
+    IOLog ("NativeUfs: marker %d reached: %s\n", step, label);
+    // PSCI SYSTEM_RESET rather than panic: the device returns to the bootloader by itself, so the
+    // host can tell "reached" from "hung" with `fastboot devices` and no screen photograph.
+    __asm__ volatile (
+      "movz w0, #0x0009\n"
+      "movk w0, #0x8400, lsl #16\n"
+      "mov x1, xzr\n"
+      "mov x2, xzr\n"
+      "mov x3, xzr\n"
+      "smc #0\n"
+      ::: "x0", "x1", "x2", "x3", "memory");
   }
 }
 
