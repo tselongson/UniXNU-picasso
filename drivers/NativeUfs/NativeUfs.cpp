@@ -1486,6 +1486,11 @@ extern "C" unsigned native_ufs_store_gpt_check (void)
 // the virtio path.
 class NativeUfsBlock : public IOBlockStorageDevice {
   OSDeclareDefaultStructors (NativeUfsBlock)
+  // PICASSO-DIAG: OSTypeAlloc never returns for this class. A member with a constructor runs
+  // after the base constructor and before the constructor body, so its log splits the two.
+  struct CtorProbe {
+    CtorProbe () { IOLog ("NativeUfs: block ctor base done\n"); }
+  } ctorProbe;
   uint64_t absolute = 0;      // byte offset of the window on LUN 0
   uint64_t bytes = 0;
   char label[32] = {};
@@ -2257,7 +2262,8 @@ bool NativeUfs::startRoot (IOService *provider)
       IOLog ("NativeUfs: prepare %u enter offset=%llx size=%llx\n", index,
              layout->window[index].offset, layout->window[index].size);
       NativeUfsBlock *device = OSTypeAlloc (NativeUfsBlock);
-      IOLog ("NativeUfs: prepare %u allocated %p\n", index, device);
+      IOLog ("NativeUfs: prepare %u allocated %llx\n", index,
+             static_cast<uint64_t> (reinterpret_cast<uintptr_t> (device)));
       gPendingDevice[index] = device;
       gPendingAttached[index] = false;
       gPendingUuid[index][0] = 0;
