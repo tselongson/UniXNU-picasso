@@ -447,6 +447,52 @@ def main():
             description += f', panic screen ({len(code):#x} bytes at {entry:#x}; common funnel at {common:#x})'
         except SystemExit as failure:
             description += f', panic screen DISABLED ({failure})'
+    # This kernel's nlist reports pre-slide addresses, so the linker resolved the driver's
+    # IOBlockStorageDevice references one slide too high, into __PLK_TEXT_EXEC pages that are never
+    # populated: the call executes zeroes ("Undefined kernel instruction, instr=0"). A bindings
+    # archive cannot win against a symbol the kernel already defines, so redirect the branches
+    # instead: any branch whose target holds zeroes but whose target one slide lower holds code is
+    # pointed at the real function.
+    import json as _json
+    slide = -0x1000000
+    plan_path = args.kernel.with_suffix('.json')
+    if plan_path.is_file():
+        try:
+            slide = int(_json.loads(plan_path.read_text())['slide'])
+        except (ValueError, KeyError, _json.JSONDecodeError):
+            pass
+    def safe_word(va):
+        try:
+            return word(va)
+        except SystemExit:
+            return None
+
+    stale = {}
+    for name, va in kernel_names.items():
+        if not name.startswith(('__ZN20IOBlockStorageDevice', '__ZNK20IOBlockStorageDevice')):
+            continue
+        current = safe_word(va)
+        real = safe_word(va + slide)
+        if current is None or real is None:
+            continue
+        if current or not real:
+            continue
+        stale[va] = va + slide
+    redirected = 0
+    if stale:
+        for vmaddr, vmsize, fileoff, filesize in SEGMENTS:
+            for va in range(vmaddr, vmaddr + filesize, 4):
+                insn = word(va)
+                if (insn & 0xFC000000) not in (0x94000000, 0x14000000):
+                    continue
+                immediate = insn & 0x3FFFFFF
+                if immediate & 0x2000000:
+                    immediate -= 0x4000000
+                target = va + immediate * 4
+                if target in stale:
+                    struct.pack_into('<I', data, file_offset(va), branch(va, stale[target]))
+                    redirected += 1
+    description += f', {redirected} stale IOStorageFamily calls redirected'
     args.kernel.write_bytes(data)
     print(f'patched {args.kernel.name}: stage 1 blue bar, stage 2 magenta bar, {description}')
 
