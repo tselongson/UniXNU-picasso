@@ -2254,21 +2254,31 @@ bool NativeUfs::startRoot (IOService *provider)
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Prepare);
       gRootDiagnostic.publicationWindow = index;
       gRootDiagnostic.windowBytes = layout->window[index].size;
+      IOLog ("NativeUfs: prepare %u enter offset=%llx size=%llx\n", index,
+             layout->window[index].offset, layout->window[index].size);
       NativeUfsBlock *device = OSTypeAlloc (NativeUfsBlock);
+      IOLog ("NativeUfs: prepare %u allocated %p\n", index, device);
       gPendingDevice[index] = device;
       gPendingAttached[index] = false;
       gPendingUuid[index][0] = 0;
       uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
-      if (!device || !device->init (static_cast<OSDictionary *> (nullptr)) ||
-          !device->configure (layout->window[index].name, absolute, layout->window[index].size)) return false;
+      bool inited = device && device->init (static_cast<OSDictionary *> (nullptr));
+      IOLog ("NativeUfs: prepare %u init=%u\n", index, inited ? 1 : 0);
+      if (!inited) return false;
+      bool configured = device->configure (layout->window[index].name, absolute, layout->window[index].size);
+      IOLog ("NativeUfs: prepare %u configure=%u\n", index, configured ? 1 : 0);
+      if (!configured) return false;
       gRootDiagnostic.stage = "root window attachment";
-      if (!device->attach (owner)) return false;
+      bool attached = device->attach (owner);
+      IOLog ("NativeUfs: prepare %u attach=%u\n", index, attached ? 1 : 0);
+      if (!attached) return false;
       gPendingAttached[index] = true;
       ++gPending;
       gRootDiagnostic.prepared = gPending;
       return true;
     }
     bool validate () {
+      IOLog ("NativeUfs: validate enter pending=%u\n", gPending);
       gRootDiagnostic.stage = "signed window identities";
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Identity);
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
@@ -2283,6 +2293,7 @@ bool NativeUfs::startRoot (IOService *provider)
 #endif
     }
     bool schedule () {
+      IOLog ("NativeUfs: schedule enter\n");
       gRootDiagnostic.stage = "root publisher thread";
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Schedule);
       gRootDiagnostic.publicationWindow = 0xffffffff;
