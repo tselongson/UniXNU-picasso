@@ -1831,6 +1831,29 @@ static unsigned gPending;
 static bool gPendingAttached[4];
 static char gPendingUuid[4][37];
 static UfsRootPlan gPublicationPlan;
+// PICASSO-DIAG: a boot argument, not a rebuild, selects how far root publication gets before it
+// panics. The panic screen always renders, so it answers "was this step reached" even if IOLog
+// has stopped producing output. Change native-ufs-marker in the boot image's command line and
+// reboot; each step costs one boot instead of one build.
+static int gUfsMarker = -1;
+
+static void ufsMarker (int step, const char *label)
+{
+  if (gUfsMarker == step) {
+    IOLog ("NativeUfs: marker %d reached: %s\n", step, label);
+    // PSCI SYSTEM_RESET rather than panic: the device returns to the bootloader by itself, so the
+    // host can tell "reached" from "hung" with `fastboot devices` and no screen photograph.
+    __asm__ volatile (
+      "movz w0, #0x0009\n"
+      "movk w0, #0x8400, lsl #16\n"
+      "mov x1, xzr\n"
+      "mov x2, xzr\n"
+      "mov x3, xzr\n"
+      "smc #0\n"
+      ::: "x0", "x1", "x2", "x3", "memory");
+  }
+}
+
 static NativeUfs *gPendingProvider;
 
 static bool mediaWithUuidExists (const char *uuid, NativeUfsBlock *window)
@@ -1903,6 +1926,14 @@ static void publishThread (void *, wait_result_t)
       gRootDiagnostic.stage = "root window service start";
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Start);
       gRootDiagnostic.publicationWindow = index;
+      // The attach happens here, not in prepare(): prepare runs inside NativeUfs::start() with the
+      // IOKit registry busy, and attaching a new IOService then deadlocks.
+      if (!device->attach (gPendingProvider)) {
+        IOLog ("NativeUfs: attach failed for window %u\n", index);
+        return false;
+      }
+      gPendingAttached[index] = true;
+      ufsMarker (5, "after attach");
       if (!device->start (gPendingProvider)) return false;
       native_ufs_blocks_published = native_ufs_blocks_published + 1;
       IOLog ("NativeUfs: published %s\n", device->windowLabel ());
@@ -2204,28 +2235,6 @@ bool NativeUfs::start (IOService *provider)
 }
 
 // Boot the root image's windows as block devices. Soft-fails (logs, publishes nothing).
-// PICASSO-DIAG: a boot argument, not a rebuild, selects how far root publication gets before it
-// panics. The panic screen always renders, so it answers "was this step reached" even if IOLog
-// has stopped producing output. Change native-ufs-marker in the boot image's command line and
-// reboot; each step costs one boot instead of one build.
-static int gUfsMarker = -1;
-
-static void ufsMarker (int step, const char *label)
-{
-  if (gUfsMarker == step) {
-    IOLog ("NativeUfs: marker %d reached: %s\n", step, label);
-    // PSCI SYSTEM_RESET rather than panic: the device returns to the bootloader by itself, so the
-    // host can tell "reached" from "hung" with `fastboot devices` and no screen photograph.
-    __asm__ volatile (
-      "movz w0, #0x0009\n"
-      "movk w0, #0x8400, lsl #16\n"
-      "mov x1, xzr\n"
-      "mov x2, xzr\n"
-      "mov x3, xzr\n"
-      "smc #0\n"
-      ::: "x0", "x1", "x2", "x3", "memory");
-  }
-}
 
 bool NativeUfs::startRoot (IOService *provider)
 {
@@ -2307,10 +2316,10 @@ bool NativeUfs::startRoot (IOService *provider)
       IOLog ("NativeUfs: prepare %u configure=%u\n", index, configured ? 1 : 0);
       if (!configured) return false;
       gRootDiagnostic.stage = "root window attachment";
-      bool attached = device->attach (owner);
-      ufsMarker (5, "after attach");
-      IOLog ("NativeUfs: prepare %u attach=%u\n", index, attached ? 1 : 0);
-      if (!attached) return false;
+      // attach() is deliberately NOT done here. This runs inside NativeUfs::start(), where the
+      // IOKit registry is busy, and attaching a new IOService while it is busy deadlocks. The
+      // publisher thread performs the attach immediately before starting the device.
+      IOLog ("NativeUfs: prepare %u configured, attach deferred to the publisher\n", index);
       gPendingAttached[index] = true;
       ++gPending;
       gRootDiagnostic.prepared = gPending;
