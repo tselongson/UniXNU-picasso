@@ -410,7 +410,10 @@ void NativeUfs::adoptAndRead (unsigned level)
   cacheClean (virt, 16384);
   // Layout: [0,4096) request list (slot 0 used), [4096,5120) command + response UPIU +
   // PRDT, [8192,16384) data.
-  const uint32_t ucdOffset = 4096, rspOffset = 512, prdtOffset = 1024, dataOffset = 8192;
+  // PICASSO: the descriptor and the response UPIU live in the first two pages of the adopted
+  // region and both work, but a data-in command at +8192 resets the SoC, which points at
+  // the firmware's mapping ending before that page. Keep the data buffer beside the UTRD.
+  const uint32_t ucdOffset = 4096, rspOffset = 512, prdtOffset = 1024, dataOffset = 512;
   uint32_t hcsBefore = read32 (hc, 0x30);
   uint32_t doorbellBefore = read32 (hc, 0x58);
   IOLog ("NativeUfs adopt: hcs=%08x doorbell=%08x doorbell2=%08x\n",
@@ -455,7 +458,7 @@ void NativeUfs::adoptAndRead (unsigned level)
     uint8_t *ucd = virt + ucdOffset;
     zero32 (utrd, 32);
     zero32 (ucd, 1024 + 16);
-    zero32 (virt + dataOffset, 8192);
+    zero32 (virt + dataOffset, 2048);
     ucd[0] = 0x01;                  // COMMAND UPIU
     ucd[1] = toHost ? 0x40 : 0x00;  // flags: read
     ucd[2] = lun;
@@ -593,6 +596,20 @@ void NativeUfs::adoptAndRead (unsigned level)
            "rsp=%08x %08x",
            t.ocs, t.response, t.scsi, phys, hcsBefore, read32 (hc, 0x30), smmuReport[0], smmuReport[1],
            read32 (hc, 0x20), read32 (hc, 0x58), read32 (hc, 0x60), getBe32 (rsp0), getBe32 (rsp0 + 4));
+  }
+  if (level == 5) {
+    uint8_t rc10[10] = { 0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    IOLog ("NativeUfs adopt: capacity probe, data at %x\n", dataOffset);
+    UfsResult c = command (0, rc10, 10, true, 8);
+    const uint8_t *buf = virt + dataOffset;
+    panic ("NATIVE_UFS adopt: READ CAPACITY lun0\n"
+           "ocs=%x resp=%02x scsi=%02x seg=%x\n"
+           "last=%08x bs=%08x\n"
+           "data=%08x %08x %08x %08x\n"
+           "hcs=%08x is=%08x db=%08x",
+           c.ocs, c.response, c.scsi, c.seg, getBe32 (buf), getBe32 (buf + 4),
+           getBe32 (buf), getBe32 (buf + 4), getBe32 (buf + 8), getBe32 (buf + 12),
+           read32 (hc, 0x30), read32 (hc, 0x20), read32 (hc, 0x58));
   }
   uint32_t hcsAfter = 0;
   const unsigned maxLun = 6;
