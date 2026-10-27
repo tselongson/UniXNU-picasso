@@ -92,7 +92,13 @@ if not kernel_path.is_file():
     # the real bindings.
     empty = OUT / 'libUfsBindings.a'
     empty.unlink(missing_ok=True)
-    subprocess.run(['xcrun', 'ar', 'rcs', str(empty)], check=True)
+    # ar refuses an empty member list, so give it one symbol-free object.
+    stub_source = OUT / 'empty.c'
+    stub_object = OUT / 'empty.o'
+    stub_source.write_text('')
+    subprocess.run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-c', str(stub_source),
+                    '-o', str(stub_object)], check=True)
+    subprocess.run(['xcrun', 'ar', 'rcs', str(empty), str(stub_object)], check=True)
     print(f'picasso UFS bindings: no prelinked candidate at {kernel_path}, emitted an empty archive')
     raise SystemExit(0)
 kernel = kernel_path.read_bytes()
