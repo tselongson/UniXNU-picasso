@@ -162,7 +162,7 @@ kernel_args = [
   # request list the firmware already programmed at UTRBA, which is the one
   # region the controller is known to DMA to, and then panics with per-LUN
   # status, block sizes, INQUIRY vendor/product and the GPT signature.
-  "native-ufs-probe=12",
+  "native-ufs-probe=5",
   "native-ufs-diagnostics=1",
   # IOKit matching trace: kIOLogMatch(0x10) | kIOLogProbe(0x2) |
   # kIOLogConfig(0x20) | kIOLogCatalogue(0x200). Three silent runs in a row

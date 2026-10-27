@@ -411,6 +411,28 @@ void NativeUfs::adoptAndRead (unsigned level)
   // Layout: [0,4096) request list (slot 0 used), [4096,5120) command + response UPIU +
   // PRDT, [8192,16384) data.
   const uint32_t ucdOffset = 4096, rspOffset = 512, prdtOffset = 1024, dataOffset = 8192;
+
+  // PICASSO: the two halves of this driver each fail on their own. The firmware's request-list
+  // region takes descriptors and responses (a TEST UNIT READY there completes with ocs=0) but a
+  // data-in write into it resets the SoC, while a descriptor in our own buffer is never fetched
+  // at all (probe=12 stalls at NOP OUT). So keep the descriptor where the controller can read it
+  // and point the PRDT at a buffer we allocate ourselves.
+  OSSharedPtr<IOBufferMemoryDescriptor> adoptData;
+  uint8_t *dmaVirt = virt + dataOffset;
+  uint64_t dmaPhys = phys + dataOffset;
+  if (level == 4 || level == 5) {
+    adoptData = IOBufferMemoryDescriptor::inTaskWithOptions (kernel_task,
+        static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
+        static_cast<IOOptionBits> (kIOMemoryMapperNone), 8192, 4096);
+    if (adoptData) {
+      dmaVirt = reinterpret_cast<uint8_t *> (adoptData->getBytesNoCopy ());
+      dmaPhys = adoptData->getPhysicalAddress ();
+      IOLog ("NativeUfs adopt: own data buffer virt=%llx phys=%llx\n",
+             static_cast<uint64_t> (reinterpret_cast<uintptr_t> (dmaVirt)), dmaPhys);
+    } else {
+      IOLog ("NativeUfs adopt: data buffer allocation failed, staying in the firmware area\n");
+    }
+  }
   uint32_t hcsBefore = read32 (hc, 0x30);
   uint32_t doorbellBefore = read32 (hc, 0x58);
   IOLog ("NativeUfs adopt: hcs=%08x doorbell=%08x doorbell2=%08x\n",
@@ -455,7 +477,7 @@ void NativeUfs::adoptAndRead (unsigned level)
     uint8_t *ucd = virt + ucdOffset;
     zero32 (utrd, 32);
     zero32 (ucd, 1024 + 16);
-    zero32 (virt + dataOffset, 8192);
+    zero32 (dmaVirt, 8192);
     ucd[0] = 0x01;                  // COMMAND UPIU
     ucd[1] = toHost ? 0x40 : 0x00;  // flags: read
     ucd[2] = lun;
@@ -474,13 +496,14 @@ void NativeUfs::adoptAndRead (unsigned level)
     uint32_t prdEntries = length ? 1U : 0U;
     *reinterpret_cast<uint32_t *> (utrd + 28) = prdEntries | ((prdtOffset >> 2) << 16);
     if (length) {
-      uint64_t dataPhys = phys + dataOffset;
+      uint64_t dataPhys = dmaPhys;
       uint8_t *prd = ucd + prdtOffset;
       *reinterpret_cast<uint32_t *> (prd + 0) = static_cast<uint32_t> (dataPhys);
       *reinterpret_cast<uint32_t *> (prd + 4) = static_cast<uint32_t> (dataPhys >> 32);
       *reinterpret_cast<uint32_t *> (prd + 12) = length - 1;
     }
     cacheClean (virt, 16384);
+    if (dmaVirt != virt + 8192) cacheClean (dmaVirt, 8192);
     // PICASSO-DIAG: the previous boot stopped between "list armed" and the first RESULT line, so
     // print each step of the submission. The last line that appears names the statement that
     // wedges (a stalled MMIO read blocks the thread, so a bounded loop cannot rescue it).
@@ -502,6 +525,7 @@ void NativeUfs::adoptAndRead (unsigned level)
     IOLog ("NativeUfs adopt: poll done=%u db=%08x is=%08x ocs=%08x\n", done ? 1 : 0,
            read32 (hc, 0x58), read32 (hc, 0x20), loadLe32 (utrd + 8));
     cacheCleanInvalidate (virt, 16384);
+    if (dmaVirt != virt + 8192) cacheCleanInvalidate (dmaVirt, 8192);
     if (!done) {
       return result;
     }
@@ -542,6 +566,7 @@ void NativeUfs::adoptAndRead (unsigned level)
     *reinterpret_cast<uint32_t *> (utrd + 24) = (512U >> 2) | ((rspOffset >> 2) << 16);
     *reinterpret_cast<uint32_t *> (utrd + 28) = (prdtOffset >> 2) << 16;
     cacheClean (virt, 16384);
+    if (dmaVirt != virt + 8192) cacheClean (dmaVirt, 8192);
     write32 (hc, 0x20, 0xffffffffU);
     write32 (hc, 0x58, 1);
     bool done = false;
@@ -596,9 +621,9 @@ void NativeUfs::adoptAndRead (unsigned level)
   }
   if (level == 5) {
     uint8_t rc10[10] = { 0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-    IOLog ("NativeUfs adopt: capacity probe, data at %x\n", dataOffset);
+    IOLog ("NativeUfs adopt: capacity probe, data phys=%llx\n", dmaPhys);
     UfsResult c = command (0, rc10, 10, true, 8);
-    const uint8_t *buf = virt + dataOffset;
+    const uint8_t *buf = dmaVirt;
     panic ("NATIVE_UFS adopt: READ CAPACITY lun0\n"
            "ocs=%x resp=%02x scsi=%02x seg=%x\n"
            "last=%08x bs=%08x\n"
@@ -637,8 +662,8 @@ void NativeUfs::adoptAndRead (unsigned level)
     status[lun] = (r.ocs << 16) | (r.response << 8) | r.scsi;
     senseOf[lun] = r.sense;
     if (r.ocs == 0 && r.scsi == 0) {
-      last[lun] = getBe32 (virt + dataOffset);
-      blockSize[lun] = getBe32 (virt + dataOffset + 4);
+      last[lun] = getBe32 (dmaVirt);
+      blockSize[lun] = getBe32 (dmaVirt + 4);
     }
   }
   if (level == 9) {
@@ -652,7 +677,7 @@ void NativeUfs::adoptAndRead (unsigned level)
     if (h.ocs != 0 || h.scsi != 0) {
       panic ("NATIVE_UFS gpt: header read failed ocs=%x resp=%x scsi=%x", h.ocs, h.response, h.scsi);
     }
-    const uint8_t *hdr = virt + dataOffset;
+    const uint8_t *hdr = dmaVirt;
     auto le32 = [] (const uint8_t *at) -> uint32_t {
       return uint32_t (at[0]) | (uint32_t (at[1]) << 8) | (uint32_t (at[2]) << 16) | (uint32_t (at[3]) << 24);
     };
@@ -674,7 +699,7 @@ void NativeUfs::adoptAndRead (unsigned level)
     if (e.ocs != 0 || e.scsi != 0) {
       panic ("NATIVE_UFS gpt: entries read failed ocs=%x scsi=%x", e.ocs, e.scsi);
     }
-    const uint8_t *ents = virt + dataOffset;
+    const uint8_t *ents = dmaVirt;
     static char text[3400];
     int used = snprintf (text, sizeof (text),
                          "NATIVE_UFS gpt LUN0 hdr crc=%08x ents crc=%08x cnt=%u\n"
@@ -711,7 +736,7 @@ void NativeUfs::adoptAndRead (unsigned level)
   UfsResult inq = command (0, inquiry, 6, true, 36);
   uint32_t inqWord[4] = { 0, 0, 0, 0 };
   for (unsigned index = 0; index < 4; index++) {
-    inqWord[index] = getBe32 (virt + dataOffset + 8 + index * 4);
+    inqWord[index] = getBe32 (dmaVirt + 8 + index * 4);
   }
   // LBA 1 of LUN 0 holds the GPT header when the block size is 4096 (or 512).
   uint32_t gptStatus = 0xee, sig0 = 0, sig1 = 0, gptSeg = 0xdeadbeef;
@@ -721,8 +746,8 @@ void NativeUfs::adoptAndRead (unsigned level)
     gptStatus = (g.ocs << 16) | (g.response << 8) | g.scsi;
     gptSeg = g.seg;
     if (g.ocs == 0 && g.scsi == 0) {
-      sig0 = *reinterpret_cast<uint32_t *> (virt + dataOffset);
-      sig1 = *reinterpret_cast<uint32_t *> (virt + dataOffset + 4);
+      sig0 = *reinterpret_cast<uint32_t *> (dmaVirt);
+      sig1 = *reinterpret_cast<uint32_t *> (dmaVirt + 4);
       // PICASSO-DIAG: a valid GPT header also carries the partition geometry this board still
       // needs. board.toml's [userdata] is 0x0/0x0 because the numbers were never measured, and
       // a guessed geometry would put an 8 GiB image at the wrong offset. Print the entry array
@@ -734,7 +759,7 @@ void NativeUfs::adoptAndRead (unsigned level)
         auto le64 = [&] (const uint8_t *at) {
           return uint64_t (le32 (at)) | (uint64_t (le32 (at + 4)) << 32);
         };
-        const uint8_t *hdr = virt + dataOffset;
+        const uint8_t *hdr = dmaVirt;
         uint32_t entryLba = le32 (hdr + 72);
         uint32_t entryCount = le32 (hdr + 80);
         uint32_t entrySize = le32 (hdr + 84);
@@ -747,7 +772,7 @@ void NativeUfs::adoptAndRead (unsigned level)
           UfsResult e = command (0, readEntries, 10, true, blockSize[0]);
           if (e.ocs == 0 && e.scsi == 0) {
             for (unsigned index = 0; index < entryCount && index < 8; index++) {
-              const uint8_t *at = virt + dataOffset + index * entrySize;
+              const uint8_t *at = dmaVirt + index * entrySize;
               bool used = false;
               for (unsigned byte = 0; byte < 16; byte++) used = used || at[byte] != 0;
               if (!used) continue;
@@ -781,8 +806,8 @@ void NativeUfs::adoptAndRead (unsigned level)
     IOLog ("NativeUfs adopt: gptseg=%x rsp %08x %08x %08x %08x\n", gptSeg,
            getBe32 (rspRaw), getBe32 (rspRaw + 4), getBe32 (rspRaw + 8), getBe32 (rspRaw + 12));
     IOLog ("NativeUfs adopt: data8k %08x %08x %08x %08x | data4k %08x %08x %08x %08x\n",
-           getBe32 (virt + dataOffset), getBe32 (virt + dataOffset + 4),
-           getBe32 (virt + dataOffset + 8), getBe32 (virt + dataOffset + 12),
+           getBe32 (dmaVirt), getBe32 (dmaVirt + 4),
+           getBe32 (dmaVirt + 8), getBe32 (dmaVirt + 12),
            getBe32 (virt + ucdOffset), getBe32 (virt + ucdOffset + 4),
            getBe32 (virt + ucdOffset + 8), getBe32 (virt + ucdOffset + 12));
     auto le32 = [] (const uint8_t *at) {
