@@ -1784,6 +1784,35 @@ static void statsThread (void *argument, wait_result_t)
 // It must not run inside the matching thread that is starting NativeUfs.
 static char gMediaReport[3000];
 
+// PICASSO: every wait in this driver is counted rather than timed, but a stalled MMIO access
+// blocks the calling thread with no output at all. This watchdog runs on its own thread and,
+// if the bring-up has not finished after 30 s, prints the exact stage that never completed and
+// exits. It does not panic: the kernel must keep going so the boot page stays readable.
+static volatile uint32_t gWatchdogDone = 0;
+
+static void nativeUfsWatchdog (void *, wait_result_t)
+{
+  for (unsigned tick = 0; tick < 30; tick++) {
+    IOSleep (1000);
+    if (gWatchdogDone) {
+      thread_terminate (current_thread ());
+      return;
+    }
+  }
+  IOLog ("NativeUfs watchdog: no completion after 30s step=%u status=%u stage=%s\n",
+         native_ufs_root_step, native_ufs_status,
+         gRootDiagnostic.stage ? gRootDiagnostic.stage : "-");
+  thread_terminate (current_thread ());
+}
+
+static void startWatchdog (void)
+{
+  thread_t thread = nullptr;
+  if (kernel_thread_start (nativeUfsWatchdog, nullptr, &thread) == KERN_SUCCESS) {
+    thread_deallocate (thread);
+  }
+}
+
 static void mediaReportThread (void *, wait_result_t)
 {
   unsigned count = 0;
@@ -1868,6 +1897,13 @@ bool NativeUfs::start (IOService *provider)
   }
   IOLog ("NativeUfs: iommus=%u smmu=%u\n", provider->getProperty ("iommus") ? 1 : 0,
          gUfsSmmuNeeded ? 1 : 0);
+  // PICASSO: arm the watchdog only for the runs that touch hardware, so a plain match stays quiet.
+  if (probe || rootMode) {
+    gWatchdogDone = 0;
+    startWatchdog ();
+  } else {
+    gWatchdogDone = 1;
+  }
   unsigned diagnostic = 0;
   PE_parse_boot_argn ("native-ufs-diagnostics", &diagnostic, sizeof (diagnostic));
   gRootDiagnosticEnabled = diagnostic == 1;
@@ -1961,6 +1997,7 @@ bool NativeUfs::start (IOService *provider)
   if (probe == 12) {
     IOLog ("NativeUfs: dispatching probe=12 to startRoot\n");
     bool published = startRoot (provider);
+    gWatchdogDone = 1;
     IOLog ("NativeUfs: startRoot returned %u (blocks=%u step=%u)\n",
            published ? 1 : 0, native_ufs_blocks_published, native_ufs_root_step);
     if (!published) {
@@ -1974,8 +2011,11 @@ bool NativeUfs::start (IOService *provider)
     return true;
   }
   if (rootMode && !probe) {
-    return startRoot (provider);
+    bool started = startRoot (provider);
+    gWatchdogDone = 1;
+    return started;
   }
+  gWatchdogDone = 1;
   return false;
 }
 
