@@ -56,6 +56,12 @@ archives = [
   # Stage 6: the UFS controller driver. Its board constants (GccUfs.h) carry
   # the SM7250 physical windows; the ADT ufshc/ufsphy nodes only match classes.
   "build-arm-driver.py NativeUfs",
+  # Publishing the root device needs IOBlockStorageDevice, and the prelinked kernel
+  # carries the class dispatch in IOStorageFamily without binding the calls the driver
+  # makes: probe=12 jumped to IOBlockStorageDevice's constructor and executed zeroes.
+  # Same remedy as udon: extract the original dispatch from the kernel image and bind
+  # its addresses as absolute symbols.
+  "build-picasso-ufs-bindings.py",
 ]
 
 [kernel.prelink]
