@@ -275,6 +275,12 @@ static uint32_t getBe32 (const uint8_t *at)
 {
   return (uint32_t (at[0]) << 24) | (uint32_t (at[1]) << 16) | (uint32_t (at[2]) << 8) | at[3];
 }
+
+// The UTRD is little endian; this region may be mapped as device memory, so read it byte-wise.
+static uint32_t loadLe32 (const uint8_t *at)
+{
+  return uint32_t (at[0]) | (uint32_t (at[1]) << 8) | (uint32_t (at[2]) << 16) | (uint32_t (at[3]) << 24);
+}
 }
 
 static void cacheClean (const void *start, size_t length)
@@ -475,8 +481,15 @@ void NativeUfs::adoptAndRead (unsigned level)
       *reinterpret_cast<uint32_t *> (prd + 12) = length - 1;
     }
     cacheClean (virt, 16384);
+    // PICASSO-DIAG: the previous boot stopped between "list armed" and the first RESULT line, so
+    // print each step of the submission. The last line that appears names the statement that
+    // wedges (a stalled MMIO read blocks the thread, so a bounded loop cannot rescue it).
+    IOLog ("NativeUfs adopt: cmd cdb0=%02x len=%u dir=%u utrd0=%08x utrd7=%08x\n",
+           cdb[0], length, direction, loadLe32 (utrd + 0), loadLe32 (utrd + 28));
     write32 (hc, 0x20, 0xffffffffU);
+    IOLog ("NativeUfs adopt: is cleared, ringing doorbell\n");
     write32 (hc, 0x58, 1);          // ring slot 0
+    IOLog ("NativeUfs adopt: doorbell rung, db=%08x\n", read32 (hc, 0x58));
     UfsResult result = { 0xf, 0xff, 0xff, 0, 0, 0 };
     bool done = false;
     for (unsigned loops = 0; loops < 100000; loops++) {
@@ -486,6 +499,8 @@ void NativeUfs::adoptAndRead (unsigned level)
       }
       IODelay (1);
     }
+    IOLog ("NativeUfs adopt: poll done=%u db=%08x is=%08x ocs=%08x\n", done ? 1 : 0,
+           read32 (hc, 0x58), read32 (hc, 0x20), loadLe32 (utrd + 8));
     cacheCleanInvalidate (virt, 16384);
     if (!done) {
       return result;
