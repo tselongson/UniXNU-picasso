@@ -179,7 +179,6 @@ kernel_args = [
   # CDC-ACM device ever appears, so the console stays screen-only. 6 = plan the bind verbosely and
   # apply it (5 is plan-only). UFS diagnostics are printed before bsd_init starts the console, so
   # the bring-up log survives even if this hangs the machine afterwards.
-  "picasso_usb_smmu=6",
 ]
 # Stage-5 blind-spot instrumentation (docs/zh/guide/debugging.md 颜色条):
 # scripts/patch-xnu-entry-probe.py (ported from UniXNU-sheng; it adapts itself
