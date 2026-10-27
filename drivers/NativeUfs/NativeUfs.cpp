@@ -1059,6 +1059,12 @@ struct UfsHost {
   bool ready;
   bool poisoned = false;
   uintptr_t smmu = 0, cb = 0;
+  // PICASSO: the controller fetches descriptors only from the request list the firmware installed,
+  // and a data-in write into that same region resets the SoC. Keep the two apart: virt/phys are the
+  // adopted firmware list, dataVirt/dataPhys are a buffer we own and point the PRDT at.
+  OSSharedPtr<IOMemoryMap> fwMap;
+  uint8_t *dataVirt = nullptr;
+  uint64_t dataPhys = 0;
 };
 UfsHost gHost = { OSSharedPtr<IOMemoryMap> (), OSSharedPtr<IOMemoryMap> (), 0, nullptr, nullptr, 0, nullptr, false };
 
@@ -1149,27 +1155,40 @@ static bool hostBringUp (const char **why)
   }
   gRootDiagnostic.stage = "DMA allocation";
   IOLog ("NativeUfs: stage %s\n", gRootDiagnostic.stage);
+  // Adopt the firmware's request list for descriptors. Programming UTRLBA with our own buffer
+  // leaves the controller never fetching the descriptor, which is where probe=12 stalled at NOP OUT.
+  uint64_t fwList = uint64_t (read32 (gHost.hc, 0x50)) | (uint64_t (read32 (gHost.hc, 0x54)) << 32);
+  if (!fwList || (fwList & 4095)) {
+    *why = "firmware request list";
+    return false;
+  }
+  gHost.virt = reinterpret_cast<uint8_t *> (mapPhys (fwList, kDataOffset, gHost.fwMap));
+  gHost.phys = fwList;
+  IOLog ("NativeUfs: adopted firmware request list at %llx virt=%llx\n", fwList,
+         static_cast<uint64_t> (reinterpret_cast<uintptr_t> (gHost.virt)));
   gHost.dma = IOBufferMemoryDescriptor::inTaskWithOptions (
     kernel_task, static_cast<IOOptionBits> (kIODirectionInOut) | static_cast<IOOptionBits> (kIOMemoryPhysicallyContiguous) |
     static_cast<IOOptionBits> (kIOMemoryMapperNone),
-    kDmaBytes, 4096);
+    kDataMax, 4096);
   gHost.lock = IOLockAlloc ();
-  if (!gHost.dma || !gHost.lock) {
+  if (!gHost.virt || !gHost.dma || !gHost.lock) {
     *why = "dma buffer";
     return false;
   }
-  gHost.virt = static_cast<uint8_t *> (gHost.dma->getBytesNoCopy ());
+  gHost.dataVirt = static_cast<uint8_t *> (gHost.dma->getBytesNoCopy ());
   IOByteCount contiguous = 0;
-  gHost.phys = gHost.dma->getPhysicalSegment (0, &contiguous, kIOMemoryMapperNone);
-  gRootDiagnostic.dma = gHost.phys;
+  gHost.dataPhys = gHost.dma->getPhysicalSegment (0, &contiguous, kIOMemoryMapperNone);
+  gRootDiagnostic.dma = gHost.dataPhys;
   gRootDiagnostic.contiguous = contiguous;
-  if (!gHost.virt || !gHost.phys || (gHost.phys & 4095) || contiguous < kDmaBytes ||
-      (!(read32 (gHost.hc, 0) & 0x01000000) && gHost.phys + kDmaBytes > 0x100000000ULL)) {
+  if (!gHost.dataVirt || !gHost.dataPhys || (gHost.dataPhys & 4095) || contiguous < kDataMax ||
+      (!(read32 (gHost.hc, 0) & 0x01000000) && gHost.dataPhys + kDataMax > 0x100000000ULL)) {
     *why = "DMA address/contiguity";
     return false;
   }
-  bzero (gHost.virt, kDmaBytes);
-  cacheCivac (gHost.virt, kDmaBytes);
+  bzero (gHost.virt, kDataOffset);
+  cacheCivac (gHost.virt, kDataOffset);
+  bzero (gHost.dataVirt, kDataMax);
+  cacheCivac (gHost.dataVirt, kDataMax);
   uint32_t report[3] = { 0, 0, 0 };
   gRootDiagnostic.stage = "SMMU and request list";
   IOLog ("NativeUfs: stage %s\n", gRootDiagnostic.stage);

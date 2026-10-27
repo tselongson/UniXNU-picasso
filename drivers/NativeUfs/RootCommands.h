@@ -68,14 +68,15 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   words[6] = (512U >> 2) | ((kRspOffset >> 2) << 16);
   words[7] = (dataBytes ? 1U : 0U) | ((kPrdtOffset >> 2) << 16);
   if (dataBytes) {
-    uint64_t dataPhys = gHost.phys + kDataOffset;
+    uint64_t dataPhys = gHost.dataPhys;
     uint32_t *prd = reinterpret_cast<uint32_t *> (gHost.virt + kUcdOffset + kPrdtOffset);
     prd[0] = static_cast<uint32_t> (dataPhys);
     prd[1] = static_cast<uint32_t> (dataPhys >> 32);
     prd[2] = 0;
     prd[3] = dataBytes - 1;
   }
-  cacheCivac (gHost.virt, kDataOffset + dataBytes);
+  cacheCivac (gHost.virt, kDataOffset);
+  if (dataBytes) cacheCivac (gHost.dataVirt, dataBytes);
   hostWrite (0x20, 1);  // Acknowledge completion only; preserve error evidence.
   HardwareTransferPort port;
   clock_interval_to_deadline (timeoutUs, kMicrosecondScale, &port.deadline);
@@ -107,7 +108,8 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
     gHost.ready = false;
     return recordTransport (end == UfsTransferEnd::Timeout ? kIOReturnTimeout : kIOReturnIOError, *ocs);
   }
-  cacheInvalidate (gHost.virt, kDataOffset + dataBytes);
+  cacheInvalidate (gHost.virt, kDataOffset);
+  if (dataBytes) cacheInvalidate (gHost.dataVirt, dataBytes);
   gRootDiagnostic.response = loadBe32 (gHost.virt + kUcdOffset + kRspOffset);
   return recordTransport (*ocs == 0 ? kIOReturnSuccess : kIOReturnIOError, *ocs);
 }
@@ -264,7 +266,7 @@ static IOReturn hostRead4k (uint8_t lun, uint64_t lba, uint32_t blocks, void *ds
   uint32_t scsi = 0;
   IOReturn status = hostScsi (lun, cdb, 10, true, blocks * 4096U, 1000000, &scsi);
   if (status == kIOReturnSuccess) {
-    memcpy (dst, gHost.virt + kDataOffset, blocks * 4096U);
+    memcpy (dst, gHost.dataVirt, blocks * 4096U);
   }
   IOLockUnlock (gHost.lock);
   return status;
