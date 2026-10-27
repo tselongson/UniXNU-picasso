@@ -30,6 +30,19 @@ static uint32_t loadBe32 (const uint8_t *at)
 // the UTRD data direction (0 none, 1 from host, 2 to host). Direction 1 is reachable only through hostWrite4k, which
 // confines it to the persistent store window. Returns the overall command status
 // (0 = completed) in *ocs. Timeout/fatal status quarantines the allocation.
+
+// The descriptor and UPIU live in a device-memory mapping, where the compiler may not merge stores:
+// it turned words[1] and words[2] into one 8-byte store at +4 and the CPU raised "Unaligned kernel
+// data abort" in hostSubmit. Build in ordinary memory and copy word by word through volatile.
+static void copyToDevice (uint8_t *dst, const void *src, size_t length)
+{
+  volatile uint32_t *out = reinterpret_cast<volatile uint32_t *> (dst);
+  const uint32_t *in = static_cast<const uint32_t *> (src);
+  for (size_t index = 0; index < length / 4; index++) {
+    out[index] = in[index];
+  }
+}
+
 static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t timeoutUs, uint32_t *ocs)
 {
   *ocs = 15;
@@ -57,23 +70,19 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   gRootDiagnostic.sense = 0;
   uint8_t *utrd = gHost.virt;
   uint64_t ucdPhys = gHost.phys + kUcdOffset;
-  uint32_t *words = reinterpret_cast<uint32_t *> (utrd);
-  for (unsigned index = 0; index < 8; index++) {
-    words[index] = 0;
-  }
+  uint32_t words[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
   words[0] = 0x10000000U | (direction << 25);
   words[2] = 0x0fU;
   words[4] = static_cast<uint32_t> (ucdPhys);
   words[5] = static_cast<uint32_t> (ucdPhys >> 32);
   words[6] = (512U >> 2) | ((kRspOffset >> 2) << 16);
   words[7] = (dataBytes ? 1U : 0U) | ((kPrdtOffset >> 2) << 16);
+  copyToDevice (utrd, words, sizeof words);
   if (dataBytes) {
     uint64_t dataPhys = gHost.dataPhys;
-    uint32_t *prd = reinterpret_cast<uint32_t *> (gHost.virt + kUcdOffset + kPrdtOffset);
-    prd[0] = static_cast<uint32_t> (dataPhys);
-    prd[1] = static_cast<uint32_t> (dataPhys >> 32);
-    prd[2] = 0;
-    prd[3] = dataBytes - 1;
+    uint32_t prd[4] = { static_cast<uint32_t> (dataPhys), static_cast<uint32_t> (dataPhys >> 32), 0,
+                        dataBytes - 1 };
+    copyToDevice (gHost.virt + kUcdOffset + kPrdtOffset, prd, sizeof prd);
   }
   cacheCivac (gHost.virt, kDataOffset);
   if (dataBytes) cacheCivac (gHost.dataVirt, dataBytes);
@@ -130,10 +139,9 @@ static bool hostClearUcd (void)
     recordTransport (kIOReturnIOError, 15);
     return false;
   }
-  uint32_t *words = reinterpret_cast<uint32_t *> (gHost.virt + kUcdOffset);
-  for (unsigned index = 0; index < (kPrdtOffset + 16) / 4; index++) {
-    words[index] = 0;
-  }
+  // zero32 keeps the stores word-sized and volatile; the plain loop was vectorised into an 8-byte
+  // store at UCD+0x14, which faults on this device-memory mapping.
+  zero32 (gHost.virt + kUcdOffset, kPrdtOffset + 16);
   return true;
 }
 
@@ -184,13 +192,16 @@ static IOReturn hostScsiDir (uint8_t lun, const uint8_t *cdb, unsigned cdbLength
       (dataBytes & 3) || (dataBytes ? !direction : direction)) return kIOReturnBadArgument;
   if (!hostClearUcd ()) return kIOReturnNotReady;
   uint8_t *ucd = gHost.virt + kUcdOffset;
-  ucd[0] = 0x01;                      // COMMAND UPIU
-  ucd[1] = direction == 2 ? 0x40 : direction == 1 ? 0x20 : 0x00;   // R: data in, W: data out
-  ucd[2] = lun;
-  putBe32 (ucd + 12, dataBytes);
+  uint32_t upiu[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+  uint8_t *head = reinterpret_cast<uint8_t *> (upiu);
+  head[0] = 0x01;                     // COMMAND UPIU
+  head[1] = direction == 2 ? 0x40 : direction == 1 ? 0x20 : 0x00;   // R: data in, W: data out
+  head[2] = lun;
+  putBe32 (head + 12, dataBytes);
   for (unsigned index = 0; index < cdbLength; index++) {
-    ucd[16 + index] = cdb[index];
+    head[16 + index] = cdb[index];
   }
+  copyToDevice (ucd, upiu, sizeof upiu);
   uint32_t ocs = 0xf;
   IOReturn status = hostSubmit (direction ? direction : 0U, dataBytes, timeoutUs, &ocs);
   if (status != kIOReturnSuccess) return status;
@@ -230,11 +241,14 @@ static IOReturn hostQueryRead (uint8_t opcode, uint8_t idn, uint32_t *value)
   if (!value || (opcode != 3 && opcode != 5)) return kIOReturnBadArgument;
   if (!hostClearUcd ()) return kIOReturnNotReady;
   uint8_t *ucd = gHost.virt + kUcdOffset;
-  ucd[0] = 0x16;                      // QUERY REQUEST
-  ucd[3] = 1;
-  ucd[5] = 0x01;                      // standard read request (header dword 1, byte 1)
-  ucd[12] = opcode;
-  ucd[13] = idn;
+  uint32_t upiu[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+  uint8_t *head = reinterpret_cast<uint8_t *> (upiu);
+  head[0] = 0x16;                     // QUERY REQUEST
+  head[3] = 1;
+  head[5] = 0x01;                     // standard read request (header dword 1, byte 1)
+  head[12] = opcode;
+  head[13] = idn;
+  copyToDevice (ucd, upiu, sizeof upiu);
   uint32_t ocs = 0xf;
   IOReturn status = hostSubmit (0, 0, 200000, &ocs);
   if (status != kIOReturnSuccess) {
