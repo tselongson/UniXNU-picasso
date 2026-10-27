@@ -3,6 +3,23 @@
 // The host harness replaces only MMIO, DMA synchronization, clock and lock primitives.
 struct HardwareTransferPort {
   uint64_t deadline;
+  uint32_t kicks = 0;
+  uint32_t reenables = 0;
+  // A slot can be latched without the controller ever fetching it, and then the doorbell stays set
+  // with no completion for the whole deadline. Re-writing the doorbell makes the controller fetch
+  // the slot again, but UTRLRSR has to come first: a controller that cleared its run bit ignores
+  // doorbell writes entirely. Both are cheap next to the timeout they prevent, so they run
+  // periodically rather than only on failure. Ported from YinCQL/UniXNU-picasso f5b4b908.
+  void beginPoll (uint32_t poll) {
+    if (poll != 1 && (poll & 0x3fff) == 0) {
+      if ((read32 (gHost.hc, 0x60) & 1) == 0) {
+        hostWrite (0x60, 1);
+        ++reenables;
+      }
+      hostWrite (0x58, 1);
+      ++kicks;
+    }
+  }
   uint32_t doorbell () { return read32 (gHost.hc, 0x58); }
   uint32_t interrupt () { return read32 (gHost.hc, 0x20); }
   uint32_t completedOcs () {
