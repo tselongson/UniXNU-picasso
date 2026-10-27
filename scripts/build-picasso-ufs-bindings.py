@@ -28,8 +28,18 @@ headers = ROOT / 'build/storage-abi/include/IOKit/storage'
 headers.mkdir(parents=True, exist_ok=True)
 for path in source.glob('*.h'):
     shutil.copyfile(path, headers / path.name)
-sdk = Path(subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip())
-shutil.copyfile(sdk / 'usr/include/TargetConditionals.h', ROOT / 'build/storage-abi/include/TargetConditionals.h')
+target_header = ROOT / 'build/storage-abi/include/TargetConditionals.h'
+try:
+    sdk = Path(subprocess.check_output(['xcrun', '--sdk', 'macosx', '--show-sdk-path'], text=True).strip())
+    shutil.copyfile(sdk / 'usr/include/TargetConditionals.h', target_header)
+except (subprocess.CalledProcessError, FileNotFoundError):
+    # The Linux toolchain shim does not answer --show-sdk-path; the fakeroot carries the same
+    # header, and prepare-storage-headers.py may already have placed it.
+    fallback = ROOT / '.cache/fakeroot/usr/include/TargetConditionals.h'
+    if fallback.is_file():
+        shutil.copyfile(fallback, target_header)
+    elif not target_header.is_file():
+        raise
 
 record = json.loads((ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json').read_text().strip().rstrip(','))
 obj_path = OUT / 'IOBlockStorageDevice-reference.o'
@@ -124,7 +134,10 @@ if hashlib.sha256(kernel).hexdigest() != plan['candidate_sha256']:
             raise SystemExit('Candidate digest/size mismatch (no matching .orig/.authbak)')
 native = np.macho(kernel)
 exports = np.exports(kernel, native)
-by_name = {name: va for va, names in exports.items() for name in names}
+# np.exports reports pre-slide addresses, while the pointers inside the image are post-slide.
+# Without this offset every comparison fails and the dispatch table looks absent (0 candidates).
+slide = int(plan['slide'])
+by_name = {name: (va + slide) & 0xffffffffffffffff for va, names in exports.items() for name in names}
 extents = [e for e in plan['extents'] if e['module'] == 'com.apple.iokit.IOStorageFamily']
 const = next(e for e in extents if e['segment'] == '__DATA_CONST')
 text = next(e for e in extents if e['segment'] == '__TEXT_EXEC')
