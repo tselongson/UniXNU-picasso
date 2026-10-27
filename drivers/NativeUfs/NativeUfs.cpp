@@ -623,15 +623,70 @@ void NativeUfs::adoptAndRead (unsigned level)
     uint8_t rc10[10] = { 0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     IOLog ("NativeUfs adopt: capacity probe, data phys=%llx\n", dmaPhys);
     UfsResult c = command (0, rc10, 10, true, 8);
-    const uint8_t *buf = dmaVirt;
-    panic ("NATIVE_UFS adopt: READ CAPACITY lun0\n"
-           "ocs=%x resp=%02x scsi=%02x seg=%x\n"
-           "last=%08x bs=%08x\n"
-           "data=%08x %08x %08x %08x\n"
-           "hcs=%08x is=%08x db=%08x",
-           c.ocs, c.response, c.scsi, c.seg, getBe32 (buf), getBe32 (buf + 4),
-           getBe32 (buf), getBe32 (buf + 4), getBe32 (buf + 8), getBe32 (buf + 12),
-           read32 (hc, 0x30), read32 (hc, 0x20), read32 (hc, 0x58));
+    uint32_t lastLba = getBe32 (dmaVirt);
+    uint32_t blockBytes = getBe32 (dmaVirt + 4);
+    IOLog ("NativeUfs adopt: capacity ocs=%x last=%08x bs=%08x\n",
+           c.ocs, lastLba, blockBytes);
+    if (c.ocs != 0 || c.scsi != 0 || blockBytes < 512 || blockBytes > 4096) {
+      panic ("NATIVE_UFS adopt: capacity failed ocs=%x resp=%02x scsi=%02x bs=%08x",
+             c.ocs, c.response, c.scsi, blockBytes);
+    }
+    // INQUIRY: vendor and product identify the part, and it proves a second data-in command
+    // still works after the first one.
+    uint8_t inquiry[6] = { 0x12, 0, 0, 0, 36, 0 };
+    UfsResult q = command (0, inquiry, 6, true, 36);
+    IOLog ("NativeUfs adopt: inquiry ocs=%x vendor=%.8s product=%.16s\n",
+           q.ocs, reinterpret_cast<const char *> (dmaVirt + 8),
+           reinterpret_cast<const char *> (dmaVirt + 16));
+    // GPT header at LBA 1 of the boot LUN.
+    uint8_t read10[10] = { 0x28, 0, 0, 0, 0, 1, 0, 0, 1, 0 };
+    UfsResult g = command (0, read10, 10, true, blockBytes);
+    uint32_t sig0 = getBe32 (dmaVirt);
+    uint32_t sig1 = getBe32 (dmaVirt + 4);
+    IOLog ("NativeUfs adopt: gpt ocs=%x sig=%08x %08x\n", g.ocs, sig0, sig1);
+    if (sig0 != 0x45464920U || sig1 != 0x50415254U) {
+      panic ("NATIVE_UFS adopt: no GPT signature ocs=%x sig=%08x %08x last=%08x bs=%08x",
+             g.ocs, sig0, sig1, lastLba, blockBytes);
+    }
+    auto le32 = [] (const uint8_t *at) {
+      return uint32_t (at[0]) | (uint32_t (at[1]) << 8) | (uint32_t (at[2]) << 16) | (uint32_t (at[3]) << 24);
+    };
+    auto le64 = [&] (const uint8_t *at) {
+      return uint64_t (le32 (at)) | (uint64_t (le32 (at + 4)) << 32);
+    };
+    uint32_t entryLba = le32 (dmaVirt + 72);
+    uint32_t entryCount = le32 (dmaVirt + 80);
+    uint32_t entrySize = le32 (dmaVirt + 84);
+    IOLog ("NativeUfs adopt: gpt entries lba=%u count=%u size=%u\n", entryLba, entryCount, entrySize);
+    uint8_t readEntries[10] = { 0x28, 0, static_cast<uint8_t> (entryLba >> 24),
+                                static_cast<uint8_t> (entryLba >> 16),
+                                static_cast<uint8_t> (entryLba >> 8),
+                                static_cast<uint8_t> (entryLba), 0, 0, 1, 0 };
+    UfsResult e = command (0, readEntries, 10, true, blockBytes);
+    if (e.ocs != 0 || e.scsi != 0) {
+      panic ("NATIVE_UFS adopt: gpt entry read failed ocs=%x scsi=%x", e.ocs, e.scsi);
+    }
+    for (unsigned index = 0; index < entryCount && index < 10; index++) {
+      const uint8_t *at = dmaVirt + index * entrySize;
+      bool used = false;
+      for (unsigned byte = 0; byte < 16; byte++) used = used || at[byte] != 0;
+      if (!used) continue;
+      char name[17];
+      unsigned chars = 0;
+      for (; chars < 16; chars++) {
+        uint8_t low = at[56 + chars * 2];
+        if (!low) break;
+        name[chars] = (low >= 0x20 && low < 0x7f) ? char (low) : '.';
+      }
+      name[chars] = 0;
+      IOLog ("NativeUfs adopt: part[%u] %llx..%llx %s\n", index, le64 (at + 32), le64 (at + 40), name);
+    }
+    panic ("NATIVE_UFS adopt: UFS read path works\n"
+           "last=%08x bs=%08x gpt=%08x %08x entries=%u@%u\n"
+           "vendor=%.8s product=%.16s",
+           lastLba, blockBytes, sig0, sig1, entryCount, entryLba,
+           reinterpret_cast<const char *> (dmaVirt + 8),
+           reinterpret_cast<const char *> (dmaVirt + 16));
   }
   uint32_t hcsAfter = 0;
   const unsigned maxLun = 6;
