@@ -86,6 +86,15 @@ if len(methods) != 190 or methods.count('___cxa_pure_virtual') != 14:
     raise SystemExit('Public iOS class dispatch shape changed')
 
 kernel_path = Path(CANDIDATE)
+if not kernel_path.is_file():
+    # The archive step runs before the kernel link, so the prelinked candidate only exists from the
+    # second pass on. Emit an empty archive here; the workflow builds twice so the second pass links
+    # the real bindings.
+    empty = OUT / 'libUfsBindings.a'
+    empty.unlink(missing_ok=True)
+    subprocess.run(['xcrun', 'ar', 'rcs', str(empty)], check=True)
+    print(f'picasso UFS bindings: no prelinked candidate at {kernel_path}, emitted an empty archive')
+    raise SystemExit(0)
 kernel = kernel_path.read_bytes()
 plan = json.loads(kernel_path.with_suffix('.json').read_text())
 if hashlib.sha256(kernel).hexdigest() != plan['candidate_sha256']:
