@@ -101,23 +101,17 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
                         dataBytes - 1 };
     copyToDevice (gHost.virt + kUcdOffset + kPrdtOffset, prd, sizeof prd);
   }
-  // PICASSO-DIAG: probe=12 stops inside this function with no panic and no further output, so the
-  // platform-expert thread is blocked rather than crashed. Name each step; the last line printed
-  // identifies the statement that never returns.
-  IOLog ("NativeUfs: submit enter dir=%u bytes=%u\n", direction, dataBytes);
+  // No per-command logging here. Five lines per 4 KiB read, all of them going to the framebuffer
+  // console, cost far more time than the transfer itself: the APFS mount crawled through hundreds
+  // of reads with the screen scrolling the whole way. Log the outcome, not the mechanics.
   cacheCivac (gHost.virt, kDataOffset);
   if (dataBytes) cacheCivac (gHost.dataVirt, dataBytes);
-  IOLog ("NativeUfs: submit descriptor flushed\n");
   hostWrite (0x20, 1);  // Acknowledge completion only; preserve error evidence.
   HardwareTransferPort port;
   clock_interval_to_deadline (timeoutUs, kMicrosecondScale, &port.deadline);
-  IOLog ("NativeUfs: submit deadline=%llu now=%llu\n", port.deadline, mach_absolute_time ());
   hostWrite (0x58, 1);
-  IOLog ("NativeUfs: submit doorbell rung db=%08x hcs=%08x\n", read32 (gHost.hc, 0x58), read32 (gHost.hc, 0x30));
   UfsTransferPoll state;
   UfsTransferEnd end = pollUfsTransfer (port, state);
-  IOLog ("NativeUfs: submit poll end=%u polls=%u db=%u is=%u\n", static_cast<unsigned> (end),
-         state.polls, state.doorbellSeen, state.interruptSeen);
   gRootDiagnostic.polls = state.polls;
   gRootDiagnostic.dbSeen = state.doorbellSeen;
   gRootDiagnostic.isSeen = state.interruptSeen;
