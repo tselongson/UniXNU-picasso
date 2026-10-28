@@ -595,6 +595,7 @@ index 0000000..e00508f
 +	uint32_t match_smr = 0;
 +	uint32_t match_s2cr = 0;
 +	uint32_t match_mask = 0;
++	bool exact = false;
 +
 +	printf("PICASSO USB: SMMU scr0=%08x idr=%08x/%08x/%08x gfsr=%08x\n",
 +	    scr0, idr0, idr1, idr2, gfsr);
@@ -620,21 +621,20 @@ index 0000000..e00508f
 +			printf("PICASSO USB: SID e0 match %u smr=%08x s2cr=%08x\n",
 +			    i, smr, usb_rd(smmu, 0xc00u + 4u * i));
 +		}
-+		if (matches == 1) {
++		// Several SMRs can name the same stream id: the bootloader leaves its own entries behind,
++		// often with a non-zero mask. The one that matters is the exact match (mask 0), so record
++		// that one rather than requiring the id to be unique.
++		if (mask == 0 && !exact) {
++			exact = true;
 +			match_index = i;
 +			match_smr = smr;
 +			match_mask = mask;
 +			match_s2cr = usb_rd(smmu, 0xc00u + 4u * i);
 +		}
 +	}
-+	if (matches != 1) {
-+		printf("PICASSO USB: SID e0 guard FAIL: matches=%u (need exactly 1)\n",
-+		    matches);
-+		return false;
-+	}
-+	if (match_mask != 0) {
-+		printf("PICASSO USB: SID e0 guard FAIL: non-exact mask=%04x\n",
-+		    match_mask);
++	printf("PICASSO USB: SID e0 matches=%u exact=%u\n", matches, exact ? 1u : 0u);
++	if (!exact) {
++		printf("PICASSO USB: SID e0 guard FAIL: no exact match among %u\n", matches);
 +		return false;
 +	}
 +

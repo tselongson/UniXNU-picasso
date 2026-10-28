@@ -1949,7 +1949,12 @@ static bool prepareRootWindows ()
     if (heap) {
       kheap_free (KHEAP_DEFAULT, heap, 256);
     }
-    NativeUfsBlock *device = OSTypeAlloc (NativeUfsBlock);
+    // OSTypeAlloc is metaClass->alloc(), which ends in `new NativeUfsBlock`. Both allocator paths it
+    // depends on were probed above and both work, yet it never returns, so bypass the metaclass and
+    // construct directly: if this line is followed by the next log, the metaclass path is the fault;
+    // if it also stops, the constructor is.
+    IOLog ("NativeUfs: publish %u new enter\n", index);
+    NativeUfsBlock *device = new NativeUfsBlock;
     IOLog ("NativeUfs: publish %u allocated\n", index);
     gPendingDevice[index] = device;
     gPendingAttached[index] = false;
