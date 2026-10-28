@@ -1964,6 +1964,16 @@ static bool prepareRootWindows ()
 
 static void publishThread (void *, wait_result_t)
 {
+  // Wait before touching IOKit. OSTypeAlloc goes through OSObject::operator new, which is
+  // kheap_alloc(KHEAP_DEFAULT, ..., Z_WAITOK): a plain IOMalloc in the same place succeeds
+  // (probe=1) while OSTypeAlloc never returns, which is what a sleeping wait on a heap that is not
+  // ready yet looks like. Upstream's deferred root publication waits for the CDC console for the
+  // same reason. Give the system time to finish bringing the heap and the registry up.
+  IOLog ("NativeUfs: publisher waiting before publication\n");
+  for (unsigned tick = 0; tick < 5000; ++tick) {
+    IODelay (1000);
+  }
+  IOLog ("NativeUfs: publisher starting publication\n");
   if (!prepareRootWindows ()) {
     IOLog ("NativeUfs: root window preparation failed; nothing published\n");
     rootDiagnosticFailure ("root window preparation failed");
