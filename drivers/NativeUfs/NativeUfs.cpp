@@ -2302,33 +2302,21 @@ bool NativeUfs::startRoot (IOService *provider)
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Prepare);
       gRootDiagnostic.publicationWindow = index;
       gRootDiagnostic.windowBytes = layout->window[index].size;
-      IOLog ("NativeUfs: prepare %u enter offset=%llx size=%llx\n", index,
-             layout->window[index].offset, layout->window[index].size);
       ufsMarker (1, "before OSTypeAlloc");
       NativeUfsBlock *device = OSTypeAlloc (NativeUfsBlock);
       ufsMarker (2, "after OSTypeAlloc");
-      IOLog ("NativeUfs: prepare %u allocated %llx\n", index,
-             static_cast<uint64_t> (reinterpret_cast<uintptr_t> (device)));
       gPendingDevice[index] = device;
       gPendingAttached[index] = false;
       gPendingUuid[index][0] = 0;
       uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
-      // init() is deliberately NOT called here. It is IOService::init(), which sets up IOKit
-      // infrastructure that is not ready while the platform expert is still matching; marker=3
-      // (after init) never reset, so the block is inside it. The publisher thread initialises the
-      // device instead, where the rest of the publication already happens.
-      bool inited = device != nullptr;
-      IOLog ("NativeUfs: prepare %u init=%u\n", index, inited ? 1 : 0);
-      if (!inited) return false;
-      bool configured = device->configure (layout->window[index].name, absolute, layout->window[index].size);
+      // No logging in this path: the run stops exactly at the first IOLog after the allocation, and
+      // a marker on either side of it is the test for whether IOLog itself is what blocks. init(),
+      // attach() and start() all happen on the publisher thread.
+      bool configured = device && device->configure (layout->window[index].name, absolute,
+                                                     layout->window[index].size);
       ufsMarker (3, "after configure");
-      IOLog ("NativeUfs: prepare %u configure=%u\n", index, configured ? 1 : 0);
       if (!configured) return false;
       gRootDiagnostic.stage = "root window attachment";
-      // attach() is deliberately NOT done here. This runs inside NativeUfs::start(), where the
-      // IOKit registry is busy, and attaching a new IOService while it is busy deadlocks. The
-      // publisher thread performs the attach immediately before starting the device.
-      IOLog ("NativeUfs: prepare %u configured, attach deferred to the publisher\n", index);
       gPendingAttached[index] = true;
       ++gPending;
       gRootDiagnostic.prepared = gPending;
