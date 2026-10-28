@@ -2316,6 +2316,15 @@ bool NativeUfs::startRoot (IOService *provider)
     IOLog ("NativeUfs: marker %d\n", marker);
   }
   IOLog ("NativeUfs: startRoot enter (clock=%llu)\n", mach_absolute_time ());
+  // The USB console reports its GCC/DWC3 state right after the copyright banner, which has long
+  // scrolled off by the time anyone photographs the screen. Re-run its probe here, where the output
+  // is still visible, so the reason it never enumerated is readable.
+  {
+    extern void picasso_usb_console_start (void);
+    IOLog ("NativeUfs: re-running the USB console probe\n");
+    picasso_usb_console_start ();
+    IOLog ("NativeUfs: USB console probe returned\n");
+  }
   if (!hostBringUp (&why)) {
     rootDiagnosticFailure (why);
     IOLog ("NativeUfs: root bring-up failed: %s\n", why);
