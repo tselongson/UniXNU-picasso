@@ -15,7 +15,7 @@ new file mode 100644
 index 0000000..e00508f
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,1458 @@
+@@ -0,0 +1,1467 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
