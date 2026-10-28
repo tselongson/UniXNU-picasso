@@ -1935,16 +1935,18 @@ static bool prepareRootWindows ()
     gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Prepare);
     gRootDiagnostic.publicationWindow = index;
     gRootDiagnostic.windowBytes = layout->window[index].size;
-    ufsMarker (1, "before OSTypeAlloc");
+    IOLog ("NativeUfs: publish %u alloc enter size=%llx\n", index, layout->window[index].size);
     NativeUfsBlock *device = OSTypeAlloc (NativeUfsBlock);
-    ufsMarker (2, "after OSTypeAlloc");
+    IOLog ("NativeUfs: publish %u allocated %llx\n", index,
+           static_cast<uint64_t> (reinterpret_cast<uintptr_t> (device)));
     gPendingDevice[index] = device;
     gPendingAttached[index] = false;
     gPendingUuid[index][0] = 0;
     uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
+    IOLog ("NativeUfs: publish %u configure enter abs=%llx\n", index, absolute);
     bool configured = device && device->configure (layout->window[index].name, absolute,
                                                    layout->window[index].size);
-    ufsMarker (3, "after configure");
+    IOLog ("NativeUfs: publish %u configure=%u\n", index, configured ? 1u : 0u);
     if (!configured) {
       return false;
     }
