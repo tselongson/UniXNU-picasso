@@ -2327,7 +2327,9 @@ bool NativeUfs::startRoot (IOService *provider)
     // RUN_STOP set and DEVCTRLHLT clear means the gadget was started, which separates "the SMMU
     // guard refused" from "the controller is up but did not enumerate".
     OSSharedPtr<IOMemoryMap> dwcMap;
-    uintptr_t dwc = mapPhys (0x0a600000ULL, 0x1000, dwcMap);
+    // The DWC3 register block reaches past 0xc70c, so a single page is not enough: mapping 0x1000
+    // and reading GCTL at 0xc110 faults with a level-3 translation abort (far = base + 0xc110).
+    uintptr_t dwc = mapPhys (0x0a600000ULL, 0x10000, dwcMap);
     if (dwc) {
       uint32_t gctl = read32 (dwc, 0xc110);
       uint32_t dctl = read32 (dwc, 0xc704);
