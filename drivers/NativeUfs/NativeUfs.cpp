@@ -2321,6 +2321,23 @@ bool NativeUfs::startRoot (IOService *provider)
     IOLog ("NativeUfs: marker %d\n", marker);
   }
   IOLog ("NativeUfs: startRoot enter (clock=%llu)\n", mach_absolute_time ());
+  {
+    // The USB console prints its own state right after the copyright banner, far above anything
+    // still on screen by the time the phone is photographed. Read the DWC3 registers here instead:
+    // RUN_STOP set and DEVCTRLHLT clear means the gadget was started, which separates "the SMMU
+    // guard refused" from "the controller is up but did not enumerate".
+    OSSharedPtr<IOMemoryMap> dwcMap;
+    uintptr_t dwc = mapPhys (0x0a600000ULL, 0x1000, dwcMap);
+    if (dwc) {
+      uint32_t gctl = read32 (dwc, 0xc110);
+      uint32_t dctl = read32 (dwc, 0xc704);
+      uint32_t dsts = read32 (dwc, 0xc70c);
+      IOLog ("NativeUfs: DWC3 gctl=%08x dctl=%08x dsts=%08x run=%u halted=%u\n",
+             gctl, dctl, dsts, (dctl >> 31) & 1u, (dsts >> 22) & 1u);
+    } else {
+      IOLog ("NativeUfs: DWC3 map failed\n");
+    }
+  }
   if (!hostBringUp (&why)) {
     rootDiagnosticFailure (why);
     IOLog ("NativeUfs: root bring-up failed: %s\n", why);
