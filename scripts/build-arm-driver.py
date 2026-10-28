@@ -11,6 +11,7 @@ from pathlib import Path
 import struct
 import subprocess
 import sys
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 if not (ROOT / 'build/xnu').is_dir() and (ROOT / 'out/picasso/tree/build/xnu').is_dir():
@@ -124,6 +125,17 @@ def build_adreno(record: dict):
             print('NativeAdreno: integrated staged AGXAccelerator and original IOAcceleratorES imports')
 
 
+def prelink_slide():
+    """Read the board's prelink slide, which every stock address has to be moved by."""
+    for candidate in (Path(os.environ.get('UNIXNU_DEVICE', ROOT)) / 'board.toml', ROOT / 'board.toml'):
+        if candidate.is_file():
+            config = tomllib.loads(candidate.read_text())
+            try:
+                return int(config['kernel']['prelink']['slide'], 0)
+            except (KeyError, TypeError, ValueError) as error:
+                raise SystemExit(f'{candidate} needs [kernel.prelink].slide') from error
+    raise SystemExit('NativeUfs needs board.toml to resolve the prelink slide')
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('component', choices=['ArmDTPlatform', 'ArmCpu', 'NativeRamBlock', 'NativeUfs', 'NativeAdreno'])
@@ -157,31 +169,28 @@ def main():
 
     extra_objects = []
     if args.component == 'NativeUfs':
+        # These are IOStorageFamily's stock (pre-prelink) addresses. emit_prelink moves that
+        # component by board.toml's slide, so every one of them has to move with it: binding the
+        # stock address produces an absolute symbol pointing at a page with no code in it, and the
+        # first constructor call through it stops the kernel dead with nothing on the console.
+        stock = {
+            '__ZN20IOBlockStorageDevice10gMetaClassE': 0xfffffff007add1d0,
+            '__ZN20IOBlockStorageDevice11requestIdleEv': 0xfffffff00596f050,
+            '__ZN20IOBlockStorageDevice13doSetPriorityEP26IOBlockStorageDeviceExtentjh': 0xfffffff00596f068,
+            '__ZN20IOBlockStorageDevice13setPropertiesEP8OSObject': 0xfffffff00596ef38,
+            '__ZN20IOBlockStorageDevice20doGetProvisionStatusEyyPjP35IOBlockStorageProvisionDeviceExtenty': 0xfffffff00596f08c,
+            '__ZN20IOBlockStorageDevice4initEP12OSDictionary': 0xfffffff00596ee30,
+            '__ZN20IOBlockStorageDevice7doUnmapEP26IOBlockStorageDeviceExtentjj': 0xfffffff00596f05c,
+            '__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass': 0xfffffff00596ed98,
+            '__ZN20IOBlockStorageDeviceD2Ev': 0xfffffff00596edb8,
+            '__ZNK20IOBlockStorageDevice11getPropertyEPK8OSSymbol': 0xfffffff00596ee88,
+            '__ZTV20IOBlockStorageDevice': 0xfffffff006cb44c0,
+        }
+        slide = prelink_slide()
         bindings_s = out / 'storage-bindings.S'
-        bindings_s.write_text("""
-.globl __ZN20IOBlockStorageDevice10gMetaClassE
-.set __ZN20IOBlockStorageDevice10gMetaClassE, 0xfffffff007add1d0
-.globl __ZN20IOBlockStorageDevice11requestIdleEv
-.set __ZN20IOBlockStorageDevice11requestIdleEv, 0xfffffff00596f050
-.globl __ZN20IOBlockStorageDevice13doSetPriorityEP26IOBlockStorageDeviceExtentjh
-.set __ZN20IOBlockStorageDevice13doSetPriorityEP26IOBlockStorageDeviceExtentjh, 0xfffffff00596f068
-.globl __ZN20IOBlockStorageDevice13setPropertiesEP8OSObject
-.set __ZN20IOBlockStorageDevice13setPropertiesEP8OSObject, 0xfffffff00596ef38
-.globl __ZN20IOBlockStorageDevice20doGetProvisionStatusEyyPjP35IOBlockStorageProvisionDeviceExtenty
-.set __ZN20IOBlockStorageDevice20doGetProvisionStatusEyyPjP35IOBlockStorageProvisionDeviceExtenty, 0xfffffff00596f08c
-.globl __ZN20IOBlockStorageDevice4initEP12OSDictionary
-.set __ZN20IOBlockStorageDevice4initEP12OSDictionary, 0xfffffff00596ee30
-.globl __ZN20IOBlockStorageDevice7doUnmapEP26IOBlockStorageDeviceExtentjj
-.set __ZN20IOBlockStorageDevice7doUnmapEP26IOBlockStorageDeviceExtentjj, 0xfffffff00596f05c
-.globl __ZN20IOBlockStorageDeviceC2EPK11OSMetaClass
-.set __ZN20IOBlockStorageDeviceC2EPK11OSMetaClass, 0xfffffff00596ed98
-.globl __ZN20IOBlockStorageDeviceD2Ev
-.set __ZN20IOBlockStorageDeviceD2Ev, 0xfffffff00596edb8
-.globl __ZNK20IOBlockStorageDevice11getPropertyEPK8OSSymbol
-.set __ZNK20IOBlockStorageDevice11getPropertyEPK8OSSymbol, 0xfffffff00596ee88
-.globl __ZTV20IOBlockStorageDevice
-.set __ZTV20IOBlockStorageDevice, 0xfffffff006cb44c0
-""")
+        bindings_s.write_text(''.join(f'.globl {name}\n.set {name}, {address + slide:#x}\n'
+                                      for name, address in sorted(stock.items())))
+        print(f'NativeUfs: IOStorageFamily bindings slid by {slide:#x}')
         bindings_o = out / 'storage-bindings.o'
         subprocess.run(['xcrun', 'clang', '-target', 'arm64-apple-ios17.0', '-c', str(bindings_s), '-o', str(bindings_o)], check=True)
         extra_objects.append(bindings_o)
