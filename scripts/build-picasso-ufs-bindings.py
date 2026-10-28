@@ -60,6 +60,23 @@ required = [
 missing = [name for name in required if name not in by_name]
 if missing:
     raise SystemExit('missing exports: ' + ', '.join(missing))
+
+
+def backed(address):
+    try:
+        np.backed_offset(native['segments'], address, 32, len(kernel))
+        return True
+    except SystemExit:
+        return False
+
+
+# The driver archive binds these same names as absolutes at their post-slide addresses, so in the
+# linked kernel the nlist already reports them slid and adding the slide again lands outside every
+# segment. Take whichever of the two candidates the image actually backs.
+pre_slide = {name: va for va, names in exports.items() for name in names}
+for name in required:
+    if not backed(by_name[name]) and backed(pre_slide[name]):
+        by_name[name] = pre_slide[name]
 for name in required:
     print(f'  {name} -> {by_name[name]:#x}')
 
