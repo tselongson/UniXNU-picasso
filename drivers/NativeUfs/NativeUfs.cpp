@@ -1918,8 +1918,53 @@ static void discardPendingWindow (unsigned index)
   device->release ();
 }
 
+// The publication context handed from startRoot to the publisher thread.
+static RootLayout *gRootLayout = nullptr;
+
+// Allocates and configures one block device per root window. Runs on the publisher thread, never on
+// the platform-expert thread: the allocation and the 128 KiB bounce buffer block while the registry
+// is still matching.
+static bool prepareRootWindows ()
+{
+  if (!gRootLayout) {
+    return false;
+  }
+  RootLayout *layout = gRootLayout;
+  for (unsigned index = 0; index < layout->windows; ++index) {
+    gRootDiagnostic.stage = "root window allocation/configuration";
+    gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Prepare);
+    gRootDiagnostic.publicationWindow = index;
+    gRootDiagnostic.windowBytes = layout->window[index].size;
+    ufsMarker (1, "before OSTypeAlloc");
+    NativeUfsBlock *device = OSTypeAlloc (NativeUfsBlock);
+    ufsMarker (2, "after OSTypeAlloc");
+    gPendingDevice[index] = device;
+    gPendingAttached[index] = false;
+    gPendingUuid[index][0] = 0;
+    uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
+    bool configured = device && device->configure (layout->window[index].name, absolute,
+                                                   layout->window[index].size);
+    ufsMarker (3, "after configure");
+    if (!configured) {
+      return false;
+    }
+    ++gPending;
+    gRootDiagnostic.prepared = gPending;
+  }
+  return true;
+}
+
 static void publishThread (void *, wait_result_t)
 {
+  if (!prepareRootWindows ()) {
+    IOLog ("NativeUfs: root window preparation failed; nothing published\n");
+    rootDiagnosticFailure ("root window preparation failed");
+    if (gRootLayout) {
+      IOFree (gRootLayout, sizeof (RootLayout));
+      gRootLayout = nullptr;
+    }
+    return;
+  }
   struct Operations {
     bool start (unsigned index) {
       NativeUfsBlock *device = gPendingDevice[index];
@@ -2294,88 +2339,21 @@ bool NativeUfs::startRoot (IOService *provider)
   // Prepare all windows or publish none. Diagnostics never decide policy.
   gPending = 0;
   gPendingProvider = this;
-  struct Operations {
-    NativeUfs *owner;
-    RootLayout *layout;
-    bool prepare (unsigned index) {
-      gRootDiagnostic.stage = "root window allocation/configuration";
-      gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Prepare);
-      gRootDiagnostic.publicationWindow = index;
-      gRootDiagnostic.windowBytes = layout->window[index].size;
-      ufsMarker (1, "before OSTypeAlloc");
-      NativeUfsBlock *device = OSTypeAlloc (NativeUfsBlock);
-      ufsMarker (2, "after OSTypeAlloc");
-      gPendingDevice[index] = device;
-      gPendingAttached[index] = false;
-      gPendingUuid[index][0] = 0;
-      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
-      // No logging in this path: the run stops exactly at the first IOLog after the allocation, and
-      // a marker on either side of it is the test for whether IOLog itself is what blocks. init(),
-      // attach() and start() all happen on the publisher thread.
-      bool configured = device && device->configure (layout->window[index].name, absolute,
-                                                     layout->window[index].size);
-      ufsMarker (3, "after configure");
-      if (!configured) return false;
-      gRootDiagnostic.stage = "root window attachment";
-      gPendingAttached[index] = true;
-      ++gPending;
-      gRootDiagnostic.prepared = gPending;
-      return true;
-    }
-    bool validate () {
-      IOLog ("NativeUfs: validate enter pending=%u\n", gPending);
-      ufsMarker (6, "validate enter");
-      gRootDiagnostic.stage = "signed window identities";
-      gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Identity);
-#if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
-      for (unsigned i = 0; i < gPending; ++i) {
-        gRootDiagnostic.publicationWindow = i;
-        if (!gPendingDevice[i]->signedVolumeUuid (gPendingUuid[i])) return false;
-        for (unsigned j = 0; j < i; ++j) if (!strcmp (gPendingUuid[i], gPendingUuid[j])) return false;
-      }
-      return true;
-#else
-      // Bring-up build: no verified-root policy is linked, so the signed-identity check cannot run.
-      // Refusing here stops the driver before the block layer is exercised at all, which is the one
-      // thing this milestone needs to test. Publish anyway, and say so loudly. Replace this with the
-      // verified-root policy (upstream scripts/build-picasso-verified-policy.py) before any image
-      // that is not a throwaway test is mounted.
-      IOLog ("NativeUfs: WARNING verified-root policy not compiled in; publishing without "
-             "signed-identity checks\n");
-      return true;
-#endif
-    }
-    bool schedule () {
-      IOLog ("NativeUfs: schedule enter\n");
-      ufsMarker (7, "schedule enter");
-      gRootDiagnostic.stage = "root publisher thread";
-      gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Schedule);
-      gRootDiagnostic.publicationWindow = 0xffffffff;
-      thread_t thread = nullptr;
-      owner->retain ();
-      if (kernel_thread_start (publishThread, nullptr, &thread) != KERN_SUCCESS) {
-        owner->release ();
-        return false;
-      }
-      thread_deallocate (thread);
-      return true;
-    }
-    void discard (unsigned index) { discardPendingWindow (index); }
-  } operations = { this, layout };
-  UfsRootPublicationResult result = ufsPrepareRootWindows (operations, layout->windows);
-  IOFree (layout, sizeof (RootLayout));
-  if (result.phase != UfsRootPhase::Complete) {
-    gPending = 0;
-    gRootDiagnostic.result = result.phase == UfsRootPhase::Identity ? kIOReturnNotPrivileged :
-      result.phase == UfsRootPhase::Schedule ? kIOReturnNoResources : kIOReturnError;
-    IOLog ("NativeUfs: root preparation failed phase=%u window=%u; nothing published\n",
-           static_cast<unsigned> (result.phase), result.index);
-    IOService::stop (provider);
-    rootDiagnosticFailure (result.phase == UfsRootPhase::Schedule ? "root publisher thread creation failed" :
-                          result.phase == UfsRootPhase::Identity ? "signed window identities rejected" :
-                          "root window preparation failed");
+  // Everything that touches IOKit runs on the publisher thread. Doing any of it from start()
+  // blocked with no output: markers placed around the window configuration showed the run stops
+  // there, and that path allocates a lock and a 128 KiB bounce buffer while the platform expert is
+  // still matching. Hand the layout across and let the thread own the whole publication.
+  gRootLayout = layout;
+  retain ();
+  thread_t thread = nullptr;
+  if (kernel_thread_start (publishThread, nullptr, &thread) != KERN_SUCCESS) {
+    release ();
+    IOFree (layout, sizeof (RootLayout));
+    gRootLayout = nullptr;
+    rootDiagnosticFailure ("root publisher thread creation failed");
     return false;
   }
+  thread_deallocate (thread);
   return true;
 }
 
