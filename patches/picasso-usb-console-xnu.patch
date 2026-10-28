@@ -601,6 +601,15 @@ index 0000000..e00508f
 +	    scr0, idr0, idr1, idr2, gfsr);
 +	printf("PICASSO USB: SMMU streams=%u banks=%u pages=%u\n",
 +	    count, banks, pages);
++	// sCR0 bit 0 is SMMUEN. When translation is off the controller's DMA goes straight to physical
++	// addresses and there is no route to check: the guard exists to stop us weakening a live
++	// translation, not to require one. Without this the driver refuses on a machine where the
++	// bootloader simply left the SMMU disabled, and the console never comes up.
++	if (!(scr0 & 1u)) {
++		printf("PICASSO USB: SMMU disabled (sCR0=%08x); DMA is direct, no route needed\n",
++		    scr0);
++		return true;
++	}
 +	if (!count || !banks || pages > 128 ||
 +	    (pages + banks) * 4096u > SMMU_SIZE) {
 +		printf("PICASSO USB: SID e0 guard FAIL: unsupported SMMU geometry\n");
