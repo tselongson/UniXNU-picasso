@@ -51,33 +51,20 @@ exports = np.exports(kernel, native)
 by_name = {name: (va + slide) & 0xffffffffffffffff for va, names in exports.items() for name in names}
 print(f'picasso UFS bindings: slide {slide:#x}, {len(by_name)} exports')
 
-required = [
-    '__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass',
-    '__ZN20IOBlockStorageDeviceD2Ev',
-    '__ZTV20IOBlockStorageDevice',
-    '__ZN20IOBlockStorageDevice10gMetaClassE',
-]
-missing = [name for name in required if name not in by_name]
-if missing:
-    raise SystemExit('missing exports: ' + ', '.join(missing))
-
-
-def backed(address):
-    # backed_offset signals an unusable address with ValueError, not SystemExit.
-    try:
-        np.backed_offset(native['segments'], address, 32, len(kernel))
-        return True
-    except (SystemExit, ValueError):
-        return False
-
-
-# The driver archive binds these same names as absolutes at their post-slide addresses, so in the
-# linked kernel the nlist already reports them slid and adding the slide again lands outside every
-# segment. Take whichever of the two candidates the image actually backs.
-pre_slide = {name: va for va, names in exports.items() for name in names}
-for name in required:
-    if not backed(by_name[name]) and backed(pre_slide[name]):
-        by_name[name] = pre_slide[name]
+# Stock (pre-prelink) IOStorageFamily addresses, the same table build-arm-driver.py binds against.
+# Deriving them from the export table does not work once the driver archive binds these names as
+# absolutes: the linked kernel then reports them already slid, and sliding again lands on a mapped
+# page that looks plausible but is the wrong one -- the vtable came back with sixteen zero entries
+# and the metaclass came back 16 MiB low. Stock plus slide is unambiguous.
+STOCK = {
+    '__ZN20IOBlockStorageDeviceC2EPK11OSMetaClass': 0xfffffff00596ed98,
+    '__ZN20IOBlockStorageDeviceD2Ev': 0xfffffff00596edb8,
+    '__ZTV20IOBlockStorageDevice': 0xfffffff006cb44c0,
+    '__ZN20IOBlockStorageDevice10gMetaClassE': 0xfffffff007add1d0,
+}
+required = list(STOCK)
+for name, address in STOCK.items():
+    by_name[name] = (address + slide) & 0xffffffffffffffff
 for name in required:
     print(f'  {name} -> {by_name[name]:#x}')
 
