@@ -63,10 +63,11 @@ if missing:
 
 
 def backed(address):
+    # backed_offset signals an unusable address with ValueError, not SystemExit.
     try:
         np.backed_offset(native['segments'], address, 32, len(kernel))
         return True
-    except SystemExit:
+    except (SystemExit, ValueError):
         return False
 
 
