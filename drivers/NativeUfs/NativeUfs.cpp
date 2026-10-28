@@ -1936,12 +1936,18 @@ static bool prepareRootWindows ()
     gRootDiagnostic.publicationWindow = index;
     gRootDiagnostic.windowBytes = layout->window[index].size;
     IOLog ("NativeUfs: publish %u alloc enter\n", index);
-    // Probe the same allocator OSTypeAlloc uses (kheap_alloc with Z_WAITOK) before touching the
-    // class, so the log says whether plain allocation works at this point or not.
+    // Two allocator paths, probed separately. IOMalloc goes through kalloc; OSTypeAlloc ends in
+    // OSObject::operator new, which is kheap_alloc(KHEAP_DEFAULT, ..., Z_WAITOK) and can sleep.
     void *probe = IOMalloc (256);
-    IOLog ("NativeUfs: publish %u probe=%u\n", index, probe ? 1u : 0u);
+    IOLog ("NativeUfs: publish %u kalloc=%u\n", index, probe ? 1u : 0u);
     if (probe) {
       IOFree (probe, 256);
+    }
+    void *heap = kheap_alloc (KHEAP_DEFAULT, 256,
+                              Z_VM_TAG_BT (Z_WAITOK_ZERO, VM_KERN_MEMORY_LIBKERN));
+    IOLog ("NativeUfs: publish %u kheap=%u\n", index, heap ? 1u : 0u);
+    if (heap) {
+      kheap_free (KHEAP_DEFAULT, heap, 256);
     }
     NativeUfsBlock *device = OSTypeAlloc (NativeUfsBlock);
     IOLog ("NativeUfs: publish %u allocated\n", index);
@@ -1969,11 +1975,6 @@ static void publishThread (void *, wait_result_t)
   // (probe=1) while OSTypeAlloc never returns, which is what a sleeping wait on a heap that is not
   // ready yet looks like. Upstream's deferred root publication waits for the CDC console for the
   // same reason. Give the system time to finish bringing the heap and the registry up.
-  IOLog ("NativeUfs: publisher waiting before publication\n");
-  for (unsigned tick = 0; tick < 5000; ++tick) {
-    IODelay (1000);
-  }
-  IOLog ("NativeUfs: publisher starting publication\n");
   if (!prepareRootWindows ()) {
     IOLog ("NativeUfs: root window preparation failed; nothing published\n");
     rootDiagnosticFailure ("root window preparation failed");
