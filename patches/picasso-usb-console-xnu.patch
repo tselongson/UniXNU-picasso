@@ -15,7 +15,7 @@ new file mode 100644
 index 0000000..e00508f
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,1467 @@
+@@ -0,0 +1,1479 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -60,6 +60,13 @@ index 0000000..e00508f
 +	uint64_t    total;
 +} pur_ring;
 +static uint32_t _Atomic pur_lock;
++/*
++ * Progress marker for the console bring-up, published as a plain variable so another driver can
++ * report it without touching DWC3: reading that controller while it is unclocked hangs the bus
++ * and the watchdog resets the phone. 10 entered, 11 enabled, 12 clocks ok, 20 guard passed,
++ * 30 gadget started; negative values are the matching failures.
++ */
++int picasso_usb_console_state = -1;
 +static uint64_t _Atomic pur_dropped;
 +static bool pur_live;                   /* set once the TX thread streams */
 +
@@ -1359,6 +1366,7 @@ index 0000000..e00508f
 +void
 +picasso_usb_console_start(void)
 +{
++	picasso_usb_console_state = 10;
 +	int enabled = 0;
 +	int hold = 0;
 +	int bind_smmu = 0;
@@ -1370,6 +1378,7 @@ index 0000000..e00508f
 +	if (!enabled) {
 +		return;
 +	}
++	picasso_usb_console_state = 11;
 +	vm_offset_t gcc = ml_io_map(GCC_PA, GCC_SIZE);
 +	if (gcc == 0) {
 +		printf("PICASSO USB: GCC map failed\n");
@@ -1391,6 +1400,7 @@ index 0000000..e00508f
 +		picasso_usb_park(hold);
 +		return;
 +	}
++	picasso_usb_console_state = 12;
 +	vm_size_t smmu_size = bind_smmu == 2 ? PAGE_SIZE : SMMU_SIZE;
 +	vm_offset_t smmu = ml_io_map(SMMU_PA, smmu_size);
 +	if (smmu == 0) {
@@ -1471,6 +1481,7 @@ index 0000000..e00508f
 +		}
 +	}
 +	ud.smmu_guard = picasso_usb_smmu_guard(smmu, 0, 0);
++	picasso_usb_console_state = ud.smmu_guard ? 20 : -20;
 +	if (!ud.smmu_guard) {
 +		printf("PICASSO USB: SID e0 guard refused; controller untouched\n");
 +		picasso_usb_park(hold);
@@ -1478,6 +1489,7 @@ index 0000000..e00508f
 +	}
 +	if (enabled >= 2) {
 +		picasso_usb_gadget_start(dwc, smmu);
++		picasso_usb_console_state = 30;
 +	} else {
 +		printf("PICASSO USB: route test complete; DWC3 remains halted\n");
 +	}

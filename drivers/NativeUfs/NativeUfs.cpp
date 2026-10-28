@@ -2311,6 +2311,10 @@ bool NativeUfs::start (IOService *provider)
 
 // Boot the root image's windows as block devices. Soft-fails (logs, publishes nothing).
 
+// Set by bsd/dev/picasso_usb.c while it brings the console up. Read as a plain variable: touching
+// DWC3 here while it is unclocked hangs the bus and the watchdog resets the phone.
+extern "C" int picasso_usb_console_state;
+
 bool NativeUfs::startRoot (IOService *provider)
 {
   const char *why = "";
@@ -2322,23 +2326,11 @@ bool NativeUfs::startRoot (IOService *provider)
   }
   IOLog ("NativeUfs: startRoot enter (clock=%llu)\n", mach_absolute_time ());
   {
-    // The USB console prints its own state right after the copyright banner, far above anything
-    // still on screen by the time the phone is photographed. Read the DWC3 registers here instead:
-    // RUN_STOP set and DEVCTRLHLT clear means the gadget was started, which separates "the SMMU
-    // guard refused" from "the controller is up but did not enumerate".
-    OSSharedPtr<IOMemoryMap> dwcMap;
-    // The DWC3 register block reaches past 0xc70c, so a single page is not enough: mapping 0x1000
-    // and reading GCTL at 0xc110 faults with a level-3 translation abort (far = base + 0xc110).
-    uintptr_t dwc = mapPhys (0x0a600000ULL, 0x10000, dwcMap);
-    if (dwc) {
-      uint32_t gctl = read32 (dwc, 0xc110);
-      uint32_t dctl = read32 (dwc, 0xc704);
-      uint32_t dsts = read32 (dwc, 0xc70c);
-      IOLog ("NativeUfs: DWC3 gctl=%08x dctl=%08x dsts=%08x run=%u halted=%u\n",
-             gctl, dctl, dsts, (dctl >> 31) & 1u, (dsts >> 22) & 1u);
-    } else {
-      IOLog ("NativeUfs: DWC3 map failed\n");
-    }
+    // Never touch DWC3 from here. Once the mapping is wide enough the access reaches the
+    // controller, which is not clocked yet, and reading an unclocked block hangs the bus until the
+    // watchdog resets the phone -- v59 faulted in the MMU and panicked, v60 got through and the
+    // phone rebooted into recovery. The console driver records its own state instead.
+    IOLog ("NativeUfs: USB console state=%d\n", picasso_usb_console_state);
   }
   if (!hostBringUp (&why)) {
     rootDiagnosticFailure (why);
