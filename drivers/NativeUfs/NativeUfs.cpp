@@ -1935,10 +1935,16 @@ static bool prepareRootWindows ()
     gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Prepare);
     gRootDiagnostic.publicationWindow = index;
     gRootDiagnostic.windowBytes = layout->window[index].size;
-    IOLog ("NativeUfs: publish %u alloc enter size=%llx\n", index, layout->window[index].size);
+    IOLog ("NativeUfs: publish %u alloc enter\n", index);
+    // Probe the same allocator OSTypeAlloc uses (kheap_alloc with Z_WAITOK) before touching the
+    // class, so the log says whether plain allocation works at this point or not.
+    void *probe = IOMalloc (256);
+    IOLog ("NativeUfs: publish %u probe=%u\n", index, probe ? 1u : 0u);
+    if (probe) {
+      IOFree (probe, 256);
+    }
     NativeUfsBlock *device = OSTypeAlloc (NativeUfsBlock);
-    IOLog ("NativeUfs: publish %u allocated %llx\n", index,
-           static_cast<uint64_t> (reinterpret_cast<uintptr_t> (device)));
+    IOLog ("NativeUfs: publish %u allocated\n", index);
     gPendingDevice[index] = device;
     gPendingAttached[index] = false;
     gPendingUuid[index][0] = 0;
