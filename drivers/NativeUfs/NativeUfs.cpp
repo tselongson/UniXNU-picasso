@@ -2306,6 +2306,10 @@ bool NativeUfs::start (IOService *provider)
 
 // Boot the root image's windows as block devices. Soft-fails (logs, publishes nothing).
 
+// Defined in bsd/dev/picasso_usb.c (C linkage); the declaration has to sit at file scope because a
+// linkage specification is not allowed inside a function body.
+extern "C" void picasso_usb_console_start (void);
+
 bool NativeUfs::startRoot (IOService *provider)
 {
   const char *why = "";
@@ -2319,12 +2323,9 @@ bool NativeUfs::startRoot (IOService *provider)
   // The USB console reports its GCC/DWC3 state right after the copyright banner, which has long
   // scrolled off by the time anyone photographs the screen. Re-run its probe here, where the output
   // is still visible, so the reason it never enumerated is readable.
-  {
-    extern void picasso_usb_console_start (void);
-    IOLog ("NativeUfs: re-running the USB console probe\n");
-    picasso_usb_console_start ();
-    IOLog ("NativeUfs: USB console probe returned\n");
-  }
+  IOLog ("NativeUfs: re-running the USB console probe\n");
+  picasso_usb_console_start ();
+  IOLog ("NativeUfs: USB console probe returned\n");
   if (!hostBringUp (&why)) {
     rootDiagnosticFailure (why);
     IOLog ("NativeUfs: root bring-up failed: %s\n", why);
