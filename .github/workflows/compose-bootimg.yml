@@ -110,13 +110,24 @@ jobs:
           python3 ./unixnu defconfig picasso_defconfig
           python3 ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily
           mkdir -p out/picasso/logs
+          # AMFI refuses launchd with "unsuitable CT policy 0 for this platform/device" and then
+          # kills pid 1. Every amfi boot-arg was tried and none of them reaches that decision: the
+          # platform simply has no code trust policy. The IPSW's StaticTrustCache carries the
+          # cdhash of every system binary including launchd and dyld, which is what AMFI consults
+          # instead of a signature. board.toml leaves trust_cache_sha256 unset, and payload.py
+          # skips the allow-list check when it is unset, so no digest has to be pinned here.
+          TRUST=$(python3 "$(python3 ./unixnu --prepare)/scripts/extract-target-volume.py" \
+                    StaticTrustCache --ipsw "$UNIXNU_IPSW" 2>&1 | tail -1)
+          echo "trust cache: $TRUST"
+          test -s "$TRUST" || { echo "trust cache extraction failed"; exit 1; }
+          echo "UNIXNU_TRUST_CACHE=$TRUST" >> "$GITHUB_ENV"
           # Two passes. The first links and prelinks the kernel, which is what produces
           # out/picasso/kernel/kernel.macho. The IOStorageFamily bindings archive is built during
           # the archive step, which runs before that link, so on the first pass it has no
           # candidate to read and emits an empty archive. The second pass sees the candidate from
           # the first and links the real bindings in.
-          python3 ./unixnu build kernel payload -j 3 2>&1 | tee out/picasso/logs/actions-build.log
-          python3 ./unixnu build kernel payload -j 3 2>&1 | tee -a out/picasso/logs/actions-build.log
+          python3 ./unixnu build kernel payload -j 3 --trust-cache "$UNIXNU_TRUST_CACHE" 2>&1 | tee out/picasso/logs/actions-build.log
+          python3 ./unixnu build kernel payload -j 3 --trust-cache "$UNIXNU_TRUST_CACHE" 2>&1 | tee -a out/picasso/logs/actions-build.log
 
       - name: Report kernel/payload sizes
         run: |
