@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-30 00:45（v87，commit `c5caf75`）
+最后更新：2026-10-30 01:45（v92，commit `2c66b08`）
 
 ## 一句话
 
@@ -150,8 +150,27 @@ unixnu build --trust-cache <bundle>
 `ignition level: 0x5` 之后再无输出，但**设备活着**（心跳持续、串口在）。
 不是崩溃，是在等待或静默工作。
 
-最可能的原因：**payload 里没有 Data 卷**。`docs/concepts/userdata.md` 说明可写的 Data 卷
-来自 payload 的 Data ramdisk seed，而我们的 `data_ramdisk_sha256` 一直是 null。
+### 已提供 Data seed（v92），但 ignition 仍停在同一处
+
+`data_ramdisk_sha256` 之前一直是 null。经测量确认**两个容器各只有一个卷**（OS 是系统卷
+`04769d26`，SystemOS 是 cryptex `8846fe78`），没有 Data 卷；`-apfs_shared_datavolume` 也无效。
+所以 Data 卷必须由 seed 提供。
+
+仓库里没有 seed，也没有从零创建的工具（`seed-data-grow.py` 只能扩展现有 `.dbr`，sheng 无发布）。
+但**打包器是现成的**：`drivers/DarwinBoot/Test/packed_ramdisk.py` 的 `pack()`，
+DarwinBoot 自己的测试就用它。
+
+`scripts/make-data-seed.py` 用 hdiutil 建空 APFS 容器、dd 出原始设备、打包成 DBRDISK1：
+
+```
+data.dbr: 110704 bytes packed from 3 GiB
+```
+
+payload 里确实有了（`payload.json` 的 `data_ramdisk_sha256` 非空，payload.img 里能搜到
+`PackedRAMDisk` 占位符）。**但 ignition 依然停在 `ignition level: 0x5` 之后，输出与 v89 完全相同。**
+
+所以"缺 Data 卷"这个假设**已被证伪**，或者至少不是唯一原因。下一步要查 ignition 在 level 5
+到底等什么，而不是继续猜。
 
 ### 另一条可借鉴的参数
 
