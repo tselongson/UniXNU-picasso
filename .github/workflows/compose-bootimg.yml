@@ -142,6 +142,13 @@ jobs:
             ls -la "$VOLUMES"
             exit 1
           fi
+          # DISABLED: passing this to the build makes DarwinBoot refuse the whole payload with
+          # EFI_COMPROMISED_DATA -- "invalid kernel, ADT or trust cache" per docs/concepts/
+          # boot-chain.md. make-picasso-adt.py writes a 16-byte zero placeholder for the TrustCache
+          # memory-map entry, and DarwinBoot validates it. The extraction above still runs so the
+          # file is on hand, but nothing consumes it until the placeholder is replaced with a
+          # cache DarwinBoot accepts.
+          #
           # $GITHUB_ENV only reaches later steps, so the two build lines below must use $TRUST
           # directly. Writing it there and reading it back in the same step passed an empty
           # --trust-cache, which is why trust_cache_sha256 came back null while the extraction
@@ -152,8 +159,8 @@ jobs:
           # the archive step, which runs before that link, so on the first pass it has no
           # candidate to read and emits an empty archive. The second pass sees the candidate from
           # the first and links the real bindings in.
-          python3 ./unixnu build kernel payload -j 3 --trust-cache "$TRUST" 2>&1 | tee out/picasso/logs/actions-build.log
-          python3 ./unixnu build kernel payload -j 3 --trust-cache "$TRUST" 2>&1 | tee -a out/picasso/logs/actions-build.log
+          python3 ./unixnu build kernel payload -j 3 2>&1 | tee out/picasso/logs/actions-build.log
+          python3 ./unixnu build kernel payload -j 3 2>&1 | tee -a out/picasso/logs/actions-build.log
 
       - name: Report kernel/payload sizes
         run: |
