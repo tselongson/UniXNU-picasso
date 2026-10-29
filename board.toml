@@ -71,6 +71,10 @@ kernelcache_sha256 = ""
 slide = "-0x1000000"
 early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff005ab4ae0"
 roots = [
+  # load_init_program reads /sbin/launchd, which is decmpfs-compressed. Without this kext the
+  # decompressor table has no entry for the type, decmpfs_read_compressed returns 45, and
+  # load_init_program fails with errno 45 -- after everything else has succeeded.
+  "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
   "com.apple.driver.AppleARMPlatform",
   "com.apple.driver.AppleARMWatchdogTimer",
   "com.apple.driver.AppleMobileFileIntegrity",
