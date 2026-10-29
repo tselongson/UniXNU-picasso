@@ -2754,7 +2754,7 @@ index 0000000..b77feef
 +	picasso_usb_park(hold);
 +}
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
-index bb558ee..d957cd7 100644
+index bb558ee..103c88f 100644
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
 @@ -506,6 +506,10 @@ bsd_init(void)
@@ -2768,17 +2768,18 @@ index bb558ee..d957cd7 100644
  
  #if CONFIG_DEV_KMEM
  	bsd_init_kprintf("calling dev_kmem_init\n");
-@@ -983,6 +987,9 @@ bsd_init(void)
- 		 */
- 		bsd_init_kprintf("doing image boot: type = %d\n", imageboot_type);
- 		imageboot_setup(imageboot_type);
+@@ -1070,6 +1074,10 @@ bsd_init(void)
+ 	bsd_init_kprintf("done\n");
+ }
+ 
 +int picasso_trace_user_return;
 +unsigned int picasso_trace_user_return_count;
 +
- 		IOSetImageBoot();
- 	}
- 
-@@ -1096,8 +1103,11 @@ bsdinit_task(void)
++
+ void
+ bsdinit_task(void)
+ {
+@@ -1096,8 +1104,11 @@ bsdinit_task(void)
  
  	bsd_init_kprintf("bsd_do_post - done");
  
