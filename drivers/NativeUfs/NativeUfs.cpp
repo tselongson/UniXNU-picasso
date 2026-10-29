@@ -1845,8 +1845,16 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
         snprintf (kind, sizeof kind, "MBR");
       }
     }
-    IOLog ("NativeUfs blk[%s]:   kind=%s status=%d done=%llu\n", label, kind,
-           static_cast<int> (result), done);
+    // When nothing matches, the first bytes decide between "the image was never written" (zeros),
+    // "the image is a different format" (some other signature) and "the read is wrong" (garbage).
+    char head[8 * 3 + 1] = {};
+    if (at) {
+      for (unsigned i = 0; i < 8; ++i) {
+        snprintf (head + i * 3, 4, "%02x ", static_cast<uint8_t> (at[i]));
+      }
+    }
+    IOLog ("NativeUfs blk[%s]:   kind=%s status=%d done=%llu head=%s\n", label, kind,
+           static_cast<int> (result), done, head);
   }
   completion->action (completion->target, completion->parameter, result, done);
   return kIOReturnSuccess;
