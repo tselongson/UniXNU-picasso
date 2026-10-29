@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-29 19:15（v71，commit `3321517`）
+最后更新：2026-10-29 21:20（v77，commit `54a1c3d`）
 
 ## 一句话
 
@@ -54,32 +54,48 @@ com.apple.xpc.launchd[1] <Notice>: launchd logging initialized
 **结论：`system-volume-auth-blob` 缺失是非致命的噪声，不是阻塞点。**
 这条错误在我们日志里出现，说明不了为什么没启动。
 
-### 真正的症状
+### 真正的症状（v77 实测）
 
-我们的日志里缺了一行关键输出——qemu 有而我们没有：
-
-```
-apfs_vfsop_mount:2197: disk0s1s1:0 mounted volume: System
-```
-
-而且紧跟在发布之后有：
+两个窗口的内容**都是正确的**，已逐字节确认：
 
 ```
-NativeUfs: published SystemOS
-IOGUIDPartitionScheme::probe fails
-IOFDiskPartitionScheme::probe fails
-IOApplePartitionScheme::probe fails
-AppleAPFSContainerScheme::probe fails        ← 容器方案没认这块盘
+blk[SystemOS]: block=0  head=1a 3a 25 60 ...   kind=NXSB        裸 APFS 容器
+blk[OS]:       block=0  head=00 00 ...         保护性 MBR
+blk[OS]:       block=1  head=45 46 49 20 50 41 52 54 = "EFI PART"  GPT 头
+blk[OS]:       block=2  head=ef 57 34 7c ...   分区项
 ```
 
-`nx_mount` 的 checkpoint 搜索是成功的（xid 14），说明**读盘没问题**；
-但 `AppleAPFSContainerScheme::probe` 失败，意味着 APFS 卷没有被发布成 IOMedia，
-所以 `bsd_init` 等不到 `Apple_HFS`。
+`OS` 窗口是带 GPT 的磁盘镜像，`SystemOS` 是裸容器——与 `docs/concepts/userdata.md`
+的描述完全一致。**镜像没问题。**
 
-### 下一步：查容器方案为什么 probe 失败
+而且分区方案**成功**了：
 
-需要确认我们发布的 IOMedia 的 `Content` 属性和 `Whole` 标记，以及
-`AppleAPFSContainerScheme` 的匹配条件。读盘已经证明可用，所以问题在**媒体属性**或**探测时的数据**。
+```
+nx_mount: disk1s1 checkpoint search: largest xid 418, best xid 418 @ 3
+nx_mount: disk0   checkpoint search: largest xid 14,  best xid 14  @ 9
+```
+
+`disk1s1` 说明 GUID 分区方案发布了分区，两个容器都挂载了。
+
+### 剩下的问题
+
+**`AppleAPFSContainerScheme::probe` 从未成功**（日志里失败三次），所以 APFS 没有把卷
+发布成 `IOMedia`，`bsd_init` 等不到 `Content=Apple_HFS`。
+
+`nx_mount` 是 VFS 在 BSD 设备上直接请求挂载触发的，不是容器方案触发的。
+
+### 下一个要验证的假设
+
+`/chosen/root-matching` **没有设置**（`scripts/make-picasso-adt.py` 支持
+`--root-match-volume-uuid`，但 `board.toml` 没传）。没有它，XNU 用默认的
+`Content=Apple_HFS` 等待，而这要求卷已经被发布——但发布卷是容器方案的职责，
+容器方案又没成功。**这是个循环。**
+
+两条候选路线：
+
+1. 提供 OS 卷的 UUID，让 XNU 按 UUID 匹配（UniXNU 的做法）。UUID 需要从镜像里读出来
+2. 查清容器方案为什么在 block 0 有 `NXSB` 的情况下仍然 probe 失败
+   （怀疑是媒体的 `Whole` 属性，但媒体由基类创建，我们设不了）
 
 ### 另一条可借鉴的参数
 
