@@ -186,6 +186,12 @@ kernel_args = [
   # can mean either "stuck" or "working". boot-progress makes the boot stages print, which separates
   # those two before spending effort on the Data volume.
   "boot-progress=2",
+  # scripts/check-provisioned-data.py describes the retained reference run as "the empty directory
+  # skeleton and the genuine -apfs_shared_datavolume argument", so the reference device does use
+  # this switch. Our two containers each hold exactly one volume -- the System volume in the OS
+  # image and the cryptex in SystemOS -- and no Data volume at all, so this is the switch that
+  # decides whether APFS can proceed without one.
+  "-apfs_shared_datavolume",
   "io=0x232",
   # smmu=6 programs the SMMU route itself and logs the plan; reset=pshold returns to fastboot after
   # a panic.
