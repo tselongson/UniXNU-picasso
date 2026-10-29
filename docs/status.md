@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-29 21:20（v77，commit `54a1c3d`）
+最后更新：2026-10-29 21:35（v78，commit `f7dcb56`）
 
 ## 一句话
 
@@ -20,10 +20,11 @@ XNU 已经跑过 BSD 层、USB 控制台可用、**UFS 根设备成功发布、A
 | 6 | UFS 控制器 bring-up（NOP OUT / 查询 / LU 就绪） | ✅ | `host bring-up ok` |
 | 7 | **根设备发布** | ✅ | `published SystemOS` |
 | 8 | **APFS 容器挂载** | ✅ | `nx_mount: checkpoint search: largest xid 14` |
-| 9 | APFS 容器方案匹配 | ❌ | `AppleAPFSContainerScheme::probe fails` |
-| 10 | APFS 卷挂载 | ❌ | 缺 `apfs_vfsop_mount: ... mounted volume: System` |
-| 11 | `load_init_program` / launchd | ❌ | 未到达 |
-| 12 | 苹果标 / 图形栈 | ❌ | 未到达 |
+| 9 | **APFS 容器方案匹配** | ✅ | `Got boot device = .../AppleAPFSContainerScheme/AppleAPFSMedia/...` |
+| 10 | **根卷挂载** | ✅ | `mount-complete volume DawnUpdate21H461...` |
+| 11 | 根哈希认证 | ❌ | `is_root_hash_authentication_required: root hash authentication is required` |
+| 12 | `load_init_program` / launchd | ❌ | 未到达 |
+| 13 | 苹果标 / 图形栈 | ❌ | 未到达 |
 
 第 7、8 阶段是 2026-10-29 打通的，见 [ufs-root.md](ufs-root.md)。
 上游三个 Picasso 移植目前停在**第 6 与第 7 之间**（README 自述"存储 bring-up 是当前阶段"）。
@@ -84,18 +85,34 @@ nx_mount: disk0   checkpoint search: largest xid 14,  best xid 14  @ 9
 
 `nx_mount` 是 VFS 在 BSD 设备上直接请求挂载触发的，不是容器方案触发的。
 
-### 下一个要验证的假设
+### 突破：根卷挂载成功（v78）
 
-`/chosen/root-matching` **没有设置**（`scripts/make-picasso-adt.py` 支持
-`--root-match-volume-uuid`，但 `board.toml` 没传）。没有它，XNU 用默认的
-`Content=Apple_HFS` 等待，而这要求卷已经被发布——但发布卷是容器方案的职责，
-容器方案又没成功。**这是个循环。**
+给 ADT 加上 `/chosen/root-matching`（UUID `04769D26-2CA0-4825-B443-E2E5F88300F2`，
+从 userdata 镜像里读出来的）之后，死锁解开了：
 
-两条候选路线：
+```
+Waiting on <dict ... IOPropertyMatch ... UUID 04769D26-...>
+Got boot device = IOService:/ArmDTPlatform/ufshc/NativeUfs/NativeUfsBlock/IOBlockStorageDriver/
+                  Native OS Media/IOGUIDPartitionScheme/Untitled 1@1/AppleAPFSContainerScheme/
+                  AppleAPFSMedia/AppleAPFSContainer/DawnUpdate21H461.J120J121J207J208OS@1
+BSD root: disk2s1, major 1, minor 4
+apfs_vfsop_mountroot: apfs: mountroot called!
+handle_mount: disk2s1 mounting volume DawnUpdate21H461...
+mount-complete volume DawnUpdate21H461...
+```
 
-1. 提供 OS 卷的 UUID，让 XNU 按 UUID 匹配（UniXNU 的做法）。UUID 需要从镜像里读出来
-2. 查清容器方案为什么在 block 0 有 `NXSB` 的情况下仍然 probe 失败
-   （怀疑是媒体的 `Whole` 属性，但媒体由基类创建，我们设不了）
+**整条存储链打通**：UFS → IOBlockStorageDriver → 分区方案 → APFS 容器 → APFS 卷。
+
+### 新的阻塞点：根哈希认证
+
+```
+is_root_hash_authentication_required:555: disk2s1 Root Volume, root hash authentication is required
+```
+
+卷挂上了，但内核要求校验根卷哈希才继续。这是 iOS 的 SSV（签名系统卷）机制。
+
+注意与之前的区别：早先 `apfs_extract_root_hash_arm` 的失败发生在**导入阶段**，qemu-t8030
+证明那里非致命；这里的失败发生在**认证阶段**，是硬性要求。
 
 ### 另一条可借鉴的参数
 
