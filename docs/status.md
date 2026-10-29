@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-30 00:10（v86 回退，commit `294ad75`）
+最后更新：2026-10-30 00:45（v87，commit `c5caf75`）
 
 ## 一句话
 
@@ -25,9 +25,10 @@ XNU 已经跑过 BSD 层、USB 控制台可用、**UFS 根设备成功发布、A
 | 11 | **根哈希认证** | ✅ | 加 `allow-root-hash-mismatch` + bsd_init 补丁后越过 |
 | 12 | **`load_init_program`** | ✅ | `attempting to load /sbin/launchd` |
 | 13 | **launchd 读取与解压** | ✅ | 加 `AppleFSCompression` kext 后 `AMFI: is adhoc signed` |
-| 14 | launchd 签名信任 | ❌ | `unsuitable CT policy 0 for this platform/device` |
-| 15 | launchd 运行 / 用户态 | ❌ | 未到达 |
-| 16 | 苹果标 / 图形栈 | ❌ | 未到达 |
+| 14 | **launchd 签名信任** | ✅ | `loaded external trust cache module: 0/1` |
+| 15 | **launchd 运行（用户态）** | ✅ | `Darwin Ignition Sequence Version 1.0.0` |
+| 16 | ignition 后续阶段 | ❌ | 启动后无输出，系统存活但静默 |
+| 17 | 苹果标 / 图形栈 | ❌ | 未到达 |
 
 第 7、8 阶段是 2026-10-29 打通的，见 [ufs-root.md](ufs-root.md)。
 上游三个 Picasso 移植目前停在**第 6 与第 7 之间**（README 自述"存储 bring-up 是当前阶段"）。
@@ -106,49 +107,51 @@ mount-complete volume DawnUpdate21H461...
 
 **整条存储链打通**：UFS → IOBlockStorageDriver → 分区方案 → APFS 容器 → APFS 卷。
 
-### 新的阻塞点：AMFI 拒绝 launchd 的签名
+### 突破：用户态跑起来了（v87）
 
-launchd 被读出、解压、解析之后，AMFI 拒绝它：
+按 `docs/concepts/payload.md` 的要求提供 **trust bundle**（不是裸 cache）之后，AMFI 放行：
+
+```
+AMFI: attempting to load 2 external trust cache modules
+loaded external trust cache module: 0
+loaded external trust cache module: 1
+completed loading external trust cache modules
+```
+
+然后 launchd 作为 PID 1 启动：
 
 ```
 load_init_program: attempting to load /sbin/launchd
-AMFI: '/sbin/launchd' is adhoc signed.
-AMFI: '/sbin/launchd': unsuitable CT policy 0 for this platform/device, rejecting signature.
-AMFI: hook..execve() killing pid 1: dyld signature cannot be verified.
+Darwin Ignition Sequence Version 1.0.0: Fri Jul 11 17:33:51 PDT 2025
+libignition: 1:   ignition level    : 0x5
 ```
 
-随后内核 panic：`unexpected SIGKILL of launchd`（namespace 9 = CODESIGNING）。
+**这是第一次进入用户态。** 设备保持存活（串口心跳持续），内核没有 panic。
 
-**三个启动参数都试过，输出一字未变**：
+### 之前为什么失败
 
-| 尝试 | 结果 |
-|---|---|
-| `amfi_get_out_of_my_way=1` | ❌ |
-| ADT `amfi-only-platform-code` 1→0 | ❌ |
-| `amfi_allow_any_signature=1` | ❌ |
+传的是裸的 `.dmg.trustcache`（IMG4 外壳）。文档规定 DarwinBoot 校验的是 **bundle**：
+32 位计数、偏移表、每个 cache 以 version 2 开头、每项 24 字节、hash 升序。
+**占位符与输入不匹配就是 `EFI_COMPROMISED_DATA`** —— 正是 v86 看到的。
 
-三次完全相同，说明这些开关管不到这个判断。`CT policy 0` 里的 0 是"没有策略数据"，
-不是"策略太严"——所以没有东西可以放宽。
-
-### 试过并失败的路：StaticTrustCache
-
-正确机制应当是提供信任缓存（IPSW 里的 `StaticTrustCache` 含所有系统二进制的 cdhash）。
-workflow 能提取它（`Firmware/044-76040-038.dmg.trustcache`，59519 字节），
-但传进 payload 后 **DarwinBoot 直接拒绝整个 payload**：
+正确链路（已实现）：
 
 ```
-'Boot' returned: Compromised Data          ← EFI_COMPROMISED_DATA
+extract-target-volume.py StaticTrustCache  → IMG4
+scripts/unwrap-img4-payload.py             → bare version-2 module
+scripts/build-original-system-trust.py     → bundle（用 sha256 钉死两个输入）
+unixnu build --trust-cache <bundle>
 ```
 
-`docs/concepts/boot-chain.md` 的失败表里，这一状态只对应一个原因：
-"invalid kernel, ADT or trust cache"。
+生成的 bundle sha256 是 `7416ca4f...`，与 `make-owner-trust-bundle.py` 里钉死的常量一致。
 
-原因在 `make-picasso-adt.py:137`：`--trust-cache` 在那里是**布尔开关**，写的是
-**16 字节零占位符**（注释原文 "Zeroed TrustCache sidecar handoff placeholder"）。
-DarwinBoot 会校验它，一串零过不去。
+### 当前状态：ignition 静默
 
-**该接线已回退（`294ad75`）**，提取步骤保留但不再传给构建。
-下一步要提供 DarwinBoot 能接受的缓存，而不是占位符。
+`ignition level: 0x5` 之后再无输出，但**设备活着**（心跳持续、串口在）。
+不是崩溃，是在等待或静默工作。
+
+最可能的原因：**payload 里没有 Data 卷**。`docs/concepts/userdata.md` 说明可写的 Data 卷
+来自 payload 的 Data ramdisk seed，而我们的 `data_ramdisk_sha256` 一直是 null。
 
 ### 另一条可借鉴的参数
 
