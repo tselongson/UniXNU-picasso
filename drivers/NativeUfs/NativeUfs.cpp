@@ -2311,10 +2311,6 @@ bool NativeUfs::start (IOService *provider)
 
 // Boot the root image's windows as block devices. Soft-fails (logs, publishes nothing).
 
-// Set by bsd/dev/picasso_usb.c while it brings the console up. Read as a plain variable: touching
-// DWC3 here while it is unclocked hangs the bus and the watchdog resets the phone.
-extern "C" int picasso_usb_console_state;
-
 bool NativeUfs::startRoot (IOService *provider)
 {
   const char *why = "";
@@ -2325,13 +2321,6 @@ bool NativeUfs::startRoot (IOService *provider)
     IOLog ("NativeUfs: marker %d\n", marker);
   }
   IOLog ("NativeUfs: startRoot enter (clock=%llu)\n", mach_absolute_time ());
-  {
-    // Never touch DWC3 from here. Once the mapping is wide enough the access reaches the
-    // controller, which is not clocked yet, and reading an unclocked block hangs the bus until the
-    // watchdog resets the phone -- v59 faulted in the MMU and panicked, v60 got through and the
-    // phone rebooted into recovery. The console driver records its own state instead.
-    IOLog ("NativeUfs: USB console state=%d\n", picasso_usb_console_state);
-  }
   if (!hostBringUp (&why)) {
     rootDiagnosticFailure (why);
     IOLog ("NativeUfs: root bring-up failed: %s\n", why);
