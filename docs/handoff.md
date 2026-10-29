@@ -36,12 +36,24 @@ import_iboot_forwarded_roothash:3496: apfs_extract_root_hash_and_manifest failed
 - `picasso_usb_hold=1` 会把内核停在 `bsd_init`（源码 + 日志双重确认）
 - `picasso_usb_smmu=0` 时串口不出现
 
+**已用单变量实验证实（2026-10-29 晚）**
+
+- **`delay()` 换自旋是唯一原因**：分支 `probe/iodelay-restored` 只把 `delay()` 换回
+  `IODelay(2)`，其余不动 —— 结果卡在 `nop: cleared` 之后，`submit returned` 打不出来。
+  恢复自旋即发布成功。
+- **NOP 三行埋点是惰性的**：分支 `probe/no-breadcrumbs` 只删埋点，结果与 v71 完全一致
+  （`published SystemOS` + `checkpoint xid 14`）。
+
+**已排除**
+
+- **"控制台 busy poller 饿死 `IODelay`"**：`IODelay` 版本 + `picasso_usb=0`（无控制台）
+  仍然停在 `Waiting on Apple_HFS`。假设被推翻。
+
 **未验证 / 未解释（不要在这些之上做假设）**
 
-- **为什么 `IODelay` 在 v55 能返回、在 v70 不能** —— 同一个调用，两个版本行为不同，
-  差异只在 USB 补丁版本和启动参数，目前没有证据指认是哪一个
-- `delay()` 换自旋是 v71 通了的**操作原因**，但没有单独回退验证过它是否唯一原因
-  （同一版还加了 NOP 埋点，埋点理论上是惰性的，但这是推理不是证明）
+- **为什么 `IODelay` 在 v55 能返回、在 v70 不能** —— 同一个调用，两个版本行为不同。
+  poller 饿死已被排除，剩下的差异只有 USB 补丁版本本身，但**没有证据指认**。
+- poll 上限 20000 与 NOP 失败诊断是否必需：从未被触发过，属于安全网
 - 上游补丁里 `nointr_consio` / `nointr_iolog` 之外的部分是否有副作用
 
 ## 建议的下一步顺序

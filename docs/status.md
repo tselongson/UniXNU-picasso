@@ -39,11 +39,32 @@ Waiting on <dict ... IOProviderClass=IOMedia ... Content=Apple_HFS>
 iBoot 启动链，所以 ADT 里没有这个属性。`apfs_extract_root_hash_arm` 在 APFS kext 二进制里，
 不在源码里。
 
-待选方案（尚未验证任何一个）：
+### 在二进制里定位到的位置
 
-1. 往 ADT 注入 `system-volume-auth-blob`
-2. 二进制 patch APFS kext，跳过根卷哈希校验
-3. 找 APFS 的相关 boot-arg
+APFS kext 的符号被剥掉了，但通过字符串引用可以找到代码：
+
+```
+0xfffffff00566b508  adrp x0, page ; add x0, x0, #0xd15   → "system-volume-auth-blob"
+0xfffffff00566b510  add  x1, ...                          → 输出指针 1
+0xfffffff00566b518  add  x2, ...                          → 输出指针 2
+0xfffffff00566b520  bl   0xfffffff00566b71c               → 查表 helper
+0xfffffff00566b524  cbz  w0, 0xfffffff00566b540           → 返回 0 走成功路径
+0xfffffff00566b528  cmp  w0, #0x6a
+```
+
+`0xfffffff00566b71c` 是被剥掉符号的 helper。查表失败后走
+`0xfffffff0045d7000` 附近的错误字符串（"Failed to get root hash"）。
+
+### 待选方案（一个都还没验证）
+
+| 方案 | 做法 | 风险 |
+|---|---|---|
+| 注入 ADT 属性 | `scripts/make-picasso-adt.py` 的 `node()` 可以加属性 | **没有合法的 blob**，属性格式未知 |
+| 二进制 patch | 让 `0xfffffff00566b524` 的 `cbz` 无条件跳成功路径 | 会拿未初始化的输出指针当根哈希用 |
+| 找 boot-arg | 内核里有 `cs_enforcement_disable` / `amfi_get_out_of_my_way` | 那是代码签名，**不是 APFS 卷封条**，可能无效 |
+
+`boot-manifest-hash` 和 `/chosen/iBoot` 同样缺失（日志里 `AppleARMSFRManifest` 报错），
+它们和 `system-volume-auth-blob` 一样都来自 IM4M。**缺的是一整组属性，不是一个。**
 
 ## 最后一条等待是什么意思
 
