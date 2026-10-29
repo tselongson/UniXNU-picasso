@@ -192,6 +192,12 @@ kernel_args = [
   # image and the cryptex in SystemOS -- and no Data volume at all, so this is the switch that
   # decides whether APFS can proceed without one.
   "-apfs_shared_datavolume",
+  # launchd starts, prints its ignition arguments, and then issues no I/O at all. Two independent
+  # projects that boot iOS userland on non-Apple hardware pass this same argument -- ios-sweet
+  # (Redmi Note 10 Pro, reaches SpringBoard) and qemu-t8030 -- and both describe it as letting
+  # launchd accept its job cache without going through AMFI. A launchd blocked validating that cache
+  # would sit exactly like this: alive, silent, and issuing no block I/O.
+  "launchd_unsecure_cache=1",
   "io=0x232",
   # smmu=6 programs the SMMU route itself and logs the plan; reset=pshold returns to fastboot after
   # a panic.
