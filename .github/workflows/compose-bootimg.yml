@@ -121,15 +121,27 @@ jobs:
           #
           # It also refuses to overwrite, and this directory sits under out/picasso, which the cache
           # restores: a previous run's copy would otherwise abort the extraction. Clear it first.
+          # The script reports the IPSW member path, so the destination is that path's basename.
+          # Guessing it -- by a .img4 glob -- failed twice: once because tail -1 captured "}" from
+          # the JSON report, once because the glob matched nothing and set -e killed the step with
+          # no output at all. Reading the report removes both failure modes, and the report is
+          # echoed so a wrong answer is visible instead of silent.
           TREE=$(python3 ./unixnu --prepare)
           VOLUMES="$TREE/.cache/firmware/target-volumes"
           mkdir -p "$VOLUMES"
-          rm -f "$VOLUMES"/StaticTrustCache.img4 "$VOLUMES"/StaticTrustCache.json
-          python3 "$TREE/scripts/extract-target-volume.py" StaticTrustCache \
-            --ipsw "$UNIXNU_IPSW" > /dev/null
-          TRUST=$(ls -t "$VOLUMES"/*.img4 2>/dev/null | head -1)
+          # The script refuses to overwrite and this directory is inside the cached out/picasso.
+          rm -f "$VOLUMES"/* 2>/dev/null || true
+          REPORT=$(python3 "$TREE/scripts/extract-target-volume.py" StaticTrustCache \
+                     --ipsw "$UNIXNU_IPSW")
+          echo "$REPORT"
+          MEMBER=$(printf '%s' "$REPORT" | python3 -c 'import sys, json; print(json.load(sys.stdin)["member"])')
+          TRUST="$VOLUMES/$(basename "$MEMBER")"
           echo "trust cache: $TRUST"
-          test -s "$TRUST" || { echo "trust cache extraction failed"; exit 1; }
+          if [ ! -s "$TRUST" ]; then
+            echo "trust cache extraction failed; directory holds:"
+            ls -la "$VOLUMES"
+            exit 1
+          fi
           echo "UNIXNU_TRUST_CACHE=$TRUST" >> "$GITHUB_ENV"
           # Two passes. The first links and prelinks the kernel, which is what produces
           # out/picasso/kernel/kernel.macho. The IOStorageFamily bindings archive is built during
