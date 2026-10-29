@@ -1828,14 +1828,20 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
     //   NXSB at 32      -> bare APFS container (the SystemOS cryptex image)
     //   EFI PART at 0   -> GPT header, so this is a disk image (the OS image)
     //   0x55AA at 510   -> protective MBR, the same disk image seen at block 0
+    // bounce holds whole 4096-byte UFS blocks, not the caller's 512-byte sectors: ufsReadWindow
+    // reads from lba = start / 4096 and the requested data begins at start % 4096. Sampling
+    // bounce[0] therefore reports the first block of the window for every request, which made
+    // blocks 0 and 1 of the OS image look identical and nearly sent me chasing a read bug that
+    // does not exist.
+    uint64_t skip = (block * 512) % 4096;
+    const uint8_t *at = bounce ? bounce + skip : nullptr;
     char kind[24] = "?";
-    if (bounce && done >= 512) {
-      if (done >= 36 && bounce[32] == 'N' && bounce[33] == 'X' && bounce[34] == 'S' && bounce[35] == 'B') {
+    if (at && done >= skip + 512) {
+      if (done >= skip + 36 && at[32] == 'N' && at[33] == 'X' && at[34] == 'S' && at[35] == 'B') {
         snprintf (kind, sizeof kind, "NXSB");
-      } else if (bounce[0] == 'E' && bounce[1] == 'F' && bounce[2] == 'I' && bounce[3] == ' ') {
+      } else if (at[0] == 'E' && at[1] == 'F' && at[2] == 'I' && at[3] == ' ') {
         snprintf (kind, sizeof kind, "GPT-HEADER");
-      } else if (static_cast<uint8_t> (bounce[510]) == 0x55 &&
-                 static_cast<uint8_t> (bounce[511]) == 0xaa) {
+      } else if (static_cast<uint8_t> (at[510]) == 0x55 && static_cast<uint8_t> (at[511]) == 0xaa) {
         snprintf (kind, sizeof kind, "MBR");
       }
     }
