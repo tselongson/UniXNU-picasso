@@ -13,6 +13,7 @@ copies the raw device out, detaches, and packs the result with the packer Darwin
     make-data-seed.py --tree <upstream tree> --gib 3 --output data.dbr
 """
 import argparse
+import plistlib
 import re
 import subprocess
 import sys
@@ -55,8 +56,13 @@ def main():
         # The raw character device bypasses the block cache; rdisk is the conventional choice.
         raw_device = device.replace('/dev/disk', '/dev/rdisk')
         try:
-            size = int(run('blockdev', '--getsize64', device, capture=True).strip())
-            run('dd', f'if={raw_device}', f'of={raw}', 'bs=1m', f'count={size // (1024 * 1024)}')
+            # diskutil is the macOS-native way to ask a device its size; blockdev is util-linux and
+            # does not exist on the runner, which is how the first attempt failed.
+            info = plistlib.loads(run('diskutil', 'info', '-plist', device, capture=True).encode())
+            size = int(info['TotalSize'])
+            # Reading a raw device needs root; the macOS runners allow passwordless sudo.
+            run('sudo', 'dd', f'if={raw_device}', f'of={raw}', 'bs=1m',
+                f'count={size // (1024 * 1024)}')
         finally:
             run('hdiutil', 'detach', device, '-force')
 
