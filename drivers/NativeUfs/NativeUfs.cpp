@@ -1824,14 +1824,22 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
     // Sample the bounce buffer, not the memory descriptor: bounce holds exactly what the device
     // returned, while reading the descriptor back after the copy proved unreliable and produced an
     // "empty magic" that was an artefact of the instrumentation rather than of the data.
-    char magic[5] = {};
-    if (bounce && done >= 36) {
-      for (unsigned i = 0; i < 4; ++i) {
-        char c = static_cast<char> (bounce[32 + i]);
-        magic[i] = (c >= 0x20 && c < 0x7f) ? c : '.';
+    // Three signatures decide what a window holds, and offset 32 alone cannot tell them apart:
+    //   NXSB at 32      -> bare APFS container (the SystemOS cryptex image)
+    //   EFI PART at 0   -> GPT header, so this is a disk image (the OS image)
+    //   0x55AA at 510   -> protective MBR, the same disk image seen at block 0
+    char kind[24] = "?";
+    if (bounce && done >= 512) {
+      if (done >= 36 && bounce[32] == 'N' && bounce[33] == 'X' && bounce[34] == 'S' && bounce[35] == 'B') {
+        snprintf (kind, sizeof kind, "NXSB");
+      } else if (bounce[0] == 'E' && bounce[1] == 'F' && bounce[2] == 'I' && bounce[3] == ' ') {
+        snprintf (kind, sizeof kind, "GPT-HEADER");
+      } else if (static_cast<uint8_t> (bounce[510]) == 0x55 &&
+                 static_cast<uint8_t> (bounce[511]) == 0xaa) {
+        snprintf (kind, sizeof kind, "MBR");
       }
     }
-    IOLog ("NativeUfs blk[%s]:   magic=%.4s@32 status=%d done=%llu\n", label, magic,
+    IOLog ("NativeUfs blk[%s]:   kind=%s status=%d done=%llu\n", label, kind,
            static_cast<int> (result), done);
   }
   completion->action (completion->target, completion->parameter, result, done);

@@ -60,6 +60,26 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
+      # Every run used to re-download the multi-gigabyte IPSW and rebuild XNU from nothing, which is
+      # where the ten minutes went. Two caches: the IPSW never changes, and the build tree is
+      # restored with a prefix key so a change to one driver still leaves the rest of the object
+      # files in place for make to reuse.
+      - name: Restore the target IPSW
+        uses: actions/cache@v4
+        with:
+          path: out/ipsw
+          key: ipsw-iPad_Pro_HFR_17.7.11_21H461_Restore
+
+      - name: Restore the build tree
+        uses: actions/cache@v4
+        with:
+          path: |
+            device/out/picasso
+            .cache
+          key: build-${{ hashFiles('upstream.rev', 'board.toml', 'configs/**', 'patches/**', 'drivers/**', 'scripts/**') }}
+          restore-keys: |
+            build-
+
       - name: Download the target IPSW
         run: |
           mkdir -p out/ipsw
