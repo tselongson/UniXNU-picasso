@@ -29,9 +29,13 @@ CONFIG_XNU_NATIVE_UFS=y
 # CONFIG_XNU_NATIVE_ADRENO is not set
 # CONFIG_XNU_ARMVIRT_PLATFORM is not set
 # CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE is not set
-# CONFIG_XNU_VERIFIED_ROOT_PROBE is not set
-# CONFIG_XNU_OWNER_ROOT_AUDIT is not set
-# CONFIG_XNU_OWNER_ROOT_TRUST is not set
+# Enabled to match sheng_defconfig. These three are what make the block driver verify each root
+# window and publish a signed volume UUID; with them off the driver compiles its verification out,
+# reports "no signed UUID in this build", and XNU has nothing to match the root against. The port
+# disabled them while it was still an early skeleton.
+CONFIG_XNU_VERIFIED_ROOT_PROBE=y
+CONFIG_XNU_OWNER_ROOT_AUDIT=y
+CONFIG_XNU_OWNER_ROOT_TRUST=y
 # CONFIG_XNU_OWNER_CACHE_MOUNT is not set
 # CONFIG_XNU_OWNER_CACHE_STARTUP is not set
 # CONFIG_XNU_OWNER_BOOT_MANIFEST is not set
