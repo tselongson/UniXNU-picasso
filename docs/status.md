@@ -28,43 +28,61 @@ XNU 已经跑过 BSD 层、USB 控制台可用、**UFS 根设备成功发布、A
 
 ## 当前阻塞点
 
-```
-import_iboot_forwarded_roothash:3491: importing root hash (basesystem ? 0)...
-apfs_extract_root_hash_arm:13275: could not retrieve system-volume-auth-blob from device tree
-import_iboot_forwarded_roothash:3496: apfs_extract_root_hash_and_manifest failed with error: No such file or directory (2)
-Waiting on <dict ... IOProviderClass=IOMedia ... Content=Apple_HFS>
-```
+**不是 root hash。** 这一点有外部证据。
 
-`system-volume-auth-blob` 正常由 iBoot 从个性化 IM4M 生成并写进设备树。我们没有真实
-iBoot 启动链，所以 ADT 里没有这个属性。`apfs_extract_root_hash_arm` 在 APFS kext 二进制里，
-不在源码里。
+### 外部参照：qemu-t8030
 
-### 在二进制里定位到的位置
-
-APFS kext 的符号被剥掉了，但通过字符串引用可以找到代码：
+[TrungNguyen1909/qemu-t8030 issue #44](https://github.com/TrungNguyen1909/qemu-t8030/issues/44)
+在 QEMU 里启动 iOS，报**完全相同**的错误：
 
 ```
-0xfffffff00566b508  adrp x0, page ; add x0, x0, #0xd15   → "system-volume-auth-blob"
-0xfffffff00566b510  add  x1, ...                          → 输出指针 1
-0xfffffff00566b518  add  x2, ...                          → 输出指针 2
-0xfffffff00566b520  bl   0xfffffff00566b71c               → 查表 helper
-0xfffffff00566b524  cbz  w0, 0xfffffff00566b540           → 返回 0 走成功路径
-0xfffffff00566b528  cmp  w0, #0x6a
+import_iboot_forwarded_roothash:2577: importing root hash ...
+apfs_extract_root_hash_arm:10001: could not retrieve system-volume-auth-blob from device tree
+import_iboot_forwarded_roothash:2580: apfs_extract_root_hash_and_manifest failed with error: No such file or directory (2)
 ```
 
-`0xfffffff00566b71c` 是被剥掉符号的 helper。查表失败后走
-`0xfffffff0045d7000` 附近的错误字符串（"Failed to get root hash"）。
+**但系统继续启动了**，最终到达 launchd 并能 SSH：
 
-### 待选方案（一个都还没验证）
+```
+apfs_vfsop_mount:2197: disk0s1s1:0 mounted volume: System
+Darwin Bootstrapper Version 7.0.0
+com.apple.xpc.launchd[1] <Notice>: launchd logging initialized
+```
 
-| 方案 | 做法 | 风险 |
-|---|---|---|
-| 注入 ADT 属性 | `scripts/make-picasso-adt.py` 的 `node()` 可以加属性 | **没有合法的 blob**，属性格式未知 |
-| 二进制 patch | 让 `0xfffffff00566b524` 的 `cbz` 无条件跳成功路径 | 会拿未初始化的输出指针当根哈希用 |
-| 找 boot-arg | 内核里有 `cs_enforcement_disable` / `amfi_get_out_of_my_way` | 那是代码签名，**不是 APFS 卷封条**，可能无效 |
+**结论：`system-volume-auth-blob` 缺失是非致命的噪声，不是阻塞点。**
+这条错误在我们日志里出现，说明不了为什么没启动。
 
-`boot-manifest-hash` 和 `/chosen/iBoot` 同样缺失（日志里 `AppleARMSFRManifest` 报错），
-它们和 `system-volume-auth-blob` 一样都来自 IM4M。**缺的是一整组属性，不是一个。**
+### 真正的症状
+
+我们的日志里缺了一行关键输出——qemu 有而我们没有：
+
+```
+apfs_vfsop_mount:2197: disk0s1s1:0 mounted volume: System
+```
+
+而且紧跟在发布之后有：
+
+```
+NativeUfs: published SystemOS
+IOGUIDPartitionScheme::probe fails
+IOFDiskPartitionScheme::probe fails
+IOApplePartitionScheme::probe fails
+AppleAPFSContainerScheme::probe fails        ← 容器方案没认这块盘
+```
+
+`nx_mount` 的 checkpoint 搜索是成功的（xid 14），说明**读盘没问题**；
+但 `AppleAPFSContainerScheme::probe` 失败，意味着 APFS 卷没有被发布成 IOMedia，
+所以 `bsd_init` 等不到 `Apple_HFS`。
+
+### 下一步：查容器方案为什么 probe 失败
+
+需要确认我们发布的 IOMedia 的 `Content` 属性和 `Whole` 标记，以及
+`AppleAPFSContainerScheme` 的匹配条件。读盘已经证明可用，所以问题在**媒体属性**或**探测时的数据**。
+
+### 另一条可借鉴的参数
+
+qemu-t8030 的启动参数里有 `wdt=-1`（关看门狗）。我们这边之前"手机自己重启"就是 APSS 看门狗到期，
+如果后续需要设备长时间挂着，这个参数值得试。
 
 ## 最后一条等待是什么意思
 

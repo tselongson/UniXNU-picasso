@@ -6,25 +6,19 @@
 2. 读 [ufs-root.md](ufs-root.md) —— UFS 两个沉默失败是怎么被证明的
 3. 读 [debugging.md](debugging.md) —— 怎么抓日志、参数含义、补丁的坑
 
-## 当前唯一阻塞点
+## 当前阻塞点
 
-根卷认证：设备树缺 `system-volume-auth-blob`，APFS 无法导入根卷哈希。
+**不是 root hash。** qemu-t8030 的实测证明那条错误是非致命的：他们在 QEMU 里报同样的
+`could not retrieve system-volume-auth-blob`，系统照样走完
+`apfs_vfsop_mount: disk0s1s1:0 mounted volume: System` 并到达 launchd。
+详见 [status.md](status.md)。
 
-```
-import_iboot_forwarded_roothash:3491: importing root hash (basesystem ? 0)...
-apfs_extract_root_hash_arm:13275: could not retrieve system-volume-auth-blob from device tree
-import_iboot_forwarded_roothash:3496: apfs_extract_root_hash_and_manifest failed with error: No such file or directory (2)
-```
+真正的症状：我们的日志里**没有** `apfs_vfsop_mount ... mounted volume: System`，
+且发布后紧跟着 `AppleAPFSContainerScheme::probe fails`。读盘是好的
+（`nx_mount` 能读到 checkpoint xid 14），所以问题在**媒体属性或容器探测**。
 
-三个候选方案，**一个都还没验证**：
-
-| 方案 | 位置 | 风险 |
-|---|---|---|
-| 往 ADT 注入 `system-volume-auth-blob` | payload 的设备树 | 需要知道 blob 的格式与来源 |
-| 二进制 patch APFS kext 跳过校验 | `kernel.macho` 里的 kext | 改动二进制，需重新签名流程配合 |
-| 找 APFS 的相关 boot-arg | 启动参数 | 可能不存在 |
-
-`apfs_extract_root_hash_arm` 在 APFS kext 二进制里，**不在源码里**，所以改不了源码。
+下一步：查 `AppleAPFSContainerScheme` 为什么 probe 失败——重点看我们发布的 IOMedia 的
+`Content` 属性和 `Whole` 标记。
 
 ## 已验证 / 未验证
 
