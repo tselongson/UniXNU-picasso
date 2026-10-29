@@ -27,7 +27,16 @@ struct HardwareTransferPort {
     return *reinterpret_cast<volatile uint32_t *> (gHost.virt + 8) & 0xff;
   }
   bool expired () { return mach_absolute_time () >= deadline; }
-  void delay () { IODelay (2); }
+  // IODelay spins until the timebase advances, and on this board that does not happen in this
+  // context: the very first call never returns, so the poll loop's iteration cap is never reached
+  // and a stalled command is indistinguishable from a deadlock. Pace with a bounded busy loop
+  // instead, which cannot block.
+  void delay ()
+  {
+    for (volatile unsigned spin = 0; spin < 200; ++spin) {
+      __asm__ __volatile__ ("" ::: "memory");
+    }
+  }
 };
 
 static void putBe32 (uint8_t *at, uint32_t value)
@@ -189,10 +198,15 @@ static IOReturn hostResponseHeader (uint8_t type, uint8_t lun, uint8_t tag)
 
 static IOReturn hostNop (void)
 {
-  if (!hostClearUcd ()) return kIOReturnNotReady;
+  // Breadcrumbs: the caller's failure path never ran, so nothing said where this stopped. One line
+  // per step makes the answer unambiguous.
+  IOLog ("NativeUfs nop: enter\n");
+  if (!hostClearUcd ()) { IOLog ("NativeUfs nop: clear failed\n"); return kIOReturnNotReady; }
+  IOLog ("NativeUfs nop: cleared\n");
   gHost.virt[kUcdOffset + 3] = 1;
   uint32_t ocs = 15;
   IOReturn result = hostSubmit (0, 0, 200000, &ocs);
+  IOLog ("NativeUfs nop: submit returned %d ocs=%u\n", result, ocs);
   if (result != kIOReturnSuccess) return result;
   result = hostResponseHeader (0x20, 0, 1);
   if (result != kIOReturnSuccess) return result;
