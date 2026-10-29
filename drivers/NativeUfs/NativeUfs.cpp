@@ -52,6 +52,10 @@ volatile uint32_t native_ufs_compatible_matched = 0;
 // 'iommus' property: the picasso ADT declares ufshc without one (only the GPU has iommus), and
 // the firmware that read the boot image already left whatever bypass it needs in place.
 static bool gUfsSmmuNeeded = true;
+// Root publication has to have exactly one owner: two instances share gHost, gRootLayout and the
+// pending-window table, so a second bring-up publishes the same window twice and clobbers the
+// first publisher's state. Claimed once, by the provider start() actually runs on.
+static volatile uint32_t gHardwareOwnerClaimed = 0;
 volatile uint32_t native_ufs_probe_requested = 0;
 volatile uint32_t native_ufs_mapped = 0;
 volatile uint32_t native_ufs_status = 0;
@@ -1752,6 +1756,16 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
   if (!online) {
     return kIOReturnNotReady;
   }
+  // AppleAPFSContainerScheme decides whether to attach by reading the leading blocks, and when it
+  // declines it prints nothing about what it saw. Record the first requests and the bytes they
+  // returned, so "probe fails" becomes something observable instead of a guess.
+  static uint32_t probeTrace = 0;
+  bool trace = probeTrace < 12;
+  if (trace) {
+    ++probeTrace;
+    IOLog ("NativeUfs blk: read block=%llu count=%llu len=%llu\n",
+           block, count, static_cast<uint64_t> (buffer->getLength ()));
+  }
   struct Operations {
     IOLock *mutex;
     IOMemoryDescriptor *buffer;
@@ -1806,6 +1820,15 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
     gRootDiagnostic.result = static_cast<uint32_t> (result);
     rootDiagnosticFailure ("root window read failed");
   }
+  if (trace) {
+    // The container superblock carries NXSB at offset 32 of block 0. If that is not what comes
+    // back, the probe is reading the wrong window and no property tweak will help.
+    uint8_t head[40] = {};
+    if (buffer->readBytes (0, head, sizeof head) == sizeof head) {
+      IOLog ("NativeUfs blk:   magic=%.4s@32 status=%d done=%llu\n",
+             reinterpret_cast<const char *> (head + 32), static_cast<int> (result), done);
+    }
+  }
   completion->action (completion->target, completion->parameter, result, done);
   return kIOReturnSuccess;
 }
@@ -1832,6 +1855,9 @@ void NativeUfsBlock::free ()
 // Ordered publication of the root windows. The original owner-trust code resolves the SystemOS
 // volume by UUID immediately after the root is mounted, so SystemOS must already have published its
 // volume media by then; the OS window (whose volume is the root being waited for) goes last.
+// That identity only exists in a verified build: with NATIVE_VERIFIED_BLOCK off, prepareRootWindows
+// leaves every UUID empty, and the wait below must not turn that into a 30 s failure that keeps the
+// OS window from ever being started. Start order alone carries the ordering here.
 static NativeUfsBlock *gPendingDevice[4];
 static unsigned gPending;
 static bool gPendingAttached[4];
@@ -2026,6 +2052,14 @@ static void publishThread (void *, wait_result_t)
       gRootDiagnostic.stage = "media publication";
       gRootDiagnostic.publicationPhase = static_cast<unsigned> (UfsRootPhase::Media);
       gRootDiagnostic.publicationWindow = index;
+      if (!uuid[0]) {
+        // Unverified build: there is no signed-volume identity to match, so the loop below can
+        // never succeed. It used to consume its full budget and abort publication at SystemOS,
+        // which is why the OS window (the root volume bsd_init waits for) was never started.
+        IOLog ("NativeUfs: %s has no signed UUID in this build; continuing to the next window\n",
+               device->windowLabel ());
+        return true;
+      }
       bool ready = false;
       // Diagnostic mode affects reporting only, never the dependency gate.
       for (unsigned tick = 0; tick <= 300; ++tick) {
@@ -2182,6 +2216,23 @@ bool NativeUfs::start (IOService *provider)
   }
   if (!expert && !native_ufs_compatible_matched) {
     return false;
+  }
+  // Root publication has two candidates on this platform: the platform-expert personality from
+  // KernelConfigTables (score 500) and the compatible-matched ufshc nub (score 1000). Both reach
+  // start(), and v71 shows what two owners do: the expert enters hostBringUp() before the heap is
+  // ready and stalls in the DMA allocation, then the nub brings the controller up and publishes
+  // SystemOS, then the expert resumes and publishes the same window again as disk1. The nub is the
+  // owner here because it is the one that completes bring-up; the expert yields before any MMIO.
+  bool rootBringUp = rootMode != 0 || probe == 12 || probe == 13;
+  if (rootBringUp) {
+    if (expert) {
+      IOLog ("NativeUfs: platform-expert instance yields bring-up to the compatible-matched nub\n");
+      return false;
+    }
+    if (__atomic_exchange_n (&gHardwareOwnerClaimed, 1, __ATOMIC_ACQ_REL)) {
+      IOLog ("NativeUfs: bring-up already owned by another instance; rejecting this one\n");
+      return false;
+    }
   }
   if (!expert) {
     IOLog ("NativeUfs: starting from the compatible-matched platform device\n");
