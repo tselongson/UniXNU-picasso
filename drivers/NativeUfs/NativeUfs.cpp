@@ -1765,9 +1765,13 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
   // after its ignition argument dump, and "no output" cannot distinguish a blocked process from an
   // idle one -- but a block device that keeps serving requests proves the system is still driving
   // itself. One line every 256 requests keeps the console readable.
+  // The whole boot issues about 256 requests and none at all after launchd starts, so logging each
+  // one past the probe costs a couple of hundred lines and shows exactly which read was last before
+  // the stall -- which is the difference between knowing where it stopped and guessing again.
   static uint64_t requestCount = 0;
-  if (++requestCount % 256 == 0) {
-    IOLog ("NativeUfs blk[%s]: %llu requests, latest block=%llu count=%llu\n",
+  ++requestCount;
+  if (requestCount > 12) {
+    IOLog ("NativeUfs blk[%s]: #%llu block=%llu count=%llu\n",
            label, requestCount, block, count);
   }
   if (trace) {
