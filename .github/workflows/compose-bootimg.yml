@@ -149,13 +149,23 @@ jobs:
           test -s "$TRUST" || { echo "trust bundle was not produced"; exit 1; }
           ls -l "$TRUST"
 
+          # Data seed. launchd reaches ignition level 0x5 and then stops, and the boot expects a
+          # writable Data volume that neither container has. hdiutil is the only way to create an
+          # APFS container, so this step runs on the macOS runner; the packer is the one DarwinBoot's
+          # own tests use, so the format is already the one the firmware validates.
+          DATA="$TREE/.cache/firmware/target-volumes/data.dbr"
+          rm -f "$DATA"
+          python3 ./scripts/make-data-seed.py --tree "$TREE" --gib 3 --output "$DATA"
+          test -s "$DATA" || { echo "Data seed was not produced"; exit 1; }
+          ls -l "$DATA"
+
           # Two passes. The first links and prelinks the kernel, which is what produces
           # out/picasso/kernel/kernel.macho. The IOStorageFamily bindings archive is built during
           # the archive step, which runs before that link, so on the first pass it has no
           # candidate to read and emits an empty archive. The second pass sees the candidate from
           # the first and links the real bindings in.
-          python3 ./unixnu build kernel payload -j 3 --trust-cache "$TRUST" 2>&1 | tee out/picasso/logs/actions-build.log
-          python3 ./unixnu build kernel payload -j 3 --trust-cache "$TRUST" 2>&1 | tee -a out/picasso/logs/actions-build.log
+          python3 ./unixnu build kernel payload -j 3 --trust-cache "$TRUST" --data-ramdisk "$DATA" 2>&1 | tee out/picasso/logs/actions-build.log
+          python3 ./unixnu build kernel payload -j 3 --trust-cache "$TRUST" --data-ramdisk "$DATA" 2>&1 | tee -a out/picasso/logs/actions-build.log
 
       - name: Report kernel/payload sizes
         run: |

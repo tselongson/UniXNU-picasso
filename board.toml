@@ -280,6 +280,10 @@ chip_id = "7250"
 #   SHNGROOT -> OS window -> protective MBR -> GPT header -> container -> APSB (offset 0xf0).
 # All six APSB checkpoints in the OS container carry the same value.
 root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+# The boot expects a writable Data volume and neither container in the userdata image has one. The
+# payload has only a few MiB free, so the seed is the packed DBRDISK1 form: DarwinBoot validates the
+# extent table and copies the extents, and omitted ranges come up as zeroed RAM.
+packed_data_ramdisk = true
 # DarwinBoot requests one contiguous window of this size from the firmware and
 # hands it to the kernel as boot_args.memSize. The kernel then builds its physmap
 # over exactly that range, so the window has to fit inside a single
