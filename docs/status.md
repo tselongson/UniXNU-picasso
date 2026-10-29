@@ -1,11 +1,12 @@
 # 移植状态
 
-最后更新：2026-10-29 18:45（v71，commit `3321517`）
+最后更新：2026-10-29 19:15（v71，commit `3321517`）
 
 ## 一句话
 
 XNU 已经跑过 BSD 层、USB 控制台可用、**UFS 根设备成功发布、APFS 读到容器 checkpoint**。
-当前卡在根卷认证：设备树缺少 `system-volume-auth-blob`，APFS 因此无法导入根卷哈希。
+当前卡在 **APFS 容器方案探测失败**：读盘正常，但 `AppleAPFSContainerScheme::probe` 不认这块盘，
+所以根卷从未发布成 `Apple_HFS`。
 
 ## 阶段表
 
@@ -19,9 +20,10 @@ XNU 已经跑过 BSD 层、USB 控制台可用、**UFS 根设备成功发布、A
 | 6 | UFS 控制器 bring-up（NOP OUT / 查询 / LU 就绪） | ✅ | `host bring-up ok` |
 | 7 | **根设备发布** | ✅ | `published SystemOS` |
 | 8 | **APFS 容器挂载** | ✅ | `nx_mount: checkpoint search: largest xid 14` |
-| 9 | 根卷认证（root hash） | ❌ | `could not retrieve system-volume-auth-blob` |
-| 10 | `load_init_program` / launchd | ❌ | 未到达 |
-| 11 | 苹果标 / 图形栈 | ❌ | 未到达 |
+| 9 | APFS 容器方案匹配 | ❌ | `AppleAPFSContainerScheme::probe fails` |
+| 10 | APFS 卷挂载 | ❌ | 缺 `apfs_vfsop_mount: ... mounted volume: System` |
+| 11 | `load_init_program` / launchd | ❌ | 未到达 |
+| 12 | 苹果标 / 图形栈 | ❌ | 未到达 |
 
 第 7、8 阶段是 2026-10-29 打通的，见 [ufs-root.md](ufs-root.md)。
 上游三个 Picasso 移植目前停在**第 6 与第 7 之间**（README 自述"存储 bring-up 是当前阶段"）。
