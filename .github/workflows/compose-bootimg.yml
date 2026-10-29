@@ -116,8 +116,18 @@ jobs:
           # cdhash of every system binary including launchd and dyld, which is what AMFI consults
           # instead of a signature. board.toml leaves trust_cache_sha256 unset, and payload.py
           # skips the allow-list check when it is unset, so no digest has to be pinned here.
-          TRUST=$(python3 "$(python3 ./unixnu --prepare)/scripts/extract-target-volume.py" \
-                    StaticTrustCache --ipsw "$UNIXNU_IPSW" 2>&1 | tail -1)
+          # The script prints a multi-line JSON report, so its stdout cannot be used as the path --
+          # tail -1 yielded "}" the first time. Locate the extracted file by type instead.
+          #
+          # It also refuses to overwrite, and this directory sits under out/picasso, which the cache
+          # restores: a previous run's copy would otherwise abort the extraction. Clear it first.
+          TREE=$(python3 ./unixnu --prepare)
+          VOLUMES="$TREE/.cache/firmware/target-volumes"
+          mkdir -p "$VOLUMES"
+          rm -f "$VOLUMES"/StaticTrustCache.img4 "$VOLUMES"/StaticTrustCache.json
+          python3 "$TREE/scripts/extract-target-volume.py" StaticTrustCache \
+            --ipsw "$UNIXNU_IPSW" > /dev/null
+          TRUST=$(ls -t "$VOLUMES"/*.img4 2>/dev/null | head -1)
           echo "trust cache: $TRUST"
           test -s "$TRUST" || { echo "trust cache extraction failed"; exit 1; }
           echo "UNIXNU_TRUST_CACHE=$TRUST" >> "$GITHUB_ENV"
