@@ -1761,6 +1761,15 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
   // returned, so "probe fails" becomes something observable instead of a guess.
   static uint32_t probeTrace = 0;
   bool trace = probeTrace < 12;
+  // Past the probe, the question is whether anything is still issuing I/O. launchd stalls right
+  // after its ignition argument dump, and "no output" cannot distinguish a blocked process from an
+  // idle one -- but a block device that keeps serving requests proves the system is still driving
+  // itself. One line every 256 requests keeps the console readable.
+  static uint64_t requestCount = 0;
+  if (++requestCount % 256 == 0) {
+    IOLog ("NativeUfs blk[%s]: %llu requests, latest block=%llu count=%llu\n",
+           label, requestCount, block, count);
+  }
   if (trace) {
     ++probeTrace;
     IOLog ("NativeUfs blk[%s]: read block=%llu count=%llu len=%llu\n", label,
