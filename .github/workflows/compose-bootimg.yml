@@ -142,14 +142,18 @@ jobs:
             ls -la "$VOLUMES"
             exit 1
           fi
+          # $GITHUB_ENV only reaches later steps, so the two build lines below must use $TRUST
+          # directly. Writing it there and reading it back in the same step passed an empty
+          # --trust-cache, which is why trust_cache_sha256 came back null while the extraction
+          # itself had succeeded.
           echo "UNIXNU_TRUST_CACHE=$TRUST" >> "$GITHUB_ENV"
           # Two passes. The first links and prelinks the kernel, which is what produces
           # out/picasso/kernel/kernel.macho. The IOStorageFamily bindings archive is built during
           # the archive step, which runs before that link, so on the first pass it has no
           # candidate to read and emits an empty archive. The second pass sees the candidate from
           # the first and links the real bindings in.
-          python3 ./unixnu build kernel payload -j 3 --trust-cache "$UNIXNU_TRUST_CACHE" 2>&1 | tee out/picasso/logs/actions-build.log
-          python3 ./unixnu build kernel payload -j 3 --trust-cache "$UNIXNU_TRUST_CACHE" 2>&1 | tee -a out/picasso/logs/actions-build.log
+          python3 ./unixnu build kernel payload -j 3 --trust-cache "$TRUST" 2>&1 | tee out/picasso/logs/actions-build.log
+          python3 ./unixnu build kernel payload -j 3 --trust-cache "$TRUST" 2>&1 | tee -a out/picasso/logs/actions-build.log
 
       - name: Report kernel/payload sizes
         run: |
