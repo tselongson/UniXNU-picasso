@@ -64,10 +64,14 @@ jobs:
       # where the ten minutes went. Two caches: the IPSW never changes, and the build tree is
       # restored with a prefix key so a change to one driver still leaves the rest of the object
       # files in place for make to reuse.
+      # actions/cache resolves paths from the workspace root, and the checkout step puts this repo
+      # in device/. Both paths below were written relative to device/ on the first attempt: the IPSW
+      # one silently never saved ("Path(s) specified in the action ... do not exist"), and the
+      # hashFiles globs matched nothing, so every build shared the literal key "build-".
       - name: Restore the target IPSW
         uses: actions/cache@v4
         with:
-          path: out/ipsw
+          path: device/out/ipsw
           key: ipsw-iPad_Pro_HFR_17.7.11_21H461_Restore
 
       - name: Restore the build tree
@@ -75,8 +79,8 @@ jobs:
         with:
           path: |
             device/out/picasso
-            .cache
-          key: build-${{ hashFiles('upstream.rev', 'board.toml', 'configs/**', 'patches/**', 'drivers/**', 'scripts/**') }}
+            device/.cache
+          key: build-${{ hashFiles('device/upstream.rev', 'device/board.toml', 'device/configs/**', 'device/patches/**', 'device/drivers/**', 'device/scripts/**') }}
           restore-keys: |
             build-
 
