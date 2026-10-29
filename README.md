@@ -1,13 +1,20 @@
 # UniXNU on Redmi K30 5G (picasso, SM7250)
 
-> **Status: the XNU kernel boots through to the root-device wait.** The UEFI
-> firmware boots the UniXNU menu, and the xnu entry starts the kernel through
-> DarwinBoot. The kernel reaches the BSD layer, loads the AMFI / AppleImage4 /
-> MAC-framework and pthread kexts, brings up mbufs, dlil and lo0, registers
-> APFS, and then waits for a root device.
+> **Status: the UFS root device publishes and APFS mounts its container.** The
+> UEFI firmware boots the UniXNU menu, the xnu entry starts the kernel through
+> DarwinBoot, and the kernel reaches the BSD layer, loads the AMFI /
+> AppleImage4 / MAC-framework and pthread kexts, brings up mbufs, dlil and lo0,
+> and registers APFS. The UFS driver then brings the controller up, publishes
+> `SystemOS`, and APFS reads the container checkpoints on both disks.
 >
-> Storage bring-up (UFS root) is the current stage; a usable system is still
-> several stages away.
+> **The current blocker is root-volume authentication**: APFS cannot import the
+> root hash because the device tree carries no `system-volume-auth-blob`, which
+> iBoot normally derives from a personalised IM4M. Without it the root volume
+> never publishes as `Apple_HFS` and `bsd_init` waits forever.
+>
+> The USB CDC console works, so the kernel log is readable over `/dev/cu.*`
+> without a screen. See [docs/](docs/) for the stage table, the evidence behind
+> each conclusion, and what is still unverified.
 >
 > UEFI firmware: https://github.com/YinCQL/uefi_picasso
 

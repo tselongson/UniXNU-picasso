@@ -1,0 +1,588 @@
+d background quantum is 2500 us
+mig_table_max_displ = 54 mach_kobj_count = 372
+kdp_core zlib memory 0x7000
+Serial requested, consistent debug disabled or debug boot arg not present, configuring debugging over serial
+iBoot version: 
+iBoot Stage 2 version: 
+IONVRAM.cpp:initImageFormat:1433 - NVRAM size is 8192 bytes
+IONVRAM.cpp:getNVRAMProperties:1244 - _bankSize=0x2000, _bankCount=0x1, _currentBank=0
+IONVRAMCHRPHandler.cpp:unserializeImage:479 - NVRAM : commonPartitionOffset - 0x30, commonPartitionSize - 0x800, systemPartitionOffset - 0xffffffff, systemPartitionSize - 0
+lockdown_mode: lockdown mode in nvram is off
+Darwin Image4 Validator Version 6.3.0: Fri Jul 11 17:30:14 PDT 2025; root:AppleImage4-257.140.2~280/AppleImage4/RELEASE_ARM64
+calling mpo_policy_init for AppleImage4
+Security policy loaded: AppleImage4 hooks (AppleImage4)
+AppleImage4: no legacy blob present
+AppleImage4: magazine[pdmg]: failed to read nonce slot data: 2
+AppleImage4: magazine[cptx]: failed to read nonce slot data: 2
+AppleImage4: magazine[dvdi]: failed to read nonce slot data: 2
+AppleImage4: magazine[c1bt]: failed to read nonce slot data: 2
+AppleImage4: magazine[c1ab]: failed to read nonce slot data: 2
+AppleImage4: magazine[c1gn]: failed to read nonce slot data: 2
+AppleImage4: magazine[c1sm]: failed to read nonce slot data: 2
+AppleImage4: magazine[c1ep]: failed to read nonce slot data: 2
+AppleImage4: root power domain not yet available: 19
+AMFI: queried model name from device tree: picasso-first-boot
+calling mpo_policy_init for AMFI
+Security policy loaded: Apple Mobile File Integrity (AMFI)
+no external trust caches found (segment length is zero)
+No POST boot-arg set.
+NativeUfs match[1]: class=IOPlatformExpertDevice len=39 compat=xiaomi,picasso.qcom,lito.qcom,lito-mtp.
+NativeUfs start: class=IOPlatformExpertDevice probe=12 root=0 expert=1
+NativeUfs: iommus=0 smmu=0
+NativeUfs: dispatching probe=12 to startRoot
+NativeUfs: startRoot enter (clock=11223299623)
+NativeUfs: stage controller map
+NativeUfs: stage DMA allocation
+NativeUfs: adopted firmware request list at a4e96000 virt=fffffff7f7a7c000
+AppleARMBootPerf: Error: profile handoff region not found (1)
+AppleARMBootPerf: Error: failed to publish profile data (1)
+AppleARMSFRManifest: Starting
+AppleARMSFRManifest: Error: Failed to open reg-entry /chosen/secure-boot-hashes
+AppleARMSFRManifest: Error: Failed to find property boot-manifest-hash
+AppleARMSFRManifest: Error: Failed to find manifest hash
+AppleARMSFRManifest: Error: Failed to locate manifest information
+AppleARMSFRManifest: Error: Failed to find entry /chosen/iBoot
+AppleARMSFRManifest: Error: Failed to publish sfr manifest
+virtual bool CoreAnalyticsHub::start(IOService *)::139:CoreAnalyticsHub start
+Registered CoreAnalyticsHub functions with xnu.virtual bool CoreAnalyticsHub::start(IOService *)::218:CoreAnalyticsHub start completed
+NativeUfs match[2]: class=IOPlatformDevice len=15 compat=arm,cortex-a76.
+NativeUfs::probe fails
+Copyright (c) 1982, 1986, 1989, 1991, 1993
+	The Regents of the University of California. All rights reserved.
+
+PICASSO USB: PSHOLD mapped=1 panic-reset=1 watchdog=1 mapped=1 IMEM mapped=1 reset=2(pshold)
+PICASSO USB: GCC power=f822f000 master=00000221 cfg=00000001 aggre=00000001
+PICASSO USB: GCC sleep=00000001 mock_utmi=00000001 clkref=00000001
+PICASSO USB: SMMU mapped 851968 bytes
+PICASSO USB: DWC3 GSNPSID 0x5533330a GCTL 0x00102001 DCTL 0x00f00000 DSTS 0x00d37d2c DCFG 0x00080804
+PICASSO USB: PLAN sCR0 begin
+PICASSO USB: PLAN sGFSR begin
+PICASSO USB: PLAN IDR begin
+PICASSO USB: SMMU bind scr0=00250406 gfsr=00000000 idr=4c017e51/6000003e/00005111 exids=0
+PICASSO USB: PLAN SMR begin 0
+PICASSO USB: PLAN SMR begin 1
+PICASSO USB: PLAN SMR begin 2
+PICASSO USB: PLAN SMR begin 3
+PICASSO USB: PLAN SMR begin 4
+PICASSO USB: PLAN SMR begin 5
+PICASSO USB: PLAN SMR begin 6
+PICASSO USB: PLAN SMR begin 7
+PICASSO USB: PLAN SMR begin 8
+PICASSO USB: PLAN SMR begin 9
+PICASSO USB: PLAN SMR begin 10
+PICASSO USB: PLAN SMR begin 11
+PICASSO USB: PLAN SMR begin 12
+PICASSO USB: PLAN SMR begin 13
+PICASSO USB: PLAN SMR begin 14
+PICASSO USB: PLAN SMR begin 15
+PICASSO USB: PLAN SMR begin 16
+PICASSO USB: PLAN SMR begin 17
+PICASSO USB: PLAN SMR begin 18
+PICASSO USB: PLAN SMR begin 19
+PICASSO USB: PLAN SMR begin 20
+PICASSO USB: PLAN SMR begin 21
+PICASSO USB: PLAN SMR begin 22
+PICASSO USB: PLAN SMR begin 23
+PICASSO USB: PLAN SMR begin 24
+PICASSO USB: PLAN SMR begin 25
+PICASSO USB: PLAN SMR begin 26
+PICASSO USB: PLAN SMR begin 27
+PICASSO USB: PLAN SMR begin 28
+PICASSO USB: PLAN SMR begin 29
+PICASSO USB: PLAN SMR begin 30
+PICASSO USB: PLAN SMR begin 31
+PICASSO USB: PLAN SMR begin 32
+PICASSO USB: PLAN SMR begin 33
+PICASSO USB: PLAN SMR begin 34
+PICASSO USB: PLAN SMR begin 35
+PICASSO USB: PLAN SMR begin 36
+PICASSO USB: PLAN SMR begin 37
+PICASSO USB: PLAN SMR begin 38
+PICASSO USB: PLAN SMR begin 39
+PICASSO USB: PLAN SMR begin 40
+PICASSO USB: PLAN SMR begin 41
+PICASSO USB: PLAN SMR begin 42
+PICASSO USB: PLAN SMR begin 43
+PICASSO USB: PLAN SMR begin 44
+PICASSO USB: PLAN SMR begin 45
+PICASSO USB: PLAN SMR begin 46
+PICASSO USB: PLAN SMR begin 47
+PICASSO USB: PLAN SMR begin 48
+PICASSO USB: PLAN SMR begin 49
+PICASSO USB: PLAN SMR begin 50
+PICASSO USB: PLAN SMR begin 51
+PICASSO USB: PLAN SMR begin 52
+PICASSO USB: PLAN SMR begin 53
+PICASSO USB: PLAN SMR begin 54
+PICASSO USB: PLAN SMR begin 55
+PICASSO USB: PLAN SMR begin 56
+PICASSO USB: PLAN SMR begin 57
+PICASSO USB: PLAN SMR begin 58
+PICASSO USB: PLAN SMR begin 59
+PICASSO USB: PLAN SMR begin 60
+PICASSO USB: PLAN SMR begin 61
+PICASSO USB: PLAN SMR begin 62
+PICASSO USB: PLAN SMR begin 63
+PICASSO USB: PLAN SMR begin 64
+PICASSO USB: PLAN SMR begin 65
+PICASSO USB: PLAN SMR begin 66
+PICASSO USB: PLAN SMR begin 67
+PICASSO USB: PLAN SMR begin 68
+PICASSO USB: PLAN SMR begin 69
+PICASSO USB: PLAN SMR begin 70
+PICASSO USB: PLAN SMR begin 71
+PICASSO USB: PLAN SMR begin 72
+PICASSO USB: PLAN SMR begin 73
+PICASSO USB: PLAN SMR begin 74
+PICASSO USB: PLAN SMR begin 75
+PICASSO USB: PLAN SMR begin 76
+PICASSO USB: PLAN SMR begin 77
+PICASSO USB: PLAN SMR begin 78
+PICASSO USB: PLAN SMR begin 79
+PICASSO USB: PLAN SMR begin 80
+PICASSO USB: SMMU bind smr active=6 free=6
+PICASSO USB: PLAN S2CR begin 0
+PICASSO USB: PLAN S2CR begin 1
+PICASSO USB: PLAN S2CR begin 2
+PICASSO USB: PLAN S2CR begin 3
+PICASSO USB: PLAN S2CR begin 4
+PICASSO USB: PLAN S2CR begin 5
+PICASSO USB: SMMU bind s2cr scan done
+PICASSO USB: PLAN bank begin 61
+PICASSO USB: SMMU bank 61 probe
+PICASSO USB: SMMU bank 61 cbar=00000000
+PICASSO USB: SMMU bank 61 cba2r=00000000
+PICASSO USB: SMMU bank 61 sctlr=24dca300 M=0
+PICASSO USB: SMMU bind plan slot=6 bank=61
+PICASSO USB: SMMU bind plan PASS slot=6 bank=61
+PICASSO USB: quiescing DWC3 before SMMU bind
+PICASSO USB: DWC3 halt done after 0 ms DSTS=00d3c76c
+PICASSO USB: SMMU bind apply slot=6 bank=61
+PICASSO USB: SMMU bind route slot=6 smr=800000e0 s2cr=0000003d bank=61 cbar=00000000 cba2r=00000001 sctlr=24dca300
+PICASSO USB: SMMU scr0=00250406 idr=4c017e51/6000003e/00005111 gfsr=00000000
+PICASSO USB: SMMU streams=81 banks=62 pages=128
+PICASSO USB: SID e0 match 6 smr=800000e0 s2cr=0000003d
+PICASSO USB: SID e0 match=6 smr=800000e0 s2cr=0000003d type=0 cb=61
+PICASSO USB: SID e0 cbar=00010000 cba2r=00000001 sctlr=24dca300 path=identity
+PICASSO USB: SMMU widths in/out/mid=36/36/36 DMA=0x0+0x0
+PICASSO USB: SID e0 guard PASS
+PICASSO USB: controller id=5533330a hwparams0=4020400a awidth=64 gctl=00102001
+PICASSO USB: hwparams3..7=10420085 47a2200c 04202088 07ea0020 03080a65
+PICASSO USB: FIFO pre-reset rx0=00000305 tx=00000042/00420184/01c60082/02480184
+PICASSO USB: DMA 4 pages at va 0xfffffffbf3d6d000 pa 0xc45c7000
+PICASSO USB: SMMU scr0=00250406 idr=4c017e51/6000003e/00005111 gfsr=00000000
+PICASSO USB: SMMU streams=81 banks=62 pages=128
+PICASSO USB: SID e0 match 6 smr=800000e0 s2cr=0000003d
+PICASSO USB: SID e0 match=6 smr=800000e0 s2cr=0000003d type=0 cb=61
+PICASSO USB: SID e0 cbar=00010000 cba2r=00000001 sctlr=24dca300 path=identity
+PICASSO USB: SMMU widths in/out/mid=36/36/36 DMA=0xc45c7000+0x4000
+PICASSO USB: SID e0 guard PASS
+PICASSO USB: hardware guards PASS; issuing controller reset
+PICASSO USB: pre-stop GCTL=00102001 DCFG=00080804 DCTL=00f00000 DSTS=00d3d8bc USB2PHYCFG=00002500 USB3PIPECTL=0b080402
+PICASSO USB: pre-reset halt done after 0 ms DSTS=00d3d9b4
+PICASSO USB: asserting soft reset
+PICASSO USB: reset asserted, DCTL 0x40000000
+PICASSO USB: soft reset done after 0 ms, GCTL 0x00102001 DCFG 0x00080804
+PICASSO USB: FIFO post-reset rx0=00000305 tx=00000042/00420184/01c60082/02480184
+PICASSO USB: QSCRATCH 0xfffffff65433a800 (wrapper map 0xfffffff654242000 + 0xf8800)
+PICASSO USB: UTMI enter
+PICASSO USB: UTMI before read begin
+PICASSO USB: UTMI before=0x00000004
+PICASSO USB: UTMI disable write begin
+PICASSO USB: UTMI disable write done
+PICASSO USB: UTMI disabled read begin
+PICASSO USB: UTMI disabled=0x00000104
+PICASSO USB: UTMI select write begin
+PICASSO USB: UTMI select write done
+PICASSO USB: UTMI selected read begin
+PICASSO USB: UTMI selected=0x0000010d
+PICASSO USB: UTMI enable write begin
+PICASSO USB: UTMI enable write done
+PICASSO USB: UTMI final read begin
+PICASSO USB: UTMI final=0x0000000d
+PICASSO USB: UTMI complete
+PICASSO USB: ep0 cmd 9 prepare
+PICASSO USB: ep0 cmd 9 complete reg=0x00000009 polls=1
+PICASSO USB: ep0 cmd 1 prepare
+PICASSO USB: ep0 cmd 1 complete reg=0x00000001 polls=1
+PICASSO USB: ep0 cmd 2 prepare
+PICASSO USB: ep0 cmd 2 complete reg=0x00010002 polls=1
+PICASSO USB: ep1 cmd 1 prepare
+PICASSO USB: ep1 cmd 1 complete reg=0x00000001 polls=1
+PICASSO USB: ep1 cmd 2 prepare
+PICASSO USB: ep1 cmd 2 complete reg=0x00020002 polls=1
+PICASSO USB: ep0 resources rebuilt (initial), DALEPENA=0x00000003
+PICASSO USB: QSCRATCH HS_PHY_CTRL 0x10000000 SS_PHY_CTRL 0x00000000
+PICASSO USB: QSCRATCH after HS_PHY_CTRL 0x10100000 SS_PHY_CTRL 0x01000000
+PICASSO USB: setup TRB prepare va 0xfffffffbf3d6e000 pa 0xc45c8000
+PICASSO USB: ep0 cmd 6 prepare
+PICASSO USB: ep0 cmd 6 complete reg=0x00000006 polls=1
+PICASSO USB: setup TRB command returned
+PICASSO USB: setup TRB armed before RUN (0 retries)
+PICASSO USB: running (DSTS 0x00820001 after 0 ms), DMA at 0xc45c7000
+PICASSO USB: STATE t=0ms DSTS=00960001 speed=1 link=5 DCTL=80000000 phy=00002400 qcfg=0000000d events=0/0
+PICASSO USB: STATE t=1ms DSTS=008e0001 speed=1 link=3 DCTL=80000000 phy=00002400 qcfg=0000000d events=0/0
+PICASSO USB: event 0 ep0 0x00000000
+PICASSO USB: event 1 ep0 0x00000000
+PICASSO USB: event 2 ep0 0x00000000
+PICASSO USB: event 3 ep0 0x00000000
+PICASSO USB: STATE t=100ms DSTS=008271d0 speed=0 link=0 DCTL=80000000 phy=00002400 qcfg=0000000d events=4/0
+PICASSO USB: STATE t=500ms DSTS=00828fa0 speed=0 link=0 DCTL=80000000 phy=00002400 qcfg=0000000d events=4/0
+PICASSO USB: STATE t=1000ms DSTS=008334b8 speed=0 link=0 DCTL=80000000 phy=00002400 qcfg=0000000d events=4/0
+PICASSO USB: event 4 ep0 0x00000101
+PICASSO USB: ep0 end active (usb reset) physical ep0 rsc=0 result=0
+PICASSO USB: ep0 resources rebuilt (usb reset), DALEPENA=0x00000003
+PICASSO USB: event 5 ep0 0x080001c0
+PICASSO USB: event 6 ep0 0x00000201
+PICASSO USB: connected, speed 0
+PICASSO USB: event 7 ep0 0x0000c040
+PICASSO USB: setup type=80 req=06 value=0100 index=0000 len=64
+PICASSO USB: event 8 ep1 0x000010c2
+PICASSO USB: event 9 ep1 0x0000c042
+PICASSO USB: event 10 ep0 0x000020c0
+PICASSO USB: event 11 ep0 0x0000c040
+PICASSO USB: event 12 ep0 0x00000101
+PICASSO USB: ep0 end active (usb reset) physical ep0 rsc=0 result=0
+PICASSO USB: ep0 resources rebuilt (usb reset), DALEPENA=0x00000003
+PICASSO USB: event 13 ep0 0x080001c0
+PICASSO USB: event 14 ep0 0x00000201
+PICASSO USB: connected, speed 0
+PICASSO USB: event 15 ep0 0x0000c040
+PICASSO USB: setup type=00 req=05 value=0026 index=0000 len=0
+PICASSO USB: event 16 ep1 0x000020c2
+PICASSO USB: event 17 ep1 0x0000c042
+PICASSO USB: event 18 ep0 0x0000c040
+PICASSO USB: setup type=80 req=06 value=0100 index=0000 len=18
+PICASSO USB: event 19 ep1 0x000010c2
+PICASSO USB: event 20 ep1 0x0000c042
+PICASSO USB: event 21 ep0 0x000020c0
+PICASSO USB: event 22 ep0 0x0000c040
+PICASSO USB: event 23 ep0 0x0000c040
+PICASSO USB: setup type=80 req=06 value=0200 index=0000 len=255
+PICASSO USB: event 24 ep1 0x000010c2
+PICASSO USB: event 25 ep1 0x0000c042
+PICASSO USB: event 26 ep0 0x000020c0
+PICASSO USB: event 27 ep0 0x0000c040
+PICASSO USB: event 28 ep0 0x0000c040
+PICASSO USB: setup type=80 req=06 value=0303 index=0409 len=255
+PICASSO USB: event 29 ep1 0x000010c2
+PICASSO USB: event 30 ep1 0x0000c042
+PICASSO USB: event 31 ep0 0x000020c0
+PICASSO USB: event 32 ep0 0x0000c040
+PICASSO USB: event 33 ep0 0x0000c040
+PICASSO USB: setup type=80 req=06 value=0300 index=0000 len=255
+PICASSO USB: event 34 ep1 0x000010c2
+PICASSO USB: event 35 ep1 0x000090c2
+PICASSO USB: event 36 ep1 0x0000c042
+PICASSO USB: event 37 ep0 0x000020c0
+PICASSO USB: event 38 ep0 0x0000c040
+PICASSO USB: event 39 ep0 0x0000c040
+PICASSO USB: setup type=80 req=06 value=0302 index=0409 len=255
+PICASSO USB: event 40 ep1 0x000010c2
+PICASSO USB: event 41 ep1 0x0000c042
+PICASSO USB: event 42 ep0 0x000020c0
+PICASSO USB: event 43 ep0 0x0000c040
+PICASSO USB: event 44 ep0 0x0000c040
+PICASSO USB: setup type=80 req=06 value=0100 index=0000 len=18
+PICASSO USB: event 45 ep1 0x000010c2
+PICASSO USB: event 46 ep1 0x0000c042
+PICASSO USB: event 47 ep0 0x000020c0
+PICASSO USB: event 48 ep0 0x0000c040
+PICASSO USB: event 49 ep0 0x0000c040
+PICASSO USB: setup type=80 req=06 value=0200 index=0000 len=9
+PICASSO USB: event 50 ep1 0x000010c2
+PICASSO USB: event 51 ep1 0x0000c042
+PICASSO USB: event 52 ep0 0x000020c0
+PICASSO USB: event 53 ep0 0x0000c040
+PICASSO USB: event 54 ep0 0x0000c040
+PICASSO USB: setup type=80 req=06 value=0200 index=0000 len=67
+PICASSO USB: event 55 ep1 0x000010c2
+PICASSO USB: event 56 ep1 0x0000c042
+PICASSO USB: event 57 ep0 0x000020c0
+PICASSO USB: event 58 ep0 0x0000c040
+PICASSO USB: event 59 ep0 0x0000c040
+PICASSO USB: setup type=80 req=06 value=0200 index=0000 len=265
+PICASSO USB: event 60 ep1 0x000010c2
+PICASSO USB: event 61 ep1 0x0000c042
+PICASSO USB: event 62 ep0 0x000020c0
+PICASSO USB: event 63 ep0 0x0000c040
+PICASSO USB: event 64 ep0 0x0000c040
+PICASSO USB: setup type=00 req=09 value=0001 index=0000 len=0
+PICASSO USB: start-config ep0 cmd=9 result=0 reg=0x00020009 rsc=0
+PICASSO USB: rx-config ep2 cmd=1 result=0 reg=0x00000001 rsc=0
+PICASSO USB: rx-resource ep2 cmd=2 result=0 reg=0x00030002 rsc=0
+PICASSO USB: tx-config ep3 cmd=1 result=0 reg=0x00000001 rsc=0
+PICASSO USB: tx-resource ep3 cmd=2 result=0 reg=0x00040002 rsc=0
+PICASSO USB: notify-config ep5 cmd=1 result=0 reg=0x00000001 rsc=0
+PICASSO USB: notify-resource ep5 cmd=2 result=0 reg=0x00050002 rsc=0
+PICASSO USB: endpoints enabled mps=512 DALEPENA=0x0000002f
+PICASSO USB: EPSTATE pre-arm ep2 result=0 state=0x00000004 busy=0 rsc=0 trb=00000000/00000000/00000000/00000000 DALEPENA=0000002f DCTL=80000000 DSTS=00021f60 events=65/8
+PICASSO USB: RX ring first=0xc45c8080 link=0xc45c8090 ctl=0x00000081
+PICASSO USB: rx-noop ep2 cmd=6 result=0 reg=0x00020006 rsc=2
+PICASSO USB: RX arm mps=512 len=512 trb=0xc45c8080 result=0 cmd=0x00020007 rsc=2 started=1
+PICASSO USB: EPSTATE after-arm ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=00022488 events=65/8
+PICASSO USB: configured, streaming the console
+PICASSO USB: event 65 ep1 0x000020c2
+PICASSO USB: event 66 ep1 0x0000c042
+PICASSO USB: event 67 ep0 0x0000c040
+PICASSO USB: setup type=a1 req=21 value=0000 index=0000 len=7
+PICASSO USB: event 68 ep1 0x000010c2
+PICASSO USB: event 69 ep1 0x0000c042
+PICASSO USB: event 70 ep0 0x000020c0
+PICASSO USB: event 71 ep0 0x0000c040
+PICASSO USB: event 72 ep0 0x0000c040
+PICASSO USB: setup type=21 req=22 value=0000 index=0000 len=0
+PICASSO USB: event 73 ep1 0x000020c2
+PICASSO USB: event 74 ep1 0x0000c042
+PICASSO USB: event 75 ep0 0x0000c040
+PICASSO USB: setup type=21 req=20 value=0000 index=0000 len=7
+PICASSO USB: event 76 ep0 0x000010c0
+PICASSO USB: event 77 ep0 0x000010c0
+PICASSO USB: EPSTATE handoff ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=0002a100 events=78/0
+PICASSO USB: EPSTATE handoff ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=0003ec68 events=78/0
+PICASSO USB: EPSTATE handoff ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=000337e0 events=78/0
+PICASSO USB: EPSTATE handoff ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=00028378 events=78/0
+PICASSO USB: EPSTATE handoff ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=0003cf28 events=78/0
+PICASSO USB: event 78 ep0 0x0000c040
+PICASSO USB: event 79 ep1 0x000020c2
+PICASSO USB: event 80 ep1 0x0000c042
+PICASSO USB: event 81 ep0 0x0000c040
+PICASSO USB: setup type=a1 req=21 value=0000 index=0000 len=7
+PICASSO USB: event 82 ep1 0x000010c2
+PICASSO USB: event 83 ep1 0x0000c042
+PICASSO USB: event 84 ep0 0x000020c0
+PICASSO USB: event 85 ep0 0x0000c040
+PICASSO USB: event 86 ep0 0x0000c040
+PICASSO USB: setup type=21 req=22 value=0000 index=0000 len=0
+PICASSO USB: event 87 ep1 0x000020c2
+PICASSO USB: event 88 ep1 0x0000c042
+PICASSO USB: event 89 ep3 0x0000c046
+PICASSO USB: event 90 ep5 0x0000c04a
+PICASSO USB: event 91 ep3 0x0000c046
+PICASSO USB: event 92 ep3 0x0000c046
+PICASSO USB: event 93 ep3 0x0000c046
+PICASSO USB: event 94 ep3 0x0000c046
+PICASSO USB: event 95 ep3 0x0000c046
+PICASSO USB: event 96 ep3 0x0000c046
+PICASSO USB: event 97 ep3 0x0000c046
+PICASSO USB: event 98 ep3 0x0000c046
+PICASSO USB: event 99 ep3 0x0000c046
+PICASSO USB: event 100 ep3 0x0000c046
+PICASSO USB: event 101 ep3 0x0000c046
+PICASSO USB: event 102 ep3 0x0000c046
+PICASSO USB: event 103 ep3 0x0000c046
+PICASSO USB: event 104 ep3 0x0000c046
+PICASSO USB: event 105 ep3 0x0000c046
+PICASSO USB: event 106 ep3 0x0000c046
+PICASSO USB: event 107 ep3 0x0000c046
+PICASSO USB: event 108 ep3 0x0000c046
+PICASSO USB: event 109 ep3 0x0000c046
+PICASSO USB: event 110 ep3 0x0000c046
+PICASSO USB: event 111 ep3 0x0000c046
+PICASSO USB: event 112 ep3 0x0000c046
+PICASSO USB: event 113 ep3 0x0000c046
+PICASSO USB: event 114 ep3 0x0000c046
+PICASSO USB: event 115 ep3 0x0000c046
+PICASSO USB: event 116 ep3 0x0000c046
+PICASSO USB: event 117 ep3 0x0000c046
+PICASSO USB: event 118 ep3 0x0000c046
+PICASSO USB: event 119 ep3 0x0000c046
+PICASSO USB: event 120 ep3 0x0000c046
+PICASSO USB: event 121 ep3 0x0000c046
+PICASSO USB: event 122 ep3 0x0000c046
+PICASSO USB: event 123 ep3 0x0000c046
+PICASSO USB: event 124 ep3 0x0000c046
+PICASSO USB: event 125 ep3 0x0000c046
+PICASSO USB: event 126 ep3 0x0000c046
+PICASSO USB: event 127 ep3 0x0000c046
+PICASSO USB: event 128 ep3 0x0000c046
+PICASSO USB: event 129 ep3 0x0000c046
+PICASSO USB: event 130 ep3 0x0000c046
+PICASSO USB: event 131 ep3 0x0000c046
+PICASSO USB: event 132 ep3 0x0000c046
+PICASSO USB: event 133 ep3 0x0000c046
+PICASSO USB: event 134 ep3 0x0000c046
+PICASSO USB: event 135 ep3 0x0000c046
+PICASSO USB: event 136 ep3 0x0000c046
+PICASSO USB: event 137 ep3 0x0000c046
+PICASSO USB: event 138 ep3 0x0000c046
+PICASSO USB: event 139 ep3 0x0000c046
+PICASSO USB: event 140 ep3 0x0000c046
+PICASSO USB: event 141 ep3 0x0000c046
+PICASSO USB: event 142 ep3 0x0000c046
+PICASSO USB: event 143 ep3 0x0000c046
+PICASSO USB: event 144 ep3 0x0000c046
+PICASSO USB: event 145 ep3 0x0000c046
+PICASSO USB: event 146 ep3 0x0000c046
+PICASSO USB: event 147 ep3 0x0000c046
+PICASSO USB: event 148 ep3 0x0000c046
+PICASSO USB: event 149 ep3 0x0000c046
+PICASSO USB: event 150 ep3 0x0000c046
+PICASSO USB: event 151 ep3 0x0000c046
+PICASSO USB: event 152 ep3 0x0000c046
+PICASSO USB: event 153 ep3 0x0000c046
+PICASSO USB: event 154 ep3 0x0000c046
+PICASSO USB: event 155 ep3 0x0000c046
+PICASSO USB: event 156 ep3 0x0000c046
+PICASSO USB: event 157 ep3 0x0000c046
+PICASSO USB: event 158 ep3 0x0000c046
+PICASSO USB: event 159 ep3 0x0000c046
+PICASSO USB: event 160 ep3 0x0000c046
+PICASSO USB: event 161 ep3 0x0000c046
+PICASSO USB: event 162 ep3 0x0000c046
+PICASSO USB: event 163 ep3 0x0000c046
+PICASSO USB: event 164 ep3 0x0000c046
+PICASSO USB: event 165 ep3 0x0000c046
+PICASSO USB: event 166 ep3 0x0000c046
+PICASSO USB: event 167 ep3 0x0000c046
+PICASSO USB: event 168 ep3 0x0000c046
+PICASSO USB: event 169 ep3 0x0000c046
+PICASSO USB: event 170 ep3 0x0000c046
+PICASSO USB: event 171 ep3 0x0000c046
+PICASSO USB: event 172 ep3 0x0000c046
+PICASSO USB: event 173 ep3 0x0000c046
+PICASSO USB: event 174 ep3 0x0000c046
+PICASSO USB: event 175 ep3 0x0000c046
+PICASSO USB: event 176 ep3 0x0000c046
+PICASSO USB: event 177 ep3 0x0000c046
+PICASSO USB: event 178 ep3 0x0000c046
+PICASSO USB: event 179 ep3 0x0000c046
+PICASSO USB: event 180 ep3 0x0000c046
+PICASSO USB: event 181 ep3 0x0000c046
+PICASSO USB: event 182 ep3 0x0000c046
+PICASSO USB: event 183 ep3 0x0000c046
+PICASSO USB: event 184 ep3 0x0000c046
+PICASSO USB: event 185 ep3 0x0000c046
+PICASSO USB: event 186 ep3 0x0000c046
+PICASSO USB: event 187 ep3 0x0000c046
+PICASSO USB: event 188 ep3 0x0000c046
+PICASSO USB: event 189 ep3 0x0000c046
+PICASSO USB: event 190 ep3 0x0000c046
+PICASSO USB: event 191 ep3 0x0000c046
+PICASSO USB: event 192 ep3 0x0000c046
+PICASSO USB: event 193 ep3 0x0000c046
+PICASSO USB: event 194 ep3 0x0000c046
+PICASSO USB: event 195 ep3 0x0000c046
+PICASSO USB: event 196 ep3 0x0000c046
+PICASSO USB: event 197 ep3 0x0000c046
+PICASSO USB: event 198 ep3 0x0000c046
+PICASSO USB: event 199 ep3 0x0000c046
+PICASSO USB: EPSTATE handoff ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=00831dc0 events=201/0
+PICASSO USB: EPSTATE handoff ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=008269a8 events=202/0
+PICASSO USB: EPSTATE handoff ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=0083b5a0 events=203/0
+PICASSO USB: EPSTATE handoff ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=008301b8 events=204/0
+PICASSO USB: EPSTATE handoff ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=00824de8 events=205/0
+PICASSO USB: live handoff configured=1 host_open=0 after 10000 ms
+PICASSO USB: EPSTATE settle ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=0082da00 events=207/0
+PICASSO USB: EPSTATE settle ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=008364a0 events=208/0
+PICASSO USB: EPSTATE settle ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=0083ef50 events=209/0
+PICASSO USB: EPSTATE settle ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=00827a18 events=210/0
+PICASSO USB: EPSTATE settle ep2 result=0 state=0x00000004 busy=1 rsc=2 trb=c45ca000/00000000/00000200/00000819 DALEPENA=0000002f DCTL=80000000 DSTS=00830500 events=211/0
+PICASSO USB: APSS watchdog armed ticks=491519 bark=491519 bite=491519 ctl=1
+PICASSO USB: APSS watchdog armed timeout=15000 ms
+PICASSO USB: background poller started
+MAC Framework successfully initialized
+using 974 buffer headers and 974 cluster IO buffer headers
+ktriage_register_subsystem_strings: set subsystem 8 strings
+mbinit: done [64 MB total pool size, (64/0) split]
+dlil_init: Waiting for all the create dlil kernel threads to get scheduled at least once.
+ArmCpu::probe fails
+NativeUfs match[3]: class=IOPlatformDevice len=15 compat=arm,cortex-a76.
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[4]: class=IOPlatformDevice len=15 compat=arm,cortex-a76.
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[5]: class=IOPlatformDevice len=15 compat=arm,cortex-a76.
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[6]: class=IOPlatformDevice len=15 compat=arm,cortex-a76.
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[7]: class=IOPlatformDevice len=15 compat=arm,cortex-a76.
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[8]: class=IOPlatformDevice len=15 compat=arm,cortex-a76.
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[9]: class=IOPlatformDevice len=15 compat=arm,cortex-a76.
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[10]: class=IOPlatformDevice len=0 compat=
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[11]: class=IOPlatformDevice len=0 compat=
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[12]: class=IOPlatformDevice len=13 compat=arm,psci-1.0.
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[13]: class=IOPlatformDevice len=0 compat=
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[14]: class=IOPlatformDevice len=0 compat=
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[15]: class=IOPlatformDevice len=0 compat=
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[16]: class=IOPlatformDevice len=0 compat=
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[17]: class=IOPlatformDevice len=0 compat=
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[18]: class=IOPlatformDevice len=11 compat=arm,gic-v3.
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[19]: class=IOPlatformDevice len=36 compat=qcom,geni-debug-uart.qcom,geni-uart.
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[20]: class=IOPlatformDevice len=18 compat=qcom,sm7250-ufshc.
+NativeUfs: provider accepted by compatible
+NativeUfs start: class=IOPlatformDevice probe=12 root=0 expert=0
+NativeUfs: starting from the compatible-matched platform device
+NativeUfs: iommus=0 smmu=0
+NativeUfs: dispatching probe=12 to startRoot
+NativeUfs: startRoot enter (clock=12444019966)
+NativeUfs: stage controller map
+NativeUfs: stage DMA allocation
+NativeUfs: adopted firmware request list at a4e96000 virt=fffffff7f7a79000
+NativeUfs: stage SMMU and request list
+NativeUfs: ufshc declares no iommus, using direct physical DMA at a4e96000
+NativeUfs: stage NOP OUT
+ArmCpu::probe fails
+NativeUfs match[21]: class=IOPlatformDevice len=20 compat=qcom,sm7250-ufs-phy.
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[22]: class=IOPlatformDevice len=30 compat=qcom,adreno-620.0.qcom,adreno.
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[23]: class=IOPlatformDevice len=38 compat=qcom,adreno-gmu-620.0.qcom,adreno-gmu.
+NativeUfs::probe fails
+ArmCpu::probe fails
+NativeUfs match[24]: class=IOPlatformDevice len=30 compat=qcom,adreno-smmu.qcom,smmu-v2.
+NativeUfs::probe fails
+PICASSO USB: busy poller started
+dlil_init: All the created dlil kernel threads have been scheduled at least once. Proceeding.
+ifnet_attach: All kernel threads created for interface lo0 have been scheduled at least once. Proceeding.
+skip attaching fsw to lo0 using legacy TX modelapfs_module_start:3232: load: com.apple.filesystems.apfs, v2236.140.6, apfs-2236.140.6, 2025/07/11
+ktriage_register_subsystem_strings: set subsystem 7 strings
+Setting up notifier for CoreAnalyticsHub
+install_apfs_vfs_fs:8248: apfs: speculative telemetry feature ENABLED by boot-arg
+apfs_sysctl_register:1407: done registering sysctls.
+NativeUfs: stage SMMU and request list
+NativeUfs: ufshc declares no iommus, using direct physical DMA at a4e96000
+NativeUfs: stage NOP OUT
+IOCPUInterruptController: not registry member at registerService()
+Waiting on <dict ID="0"><key>IOProviderClass</key><string ID="1">IOMedia</string><key>Content</key><string ID="2">Apple_HFS</string></dict>
+PICASSO USB: poller heartbeat polls=4096 events=311 rx_busy=1
+PICASSO USB: poller heartbeat polls=8192 events=312 rx_busy=1
+PICASSO USB: poller heartbeat polls=12288 events=313 rx_busy=1
+PICASSO USB: poller heartbeat polls=16384 events=314 rx_busy=1
+PICASSO USB: poller heartbeat polls=20480 events=315 rx_busy=1
+PICASSO USB: poller heartbeat polls=24576 events=316 rx_busy=1
+PICASSO USB: poller heartbeat polls=28672 events=317 rx_busy=1
+PICASSO USB: poller heartbeat polls=32768 events=318 rx_busy=1
+PICASSO USB: poller heartbeat polls=36864 events=319 rx_busy=1
+PICASSO USB: poller heartbeat polls=40960 events=320 rx_busy=1
