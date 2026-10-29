@@ -2768,29 +2768,6 @@ index bb558ee..103c88f 100644
  
  #if CONFIG_DEV_KMEM
  	bsd_init_kprintf("calling dev_kmem_init\n");
-@@ -1070,6 +1074,10 @@ bsd_init(void)
- 	bsd_init_kprintf("done\n");
- }
- 
-+int picasso_trace_user_return;
-+unsigned int picasso_trace_user_return_count;
-+
-+
- void
- bsdinit_task(void)
- {
-@@ -1096,8 +1104,11 @@ bsdinit_task(void)
- 
- 	bsd_init_kprintf("bsd_do_post - done");
- 
-+	picasso_trace_user_return = 1;
- 	load_init_program(p);
-+	printf("PICASSO_INIT: load_init_program returned\n");
- 	lock_trace = 1;
-+	printf("PICASSO_INIT: retired init thread returning\n");
- }
- 
- kern_return_t
 diff --git a/iokit/Kernel/IOLib.cpp b/iokit/Kernel/IOLib.cpp
 index 7addbb3..de3d6bb 100644
 --- a/iokit/Kernel/IOLib.cpp
