@@ -176,6 +176,11 @@ kernel_args = [
   # authenticator. Without it the boot stops at the mount, so it is worth one build to see how far
   # the rest of the stack gets.
   "allow-root-hash-mismatch",
+  # AMFI rejects launchd with "unsuitable CT policy 0 for this platform/device" and then kills
+  # pid 1, which XNU turns into an "unexpected SIGKILL of launchd" panic. amfi_get_out_of_my_way
+  # did not cover this and neither did clearing amfi-only-platform-code, so both were wrong guesses.
+  # amfi_allow_any_signature is the switch that speaks to signature acceptance itself.
+  "amfi_allow_any_signature=1",
   "io=0x232",
   # smmu=6 programs the SMMU route itself and logs the plan; reset=pshold returns to fastboot after
   # a panic.
