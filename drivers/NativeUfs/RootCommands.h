@@ -198,15 +198,10 @@ static IOReturn hostResponseHeader (uint8_t type, uint8_t lun, uint8_t tag)
 
 static IOReturn hostNop (void)
 {
-  // Breadcrumbs: the caller's failure path never ran, so nothing said where this stopped. One line
-  // per step makes the answer unambiguous.
-  IOLog ("NativeUfs nop: enter\n");
-  if (!hostClearUcd ()) { IOLog ("NativeUfs nop: clear failed\n"); return kIOReturnNotReady; }
-  IOLog ("NativeUfs nop: cleared\n");
+  if (!hostClearUcd ()) return kIOReturnNotReady;
   gHost.virt[kUcdOffset + 3] = 1;
   uint32_t ocs = 15;
   IOReturn result = hostSubmit (0, 0, 200000, &ocs);
-  IOLog ("NativeUfs nop: submit returned %d ocs=%u\n", result, ocs);
   if (result != kIOReturnSuccess) return result;
   result = hostResponseHeader (0x20, 0, 1);
   if (result != kIOReturnSuccess) return result;
