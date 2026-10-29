@@ -165,6 +165,13 @@ kernel_args = [
   # happen. Nothing reaches the console without them.
   "nointr_consio=1",
   "nointr_iolog=1",
+  # The root volume mounts but the kernel then refuses to continue:
+  #   is_root_hash_authentication_required:555: Root Volume, root hash authentication is required
+  # This switch exists in the kernel for exactly that check. It is the same class of decision as
+  # amfi_get_out_of_my_way: a diagnostic boot on a device that has no Apple boot chain to supply the
+  # authenticator. Without it the boot stops at the mount, so it is worth one build to see how far
+  # the rest of the stack gets.
+  "allow-root-hash-mismatch",
   "io=0x232",
   # smmu=6 programs the SMMU route itself and logs the plan; reset=pshold returns to fastboot after
   # a panic.
