@@ -60,9 +60,14 @@ def main():
             # does not exist on the runner, which is how the first attempt failed.
             info = plistlib.loads(run('diskutil', 'info', '-plist', device, capture=True).encode())
             size = int(info['TotalSize'])
+            # Copy in page-sized blocks, not whole MiB: the attached size is not a multiple of 1 MiB
+            # (3011469312 bytes for a nominal 3 GiB sparse image), so a MiB count stopped 984 KiB
+            # short and the length check below rejected it. Rounding down to a page keeps the image
+            # page aligned, which the packer requires.
+            size = size // 4096 * 4096
             # Reading a raw device needs root; the macOS runners allow passwordless sudo.
-            run('sudo', 'dd', f'if={raw_device}', f'of={raw}', 'bs=1m',
-                f'count={size // (1024 * 1024)}')
+            run('sudo', 'dd', f'if={raw_device}', f'of={raw}', 'bs=4096',
+                f'count={size // 4096}')
         finally:
             run('hdiutil', 'detach', device, '-force')
 
