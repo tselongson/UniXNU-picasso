@@ -167,11 +167,16 @@ kernel_args = [
   "nointr_consio=1",
   "nointr_iolog=1",
   "io=0x232",
-  # smmu=6 programs the SMMU route itself and logs the plan; hold=1 keeps the gadget attached
-  # instead of disconnecting during early boot; reset=pshold returns to fastboot after a panic.
+  # smmu=6 programs the SMMU route itself and logs the plan; reset=pshold returns to fastboot after
+  # a panic.
+  #
+  # hold must stay 0. picasso_usb_park() is an infinite loop that polls the console and pets the
+  # watchdog, so hold=1 parks the kernel inside bsd_init for good: that is the mode upstream uses
+  # to keep a diagnostic session alive, and it is why this image produced the console banner and
+  # then nothing at all. With hold=0 bsd_init returns and the boot continues.
   "picasso_usb=2",
   "picasso_usb_smmu=6",
-  "picasso_usb_hold=1",
+  "picasso_usb_hold=0",
   "picasso_usb_reset=pshold",
 ]
 # Stage-5 blind-spot instrumentation (docs/zh/guide/debugging.md 颜色条):
