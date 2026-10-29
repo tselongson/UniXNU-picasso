@@ -1,0 +1,19 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index bb558ee..71cc293 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -936,7 +936,13 @@ bsd_init(void)
+ #endif // CONFIG_IMAGEBOOT
+ #elif !XNU_TARGET_OS_OSX
+ 		/* Non MacOS */
+-		require_rootauth = TRUE;
++		/*
++		 * PICASSO: this board has no Apple boot chain, so FSIOC_KERNEL_ROOTAUTH can never be
++		 * satisfied -- APFS asks for an authenticator derived from an IM4M that does not exist
++		 * for a Xiaomi device. allow-root-hash-mismatch already skips the hash comparison at
++		 * mount time; without this the boot mounts the volume and then panics here anyway.
++		 */
++		require_rootauth = !PE_parse_boot_argn("allow-root-hash-mismatch", NULL, 0);
+ #endif // XNU_TARGET_OS_OSX && defined(__arm64__)
+ 
+ 		if (require_rootauth) {

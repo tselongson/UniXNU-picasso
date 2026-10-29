@@ -18,7 +18,11 @@ def prepare(device=DEVICE, source=None):
         raise ValueError('upstream.rev must contain a full Git commit ID')
     patch = device / 'patches/unixnu-source-kernel.patch'
     usb_patch = device / 'patches/picasso-usb-console-xnu.patch'
-    fingerprint = hashlib.sha256(patch.read_bytes() + b'\0' + usb_patch.read_bytes()).hexdigest()
+    rootauth_patch = device / 'patches/picasso-rootauth-xnu.patch'
+    # The rootauth patch participates in the fingerprint: it changes compiled kernel code, so a
+    # cached tree built without it must not be reused.
+    fingerprint = hashlib.sha256(patch.read_bytes() + b'\0' + usb_patch.read_bytes()
+                                 + b'\0' + rootauth_patch.read_bytes()).hexdigest()
     cache = device / '.cache'
     target = cache / f'upstream-{revision[:12]}-{fingerprint[:12]}'
     if target.is_dir():
@@ -57,6 +61,9 @@ def prepare(device=DEVICE, source=None):
             raise FileNotFoundError('the source patch must create patches/xnu/*picasso-usb-console.patch')
         for path in embedded:
             path.write_bytes(usb_patch.read_bytes())
+        # Applied by the build as part of patches/xnu/*.patch, in sorted order. zzz keeps it after
+        # every patch that moves lines in bsd_init.c.
+        (tree / 'patches/xnu/zzz-picasso-rootauth.patch').write_bytes(rootauth_patch.read_bytes())
         tree.rename(target)
     return target
 
