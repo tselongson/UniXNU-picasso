@@ -1220,6 +1220,12 @@ static bool hostBringUp (const char **why)
   // NOP OUT proves the transport before touching the SCSI layer.
   if (hostNop () != kIOReturnSuccess) {
     gHost.ready = false;
+    // Say what the transport looked like before giving up: the caller only has the stage name, and
+    // "NOP OUT" alone does not distinguish "controller never fetched the descriptor" from
+    // "fetched it and never completed".
+    IOLog ("NativeUfs: NOP OUT failed polls=%u doorbell=%u interrupt=%u ocs=%u\n",
+           gRootDiagnostic.polls, gRootDiagnostic.dbSeen, gRootDiagnostic.isSeen,
+           gRootDiagnostic.ocs);
     *why = "NOP OUT";
     return false;
   }

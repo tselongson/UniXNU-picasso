@@ -27,7 +27,12 @@ static UfsTransferEnd pollUfsTransfer(Port &port, UfsTransferPoll &state)
     // PICASSO-DIAG: hard iteration cap. The deadline alone is the only exit today, so a broken
     // timebase (or a controller that never completes) wedges the platform-expert thread with no
     // output at all. Bail out by poll count as well so the caller can dump registers.
-    if (state.polls >= 200000u) return UfsTransferEnd::Timeout;
+    //
+    // 200000 was far too generous here: each iteration calls delay(), which is IODelay(2), and
+    // IODelay on this board is orders of magnitude slower than its argument suggests. A stalled
+    // NOP OUT therefore sat in this loop for minutes and looked exactly like a deadlock -- the
+    // caller's failure path never ran, so neither the log line nor the panic ever appeared.
+    if (state.polls >= 20000u) return UfsTransferEnd::Timeout;
     port.delay();
   }
 }
