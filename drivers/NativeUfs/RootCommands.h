@@ -27,16 +27,10 @@ struct HardwareTransferPort {
     return *reinterpret_cast<volatile uint32_t *> (gHost.virt + 8) & 0xff;
   }
   bool expired () { return mach_absolute_time () >= deadline; }
-  // IODelay spins until the timebase advances, and on this board that does not happen in this
-  // context: the very first call never returns, so the poll loop's iteration cap is never reached
-  // and a stalled command is indistinguishable from a deadlock. Pace with a bounded busy loop
-  // instead, which cannot block.
-  void delay ()
-  {
-    for (volatile unsigned spin = 0; spin < 200; ++spin) {
-      __asm__ __volatile__ ("" ::: "memory");
-    }
-  }
+  // PROBE ONLY: IODelay restored to test whether it is the thing that blocks. Everything else in
+  // this build is identical to the working one, including the poll cap and the NOP breadcrumbs, so
+  // if this hangs right after "nop: cleared" the delay call is the cause and nothing else is.
+  void delay () { IODelay (2); }
 };
 
 static void putBe32 (uint8_t *at, uint32_t value)
