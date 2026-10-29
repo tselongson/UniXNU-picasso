@@ -1763,7 +1763,7 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
   bool trace = probeTrace < 12;
   if (trace) {
     ++probeTrace;
-    IOLog ("NativeUfs blk: read block=%llu count=%llu len=%llu\n",
+    IOLog ("NativeUfs blk[%s]: read block=%llu count=%llu len=%llu\n", label,
            block, count, static_cast<uint64_t> (buffer->getLength ()));
   }
   struct Operations {
@@ -1821,13 +1821,18 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
     rootDiagnosticFailure ("root window read failed");
   }
   if (trace) {
-    // The container superblock carries NXSB at offset 32 of block 0. If that is not what comes
-    // back, the probe is reading the wrong window and no property tweak will help.
-    uint8_t head[40] = {};
-    if (buffer->readBytes (0, head, sizeof head) == sizeof head) {
-      IOLog ("NativeUfs blk:   magic=%.4s@32 status=%d done=%llu\n",
-             reinterpret_cast<const char *> (head + 32), static_cast<int> (result), done);
+    // Sample the bounce buffer, not the memory descriptor: bounce holds exactly what the device
+    // returned, while reading the descriptor back after the copy proved unreliable and produced an
+    // "empty magic" that was an artefact of the instrumentation rather than of the data.
+    char magic[5] = {};
+    if (bounce && done >= 36) {
+      for (unsigned i = 0; i < 4; ++i) {
+        char c = static_cast<char> (bounce[32 + i]);
+        magic[i] = (c >= 0x20 && c < 0x7f) ? c : '.';
+      }
     }
+    IOLog ("NativeUfs blk[%s]:   magic=%.4s@32 status=%d done=%llu\n", label, magic,
+           static_cast<int> (result), done);
   }
   completion->action (completion->target, completion->parameter, result, done);
   return kIOReturnSuccess;
