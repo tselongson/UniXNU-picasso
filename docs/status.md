@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-29 21:35（v78，commit `f7dcb56`）
+最后更新：2026-10-30 00:10（v86 回退，commit `294ad75`）
 
 ## 一句话
 
@@ -22,9 +22,12 @@ XNU 已经跑过 BSD 层、USB 控制台可用、**UFS 根设备成功发布、A
 | 8 | **APFS 容器挂载** | ✅ | `nx_mount: checkpoint search: largest xid 14` |
 | 9 | **APFS 容器方案匹配** | ✅ | `Got boot device = .../AppleAPFSContainerScheme/AppleAPFSMedia/...` |
 | 10 | **根卷挂载** | ✅ | `mount-complete volume DawnUpdate21H461...` |
-| 11 | 根哈希认证 | ❌ | `is_root_hash_authentication_required: root hash authentication is required` |
-| 12 | `load_init_program` / launchd | ❌ | 未到达 |
-| 13 | 苹果标 / 图形栈 | ❌ | 未到达 |
+| 11 | **根哈希认证** | ✅ | 加 `allow-root-hash-mismatch` + bsd_init 补丁后越过 |
+| 12 | **`load_init_program`** | ✅ | `attempting to load /sbin/launchd` |
+| 13 | **launchd 读取与解压** | ✅ | 加 `AppleFSCompression` kext 后 `AMFI: is adhoc signed` |
+| 14 | launchd 签名信任 | ❌ | `unsuitable CT policy 0 for this platform/device` |
+| 15 | launchd 运行 / 用户态 | ❌ | 未到达 |
+| 16 | 苹果标 / 图形栈 | ❌ | 未到达 |
 
 第 7、8 阶段是 2026-10-29 打通的，见 [ufs-root.md](ufs-root.md)。
 上游三个 Picasso 移植目前停在**第 6 与第 7 之间**（README 自述"存储 bring-up 是当前阶段"）。
@@ -103,16 +106,49 @@ mount-complete volume DawnUpdate21H461...
 
 **整条存储链打通**：UFS → IOBlockStorageDriver → 分区方案 → APFS 容器 → APFS 卷。
 
-### 新的阻塞点：根哈希认证
+### 新的阻塞点：AMFI 拒绝 launchd 的签名
+
+launchd 被读出、解压、解析之后，AMFI 拒绝它：
 
 ```
-is_root_hash_authentication_required:555: disk2s1 Root Volume, root hash authentication is required
+load_init_program: attempting to load /sbin/launchd
+AMFI: '/sbin/launchd' is adhoc signed.
+AMFI: '/sbin/launchd': unsuitable CT policy 0 for this platform/device, rejecting signature.
+AMFI: hook..execve() killing pid 1: dyld signature cannot be verified.
 ```
 
-卷挂上了，但内核要求校验根卷哈希才继续。这是 iOS 的 SSV（签名系统卷）机制。
+随后内核 panic：`unexpected SIGKILL of launchd`（namespace 9 = CODESIGNING）。
 
-注意与之前的区别：早先 `apfs_extract_root_hash_arm` 的失败发生在**导入阶段**，qemu-t8030
-证明那里非致命；这里的失败发生在**认证阶段**，是硬性要求。
+**三个启动参数都试过，输出一字未变**：
+
+| 尝试 | 结果 |
+|---|---|
+| `amfi_get_out_of_my_way=1` | ❌ |
+| ADT `amfi-only-platform-code` 1→0 | ❌ |
+| `amfi_allow_any_signature=1` | ❌ |
+
+三次完全相同，说明这些开关管不到这个判断。`CT policy 0` 里的 0 是"没有策略数据"，
+不是"策略太严"——所以没有东西可以放宽。
+
+### 试过并失败的路：StaticTrustCache
+
+正确机制应当是提供信任缓存（IPSW 里的 `StaticTrustCache` 含所有系统二进制的 cdhash）。
+workflow 能提取它（`Firmware/044-76040-038.dmg.trustcache`，59519 字节），
+但传进 payload 后 **DarwinBoot 直接拒绝整个 payload**：
+
+```
+'Boot' returned: Compromised Data          ← EFI_COMPROMISED_DATA
+```
+
+`docs/concepts/boot-chain.md` 的失败表里，这一状态只对应一个原因：
+"invalid kernel, ADT or trust cache"。
+
+原因在 `make-picasso-adt.py:137`：`--trust-cache` 在那里是**布尔开关**，写的是
+**16 字节零占位符**（注释原文 "Zeroed TrustCache sidecar handoff placeholder"）。
+DarwinBoot 会校验它，一串零过不去。
+
+**该接线已回退（`294ad75`）**，提取步骤保留但不再传给构建。
+下一步要提供 DarwinBoot 能接受的缓存，而不是占位符。
 
 ### 另一条可借鉴的参数
 
