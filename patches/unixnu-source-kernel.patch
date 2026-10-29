@@ -76,11 +76,11 @@ index 94bf523..69d5e48 100644
   	/* Initialize the file systems. */
   	bsd_init_kprintf("calling vfsinit\n");
   	vfsinit();
-diff --git a/patches/xnu/zzz-picasso-usb-console.patch b/patches/xnu/zzz-picasso-usb-console.patch
+diff --git a/patches/xnu/aaa-picasso-usb-console.patch b/patches/xnu/aaa-picasso-usb-console.patch
 new file mode 100644
 index 0000000..3fe523e
 --- /dev/null
-+++ b/patches/xnu/zzz-picasso-usb-console.patch
++++ b/patches/xnu/aaa-picasso-usb-console.patch
 @@ -0,0 +1,2911 @@
 +diff --git a/bsd/conf/files b/bsd/conf/files
 +index 19b4065..b22147f 100644
