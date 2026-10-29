@@ -155,11 +155,10 @@ kernel_args = [
   "debug=0x14e",
   "cpus=1",
   "native-ufs-probe=12",
-  # Let bsd_init start the CDC console before UFS publication runs, so a later UFS panic still has
-  # a complete host-side log. IOSleep does not make progress this early with cpus=1, hence the
-  # timebase-and-yield path.
-  "native-ufs-start-delay=5",
-  "native-ufs-delay-yield=1",
+  # No native-ufs-start-delay or native-ufs-delay-yield here. Both exist to hold the UFS bring-up
+  # back so a diagnostic session has a complete console first, and with them set startRoot now
+  # returns right after "stage NOP OUT" without issuing a single transfer -- the controller never
+  # publishes. Without them the same probe=12 path reads the volume and APFS mounts it.
   "native-ufs-diagnostics=1",
   # Without these XNU panics at serial_console.c:175, and IOLib.cpp asserts, whenever an early
   # kernel path logs with interrupts disabled -- which is exactly when the interesting messages
