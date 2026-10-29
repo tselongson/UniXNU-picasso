@@ -244,6 +244,15 @@ panic_screen = true
 [payload.adt]
 tool = "scripts/make-picasso-adt.py"
 chip_id = "7250"
+# Without this XNU waits for an IOMedia whose Content is Apple_HFS, but publishing volume media is
+# the container scheme's job and that scheme never attaches -- so the wait can never be satisfied.
+# Matching by UUID is the reference mechanism: XNU asks for this UUID, APFS mounts the container to
+# answer, and the volume comes up as media in the process.
+#
+# Read out of the userdata image rather than guessed, by work/read-apfs-uuid.py:
+#   SHNGROOT -> OS window -> protective MBR -> GPT header -> container -> APSB (offset 0xf0).
+# All six APSB checkpoints in the OS container carry the same value.
+root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
 # DarwinBoot requests one contiguous window of this size from the firmware and
 # hands it to the kernel as boot_args.memSize. The kernel then builds its physmap
 # over exactly that range, so the window has to fit inside a single
