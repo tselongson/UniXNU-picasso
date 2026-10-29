@@ -49,10 +49,14 @@ def prepare(device=DEVICE, source=None):
             git('-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive', cwd=tree)
         git('apply', '--check', patch, cwd=tree)
         git('apply', patch, cwd=tree)
-        embedded_usb_patch = tree / 'patches/xnu/zzz-picasso-usb-console.patch'
-        if not embedded_usb_patch.is_file():
-            raise FileNotFoundError(f'{embedded_usb_patch} missing from source patch')
-        embedded_usb_patch.write_bytes(usb_patch.read_bytes())
+        # The embedded copy only has to exist so the tree carries a placeholder; its content is
+        # replaced below with the standalone patch. Match on the name rather than the exact prefix:
+        # the file is named so that it sorts before the patches that shift bsd_init.c line numbers.
+        embedded = sorted((tree / 'patches/xnu').glob('*picasso-usb-console.patch'))
+        if not embedded:
+            raise FileNotFoundError('the source patch must create patches/xnu/*picasso-usb-console.patch')
+        for path in embedded:
+            path.write_bytes(usb_patch.read_bytes())
         tree.rename(target)
     return target
 
