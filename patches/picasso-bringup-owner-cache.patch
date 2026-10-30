@@ -1,5 +1,5 @@
 diff --git a/scripts/build-xnu-4k-baseline.sh b/scripts/build-xnu-4k-baseline.sh
-index 5815dd9..2d810e8 100755
+index 5815dd9..8cd5d6d 100755
 --- a/scripts/build-xnu-4k-baseline.sh
 +++ b/scripts/build-xnu-4k-baseline.sh
 @@ -35,6 +35,12 @@ fi
@@ -15,6 +15,15 @@ index 5815dd9..2d810e8 100755
  for LATE_PATCH in "$ROOT/patches/xnu/zzz-boot-progress.patch" "$ROOT/patches/xnu/zzy-staged-system-apps.patch" \
      "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch"; do
    if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then
+@@ -168,7 +174,7 @@ else
+   PERSONALITY_CFLAGS=
+ fi
+ if [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" = 1 ]; then
+-  if [ "${XNU_NATIVE_AES:-0}" != 1 ]; then
++  if [ "${XNU_NATIVE_AES:-0}" != 1 ] && [ "${XNU_BRINGUP_OWNER_CACHE:-0}" != 1 ]; then
+     echo 'NativeVirtioBlock currently requires the qualified NativeAES/original-storage prelink baseline' >&2
+     exit 1
+   fi
 @@ -180,7 +186,7 @@ if [ "$NATIVE_RAM_BLOCK" != 0 ] && [ "$NATIVE_RAM_BLOCK" != 1 ]; then
    exit 1
  fi
@@ -28,10 +37,10 @@ index 5815dd9..2d810e8 100755
    rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o"
    printf '%s\n' "$OWNER_ROOT_PROBE:$OWNER_ROOT_AUDIT:$OWNER_ROOT_TRUST:$ADRENO_FIRMWARE_PROBE:$ADRENO_PM4_PROBE:$SMMU4K_PROBE:$CONSTANT_UPLOADS_PROBE:$NATIVE_LEGACY_DISPLAY:$NATIVE_OFFLINE_GPU" > "$OWNER_ROOT_STAMP"
  fi
-+# Bring-up switch: allow the SystemOS cache mount and the ram-block Data transport without the
-+# verified-root policy and the NativeAES closure. Both gates are unsatisfiable here -- the policy is
-+# Apple-signed, and the AES bindings assembly does not compile -- while the code they guard does not
-+# need them at runtime. uke carries the same switch for the cache mount.
++# Bring-up switch. The owner-root stack and the ram-block Data transport both sit behind build
++# gates this board cannot satisfy: the NativeAES bindings assembly does not compile here, and the
++# verified-root archive has to be produced before it can be linked. The code behind those gates does
++# not need them at runtime. uke carries the same switch for the cache mount.
 +BRINGUP_OWNER_CACHE=${XNU_BRINGUP_OWNER_CACHE:-0}
 +if [ "$BRINGUP_OWNER_CACHE" != 0 ] && [ "$BRINGUP_OWNER_CACHE" != 1 ]; then
 +  echo 'XNU_BRINGUP_OWNER_CACHE must be 0 or 1' >&2
