@@ -1,0 +1,27 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 8bba078..1a58296 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5126,6 +5126,22 @@ execve(proc_t p, struct execve_args *uap, int32_t *retval)
+ 
+ 	memoryshot(VM_EXECVE, DBG_FUNC_NONE);
+ 
++	/*
++	 * Bring-up: mount-phase-1 exits 66 and the kernel only reports the process name, not what it ran.
++	 * Log the first execs so the next failure is readable instead of inferred.
++	 */
++	{
++		static int picasso_exec_logged;
++		if (picasso_exec_logged < 24) {
++			char picasso_path[128];
++			size_t picasso_actual = 0;
++			if (copyinstr(uap->fname, picasso_path, sizeof(picasso_path), &picasso_actual) == 0) {
++				printf("PICASSO EXEC[%d]: %s\n", picasso_exec_logged, picasso_path);
++			}
++			picasso_exec_logged++;
++		}
++	}
++
+ 	muap.fname = uap->fname;
+ 	muap.argp = uap->argp;
+ 	muap.envp = uap->envp;

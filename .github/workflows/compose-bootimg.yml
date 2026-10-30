@@ -193,7 +193,8 @@ jobs:
           if [ ! -f "$DMG_DIR/044-76040-038.dmg" ]; then
             unzip -o -q "$UNIXNU_IPSW" 044-76040-038.dmg -d "$DMG_DIR"
           fi
-          sh ./scripts/picasso-owner-root.sh "$TREE" "$DMG_DIR/044-76040-038.dmg"
+          # Parked: the probe needs .o.json records this build does not emit.
+          # sh ./scripts/picasso-owner-root.sh "$TREE" "$DMG_DIR/044-76040-038.dmg"
           python3 ./unixnu build kernel payload -j 3 --trust-cache "$TRUST" --data-ramdisk "$DATA" 2>&1 | tee -a out/picasso/logs/actions-build.log
 
       - name: Report kernel/payload sizes
