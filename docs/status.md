@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-30 21:10（commit `b6b7584`，Data 卷已识别、APFS 开始挂载，卡在 ram block I/O）
+最后更新：2026-10-30 22:20（commit `9faba75`，**launchd 已运行并执行启动任务**）
 
 ## 一句话
 
@@ -303,6 +303,46 @@ disk5: device is not ready.
 说明 `registerService` 跑过了，问题在**读路径的取页**。
 
 下一步查 `isBig` / `sparse.pages` 的初始化——我们的 seed 是 3 GB packed，应该走 `isBig` 分支。
+
+### 里程碑：launchd 运行起来了
+
+Data 卷挂载成功后，launchd 第一次真正跑起来并输出日志：
+
+```
+apfs_log_op_with_proc: disk5s1 mounting volume Data, requested by: init (pid 1)
+handle_mount:817: disk5s1 vol-uuid: AE98A1AA-... (unencrypted; features: 1.0.2)
+mount-complete volume Data
+load_init_program: attempting to load /sbin/launchd
+com.apple.xpc.launchd| <Notice>: boot-mode set by sysctl: main
+com.apple.xpc.launchd| <Notice>: hello, launchd UUID: 4B525992-...
+com.apple.xpc.launchd| <Notice>: Darwin Bootstrapper Version 7.0.0
+com.apple.xpc.launchd| (system) <Notice>: entering ondemand mode
+com.apple.xpc.launchd| (exclaves-boot) <Notice>: Doing boot task
+com.apple.xpc.launchd| (fsck) <Notice>: Doing boot task
+com.apple.xpc.launchd| (mount-phase-1) <Notice>: Doing boot task
+```
+
+**`Doing boot task` 就是 guide.md 里阶段 1 的验收标准，已达成。**
+
+关键修复（`9faba75`）：`NativeRamBlock::selectVolumeSeed` 只查一次 IOMedia 就放弃，
+而 Data 卷的媒体是异步出现的（屏幕上 `disk5s2` 在失败之后才出现）。
+改成 100 × 100 ms 的等待循环——和 uke 的 `native_verified_block_volume_device` 同样的做法。
+
+### 当前卡点：mount-phase-1 退出 66
+
+```
+pid 3 exited -- no exit reason available -- (signal 0, exit 66)
+coredump (mount, pid 3): failed to open core dump file /private/var/cores/mount.core: error 2
+```
+
+`mount`（pid 3）是 launchd 的 mount-phase-1 任务。退出码 66 且 `/private/var` 仍不存在。
+
+另外 `disk5: device is not ready` 仍在反复出现——ram block 的部分读仍然失败
+（可能是 seed 里没有的非零页，读路径返回 not ready 而不是补零）。
+
+下一步：
+1. 让 ram block 对缺失页返回零而不是 not ready
+2. 查 `/private/var` 的 graft 是否发生（`native_owner_data_prepare` 挂载后应该 graft 到 /private/var）
 
 ### 剩下的路：ios-sweet 的 HFS+ 方案
 
