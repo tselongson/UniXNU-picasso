@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-30 08:20（v96，commit `1c0481c`）
+最后更新：2026-10-30 16:10（commit `4342fbd`，构建可用，启动停在 ignition）
 
 ## 一句话
 
@@ -216,6 +216,40 @@ Darwin Ignition Sequence ... ignition level: 0x5
 正是它用那套方案解决掉的问题。
 
 **继续调参数收益很低，需要决定是否转向它的方案。**
+
+### sheng 的路线：试过了，是关闭的
+
+sheng 能跑是因为它启用了整个 owner-root 栈。逐项试下来的结论：
+
+| 障碍 | 结果 |
+|---|---|
+| `XNU_OWNER_ROOT_TRUST` 要求 `XNU_NATIVE_VIRTIO_BLOCK` | **可解**。那是构建期配置检查，不是硬件要求。sheng 也是开 virtio 满足它、实际从 UFS 启动。已给 `build-arm-driver.py` 加上 `NativeVirtioBlock` 组件，归档能编出来 |
+| `XNU_VERIFIED_ROOT_ARCHIVE`（`libVerifiedRootProbe.a`） | **关闭**。`scripts/build-verified-root-probe.py` 直接拒绝：`The two-volume bundle requires the positive original OS policy` |
+
+那份 policy 是**苹果签发、绑定具体设备和系统的材料**——和根哈希同一类输入，小米设备永远拿不到。
+
+**所以 sheng 的 `OWNER_UNION_SYSTEMOS`（把 cryptex 联合挂载到根上、提供 dyld 共享缓存）
+这条路走不通，不是因为构建细节，是因为路线本身关闭。**
+
+### 剩下的路：ios-sweet 的 HFS+ 方案
+
+它的做法是**根本不碰 APFS 和 cryptex**：
+
+- 自建日志式 HFS+ 根镜像（`mkiosroot.sh`），从 IPSW 的 dmg 里取文件
+- 在 `/System/Library/Caches/com.apple.dyld/` 下给 44 个缓存文件建硬链接
+- 根可写（`rd=ufsroot0 ufsrw=1 rootrw=1`），`/private/var` 直接在根上，不需要 Data 卷
+- 内核打 69 组补丁（最小 AMFI、宽松沙盒、AppleKeyStore 桩、bindfs 等）
+
+**没有 cryptex、没有封印、没有 policy。** 我们昨晚和今天在 APFS 上打的所有仗，它全部绕开。
+
+### 下一步计划（不需要设备）
+
+1. 用 `extract-target-volume.py` 从 IPSW 取出 OS 卷的 dmg
+2. 在 CI 里用 `hdiutil` 挂载、建 HFS+ 卷、拷入文件、做 dyld 缓存硬链接（对应 `mkiosroot.sh`）
+3. 把根改成 HFS+ 卷，去掉 APFS/root-matching/cryptex 相关配置
+4. 补上 `bindfs`、`IOWatchdog` 等内核侧缺口
+
+第 1–2 步可以完全在 CI 里验证，**不需要真机**。
 
 ### 另一条可借鉴的参数
 
