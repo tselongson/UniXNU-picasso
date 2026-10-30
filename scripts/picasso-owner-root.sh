@@ -47,8 +47,12 @@ if [ "$ACTUAL" != "$EXPECTED" ]; then
 fi
 
 # The policy step inspects hdiutil's attachment list, so the image has to be attached read-only first.
-hdiutil attach "$IMAGE" -readonly -nobrowse -noautoopen >/dev/null
-trap 'hdiutil detach "$IMAGE" -force >/dev/null 2>&1 || true' EXIT INT TERM
+# The policy step reads the volume through this exact mount point, so attach there rather than
+# letting hdiutil choose one under /Volumes.
+MOUNT="$VOLUMES/os-mount"
+rmdir "$MOUNT" 2>/dev/null || true
+hdiutil attach "$IMAGE" -readonly -nobrowse -noautoopen -mountpoint "$MOUNT" >/dev/null
+trap 'hdiutil detach "$MOUNT" -force >/dev/null 2>&1 || true' EXIT INT TERM
 python3 "$TREE/scripts/build-owner-os-policy.py"
 
 # 4. The archive the kernel link wants. --component os is the single-volume form; the two-volume form
