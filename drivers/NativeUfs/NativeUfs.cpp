@@ -7,6 +7,9 @@
 #include <libkern/crypto/sha2.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
+// Declared in osfmk/arm/machine_routines.h for 32-bit ARM and in the i386 header, but not in an
+// arm64 header this translation unit can include, so declare it here.
+extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 #include <sys/param.h>
 #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
 #include "verified_root.h"
@@ -27,7 +30,6 @@ extern const uint8_t verified_root_key[];
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSString.h>
 #include <libkern/libkern.h>
-#include <pexpert/pexpert.h>
 #include <kern/debug.h>
 #include "GccUfs.h"
 #include "RootDiagnostics.h"
@@ -2323,6 +2325,25 @@ bool NativeUfs::start (IOService *provider)
   unsigned probe = 0, rootMode = 0;
   PE_parse_boot_argn ("native-ufs-probe", &probe, sizeof (probe));
   PE_parse_boot_argn ("native-ufs-root", &rootMode, sizeof (rootMode));
+  // Qualcomm APSS watchdog, named by the board DT as qcom,wdt@17c10000 with a 20 s bark time. The
+  // boot resets at a consistent 77 s with no panic text, which is the shape of a timer rather than a
+  // fault -- but 77 s is not 20 s, so whether this block is the cause is an open question. Reading
+  // the enable register before and after switching it off answers that with evidence instead of
+  // assumption: if the reset survives with the block disabled, the watchdog is not the cause.
+  unsigned watchdogOff = 0;
+  PE_parse_boot_argn ("picasso-wdt-off", &watchdogOff, sizeof (watchdogOff));
+  if (watchdogOff) {
+    vm_offset_t wdt = ml_io_map (0x17c10000, 0x1000);
+    if (wdt) {
+      IOLog ("NativeUfs: wdt enable before=0x%08x bark=%u bite=%u\n",
+             *(volatile uint32_t *)(wdt + 0x8),
+             *(volatile uint32_t *)(wdt + 0x10), *(volatile uint32_t *)(wdt + 0x14));
+      *(volatile uint32_t *)(wdt + 0x8) = 0;
+      IOLog ("NativeUfs: wdt enable after =0x%08x\n", *(volatile uint32_t *)(wdt + 0x8));
+    } else {
+      IOLog ("NativeUfs: wdt map failed\n");
+    }
+  }
   // Consumed by the owner SystemOS mount through the two helpers above.
   unsigned allowUnverified = 0;
   PE_parse_boot_argn ("native-ufs-allow-unverified", &allowUnverified, sizeof (allowUnverified));

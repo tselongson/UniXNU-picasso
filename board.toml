@@ -206,6 +206,9 @@ kernel_args = [
   # hardware watchdog looks like, and reading a 1.5 GB cache over UFS takes long enough to trip one.
   # sheng disables it the same way.
   "wdt=-1",
+  # wdt=-1 is parsed only by osfmk/arm/arm_init.c and zalloc.c, so on arm64 it does nothing. This
+  # switch reaches the APSS watchdog block itself and logs its enable/bark/bite registers first.
+  "picasso-wdt-off=1",
   "io=0x232",
   # smmu=6 programs the SMMU route itself and logs the plan; reset=pshold returns to fastboot after
   # a panic.
