@@ -51,8 +51,7 @@ CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
 # this board has neither a ram block nor a virtio device at runtime -- uke enables NATIVE_RAM_BLOCK
 # for the same reason.
 CONFIG_XNU_NATIVE_RAM_BLOCK=y
-CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
-CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/native-virtio-block/libNativeVirtioBlock.a"
+# CONFIG_XNU_NATIVE_VIRTIO_BLOCK is not set
 # CONFIG_XNU_BOOT_PROGRESS is not set
 
 CONFIG_XNU_OWNER_DATA_VOLUME_UUID="00000000-0000-0000-0000-000000000000"
