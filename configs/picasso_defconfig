@@ -20,7 +20,7 @@ CONFIG_XNU_EXTRA_LD_ARCHIVES=""
 # CONFIG_XNU_SOURCE_PTHREAD is not set
 # CONFIG_XNU_SOURCE_MOCKFS is not set
 CONFIG_XNU_NATIVE_UFS=y
-# CONFIG_XNU_NATIVE_AES is not set
+CONFIG_XNU_NATIVE_AES=y
 # CONFIG_XNU_NATIVE_VIRTIO_CONSOLE is not set
 # CONFIG_XNU_NATIVE_MOBILE_DISPLAY is not set
 # CONFIG_XNU_NATIVE_LEGACY_DISPLAY is not set
@@ -44,17 +44,13 @@ CONFIG_XNU_NATIVE_UFS=y
 CONFIG_XNU_BRINGUP_OWNER_CACHE=y
 CONFIG_XNU_OWNER_CACHE_MOUNT=y
 CONFIG_XNU_OWNER_CACHE_STARTUP=y
-# Disabled: with XNU_NATIVE_RAM_BLOCK off, native_owner_data_prepare takes the #else branch, which
-# asks mdevlookup(0) for the md0 memory disk. This payload delivers Data as a PackedRAMDisk range in
-# the ADT, not as an md device, so the lookup returns NODEV and the mount panics with EINVAL. The
-# SystemOS union mount runs before it and did not fail, so this is isolated to the Data path.
-# CONFIG_XNU_OWNER_DATA_MOUNT is not set
+CONFIG_XNU_OWNER_DATA_MOUNT=y
+CONFIG_XNU_NATIVE_RAM_BLOCK=y
 CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
 # No ram block and no virtio device on this board. NativeUfs answers the owner-cache calls itself:
 # the two native_verified_block_* lookups come from the driver, and native_ram_block_gpu_addon is a
 # stub there because the payload carries no GPU addon. Linking NativeRamBlock instead would drag in
 # the NativeAES prelink closure this board does not have.
-# CONFIG_XNU_NATIVE_RAM_BLOCK is not set
 # CONFIG_XNU_NATIVE_VIRTIO_BLOCK is not set
 # CONFIG_XNU_BOOT_PROGRESS is not set
 
