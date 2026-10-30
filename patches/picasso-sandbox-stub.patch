@@ -1,0 +1,23 @@
+diff --git a/security/mac_base.c b/security/mac_base.c
+index 9f90247..272d1ca 100644
+--- a/security/mac_base.c
++++ b/security/mac_base.c
+@@ -1583,6 +1583,18 @@ __mac_syscall(proc_t p, struct __mac_syscall_args *uap, int *retv __unused)
+ 
+ 	error = ENOPOLICY;
+ 
++	/*
++	 * Bring-up: the Sandbox policy ships in com.apple.security.sandbox, which is not in this
++	 * prelink. Without it launchd's _container_init gets ENOPOLICY from its own
++	 * sandbox_get_container_expected request and exits as pid 1. Answer the Sandbox request with
++	 * success so the original library code continues; every other policy still reports
++	 * ENOPOLICY. This is a stub, not an implementation: it grants what the real policy would
++	 * have judged.
++	 */
++	if (strcmp(target, "Sandbox") == 0) {
++		return 0;
++	}
++
+ 	for (i = 0; i < mac_policy_list.staticmax; i++) {
+ 		mpc = mac_policy_list.entries[i].mpc;
+ 		if (mpc == NULL) {
