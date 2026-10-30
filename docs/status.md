@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-30 18:35（commit `0524a2e`，cryptex 已联合挂载，卡在读共享缓存后复位）
+最后更新：2026-10-30 21:10（commit `b6b7584`，Data 卷已识别、APFS 开始挂载，卡在 ram block I/O）
 
 ## 一句话
 
@@ -269,6 +269,40 @@ NativeUfs blk[SystemOS]: #2560 block=6238200 count=8
 2. **硬件看门狗** —— 读 2.5 GB 缓存耗时够长，而内核无法关它
 
 下一步优先验证方向 1：让 panic 路径强制冲刷 USB 控制台，否则后面每次复位都是瞎的。
+
+### Data 卷：UUID 打通，APFS 开始挂载
+
+上一版的失败是 `offline scratch Data mount failed: 2`（ENOENT）。原因很具体：
+
+- `NativeRamBlock` 的 `selectVolumeSeed` 按 **APFS 卷 UUID** 匹配 IOMedia
+- 配置里是 `CONFIG_XNU_OWNER_DATA_VOLUME_UUID="00000000-..."`（全零占位符）
+- 而 seed 由 `hdiutil` 生成，**UUID 每次随机**
+
+修复链：
+1. `make-data-seed.py` 从 `diskutil` 读出卷 UUID，写进 `configs/picasso_defconfig`
+2. **`unixnu defconfig` 会把 defconfig 复制成工作副本，而副本在 seed 生成之前就做了** —— 所以 seed 之后要重新执行一次 `unixnu defconfig`
+3. 验证方式：直接在 `kernel.macho` 里搜生成的 UUID（v118 出现 1 次，全零占位符消失）
+
+**结果：Data 卷被识别了。**
+
+```
+dev_init:306: disk5 device_handle block size 4096 block count 735222   ← 3.01 GB，正是 seed
+nx_mount:1275: disk5 initializing cache w/hash_size 1024
+nx_mount:1617: disk5 checkpoint search: largest xid 2
+```
+
+### 当前卡点：ram block I/O 返回 not ready
+
+```
+IOBlockStorageDriver; executeRequest: request failed to start!
+disk5: device is not ready.
+```
+
+`NativeRamBlock::doAsyncReadWrite` 在 `online` 为 false 或 `big`/`sparse` 取页失败时返回
+`kIOReturnNotReady`。媒体已经发布（尺寸正确、APFS 读到了 superblock 和 checkpoint），
+说明 `registerService` 跑过了，问题在**读路径的取页**。
+
+下一步查 `isBig` / `sparse.pages` 的初始化——我们的 seed 是 3 GB packed，应该走 `isBig` 分支。
 
 ### 剩下的路：ios-sweet 的 HFS+ 方案
 
