@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-31 00:35（launchd 已运行；owner-root 归档链路已定位，构建集成待完成）
+最后更新：2026-10-31 02:35（launchd 运行；`mount-phase-1` 根因已定位并修复，待验证）
 
 ## 一句话
 
@@ -380,6 +380,38 @@ record = manifest.make(stream, info['TotalSize'],
    而第一遍在归档检查处就中止，从没编译过
 
 第 2 条的解法：让第一遍先编一遍（占位归档 + 允许链接失败），产生记录后再建真归档，第二遍链接。
+
+### `mount-phase-1` 的根因：boot manifest hash 缺失
+
+**日志第一次直接写出了答案**，不需要推断：
+
+```
+DT_get_fstab_entries:12205: failed to get filesystem entry at: /filesystems/fstab
+failed to get boot-manifest-hash
+mount: failed to get boot manifest hash - No such file or directory
+com.apple.xpc.launchd| <Emergency>: Boot task failed: mount-phase-1 - exited due to exit(66)
+com.apple.xpc.launchd| <Emergency>: Panicking in 3 seconds.
+```
+
+`mount` 在做任何事之前先读 `/chosen/boot-manifest-hash`，没有就退出 66。
+
+**修复**：`scripts/make-picasso-adt.py` 里加 `('boot-manifest-hash', bytes(48))`。
+根没有封印，所以值是 sha2-384 长度的零；关键是这个属性存在。
+
+### 间歇性挂住：IOSleep 在 bsd_init 里不可靠
+
+约一半的启动停在 cryptex 挂载之后、Data 挂载之前，日志里连 `disk5` 都没有——
+说明卡在 `selectVolumeSeed` 的等待循环里。
+
+原因：`IOSleep` 依赖 IOKit 工作循环，而这段代码从 `bsd_init` 运行，此时循环还没开始服务定时器。
+
+**修复**：改成有界忙等（100 × 100 ms）。代价是最坏 10 秒 CPU，换来确定性。
+
+### 当前状态
+
+- `boot-manifest-hash` 已加入 ADT（v123）
+- 忙等已改（v124，构建中）
+- **待验证**：`mount-phase-1` 是否能通过
 
 ### 剩下的路：ios-sweet 的 HFS+ 方案
 
