@@ -37,12 +37,12 @@ CONFIG_XNU_NATIVE_UFS=y
 # Apple-signed material bound to a real device, which this board cannot have.
 #
 # uke carries XNU_BRINGUP_OWNER_CACHE for exactly this: the cache mount, the dyld startup selection,
-# the scratch Data mount and the union mount, without OWNER_ROOT_TRUST or VERIFIED_ROOT_PROBE. Two
-# patches make that possible here -- one adds the switch to build-xnu-4k-baseline.sh, the other
-# relaxes the #error in kern_exec.c that guards DATA_MOUNT without BOOT_MANIFEST.
+# the scratch Data mount and the union mount. Two patches make that possible here -- one adds the
+# switch to build-xnu-4k-baseline.sh, the other relaxes the #error in kern_exec.c that guards
+# DATA_MOUNT without BOOT_MANIFEST.
 #
-# Note what is deliberately absent: no VERIFIED_ROOT_PROBE, no OWNER_ROOT_AUDIT, no OWNER_ROOT_TRUST,
-# no OWNER_BOOT_MANIFEST, and no virtio block. uke's configuration has none of them either.
+# Still absent: OWNER_ROOT_TRUST, which additionally demands the virtio block driver, and
+# OWNER_BOOT_MANIFEST. The verified root below is the real thing, not the bring-up switch.
 # The verified root, now that the archive can be produced: build-owner-os-policy.py signs a manifest
 # of the original OS image with a key this project generates, and build-verified-root-probe.py turns
 # it into libVerifiedRootProbe.a between the two kernel passes. The audit mode is what records the
