@@ -1,28 +1,24 @@
 diff --git a/scripts/build-xnu-4k-baseline.sh b/scripts/build-xnu-4k-baseline.sh
-index 5815dd9..32d322e 100755
+index 5815dd9..25a1ff7 100755
 --- a/scripts/build-xnu-4k-baseline.sh
 +++ b/scripts/build-xnu-4k-baseline.sh
-@@ -34,9 +34,10 @@ fi
- # The optional observation hooks overlap existing root/exec patch context.
- # Remove them first so earlier independent patches retain their idempotent checks.
- # The same holds for the boot-time GPU addon mount and the staged system apps copy (zzy), which edit the owner Data mount function
--# inside the systemos patch. Reverse newest first; the loop below re-applies them in name order.
--for LATE_PATCH in "$ROOT/patches/xnu/zzz-boot-progress.patch" "$ROOT/patches/xnu/zzy-staged-system-apps.patch" \
--    "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch"; do
-+# inside the systemos patch, and for the bring-up kern-exec relaxation (zzzz), which edits a line the systemos patch adds.
-+# Reverse newest first; the loop below re-applies them in name order.
-+for LATE_PATCH in "$ROOT/patches/xnu/zzzz-picasso-bringup-kern-exec.patch" "$ROOT/patches/xnu/zzz-boot-progress.patch" \
-+    "$ROOT/patches/xnu/zzy-staged-system-apps.patch" "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch"; do
-   if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then
-     git -C .cache/xnu-work apply --reverse "$LATE_PATCH"
+@@ -180,7 +180,7 @@ if [ "$NATIVE_RAM_BLOCK" != 0 ] && [ "$NATIVE_RAM_BLOCK" != 1 ]; then
+   exit 1
+ fi
+ if [ "$NATIVE_RAM_BLOCK" = 1 ]; then
+-  if [ "${XNU_NATIVE_AES:-0}" != 1 ]; then
++  if [ "${XNU_NATIVE_AES:-0}" != 1 ] && [ "${XNU_BRINGUP_OWNER_CACHE:-0}" != 1 ]; then
+     echo 'NativeRamBlock requires the qualified original storage/AES prelink closure' >&2
+     exit 1
    fi
-@@ -348,12 +349,20 @@ if [ "$(cat "$OWNER_ROOT_STAMP" 2>/dev/null || echo 0:0:0:0:0:0)" != "$OWNER_ROO
+@@ -348,12 +348,21 @@ if [ "$(cat "$OWNER_ROOT_STAMP" 2>/dev/null || echo 0:0:0:0:0:0)" != "$OWNER_ROO
    rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/bsd_init.o"
    printf '%s\n' "$OWNER_ROOT_PROBE:$OWNER_ROOT_AUDIT:$OWNER_ROOT_TRUST:$ADRENO_FIRMWARE_PROBE:$ADRENO_PM4_PROBE:$SMMU4K_PROBE:$CONSTANT_UPLOADS_PROBE:$NATIVE_LEGACY_DISPLAY:$NATIVE_OFFLINE_GPU" > "$OWNER_ROOT_STAMP"
  fi
-+# Bring-up switch: allow the SystemOS cache mount without the verified-root policy. That policy is
-+# Apple-signed material bound to a real device, which this board cannot produce, so the mount would
-+# otherwise be unreachable. uke carries the same switch for the same reason.
++# Bring-up switch: allow the SystemOS cache mount and the ram-block Data transport without the
++# verified-root policy and the NativeAES closure. Both are gates this board cannot satisfy -- the
++# policy is Apple-signed, and the AES bindings assembly does not compile here -- while the code they
++# guard does not need them at runtime. uke carries the same switch for the cache mount.
 +BRINGUP_OWNER_CACHE=${XNU_BRINGUP_OWNER_CACHE:-0}
 +if [ "$BRINGUP_OWNER_CACHE" != 0 ] && [ "$BRINGUP_OWNER_CACHE" != 1 ]; then
 +  echo 'XNU_BRINGUP_OWNER_CACHE must be 0 or 1' >&2

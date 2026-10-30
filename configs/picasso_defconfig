@@ -20,7 +20,9 @@ CONFIG_XNU_EXTRA_LD_ARCHIVES=""
 # CONFIG_XNU_SOURCE_PTHREAD is not set
 # CONFIG_XNU_SOURCE_MOCKFS is not set
 CONFIG_XNU_NATIVE_UFS=y
-CONFIG_XNU_NATIVE_AES=y
+# NativeAES is off: its bindings assembly does not compile in this tree, and the gate that
+# wanted it for NativeRamBlock is relaxed by the bring-up switch. If RamBlock actually calls
+# AES symbols the link will say so, which is the honest way to find out.
 # CONFIG_XNU_NATIVE_VIRTIO_CONSOLE is not set
 # CONFIG_XNU_NATIVE_MOBILE_DISPLAY is not set
 # CONFIG_XNU_NATIVE_LEGACY_DISPLAY is not set
