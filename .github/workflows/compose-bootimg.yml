@@ -158,6 +158,11 @@ jobs:
           python3 ./scripts/make-data-seed.py --tree "$TREE" --gib 3 --output "$DATA" --defconfig configs/picasso_defconfig
           test -s "$DATA" || { echo "Data seed was not produced"; exit 1; }
           ls -l "$DATA"
+          # The seed step wrote the volume UUID into configs/picasso_defconfig, but "unixnu defconfig"
+          # copied that file to the build's working config before the seed existed, and the build
+          # reads the copy. Re-selecting picks up the UUID; without this the kernel kept the
+          # all-zero placeholder and the Data mount failed with ENOENT.
+          python3 ./unixnu defconfig picasso_defconfig
 
           # Two passes. The first links and prelinks the kernel, which is what produces
           # out/picasso/kernel/kernel.macho. The IOStorageFamily bindings archive is built during
