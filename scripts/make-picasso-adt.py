@@ -196,7 +196,21 @@ def main():
                                  ([('TrustCache', bytes(16))] if args.trust_cache else []) +
                                  ([('GpuAddon', bytes(16))] if args.gpu_addon else [])),
               # Read by the original AppleImage4 at start-up; present and empty here.
-              node('manifest-properties')]),
+              node('manifest-properties'),
+              # System Integrity Protection. kern_csr.c reads /chosen/asmb for the CSR config:
+              #   lp-sip0 is a uint64 whose low 32 bits become csr_config
+              #   lp-sip1 is a uint32 that synthesizes CSR_ALLOW_UNAUTHENTICATED_ROOT
+              # Note the size: _csr_get_dt_bool panics unless the property is exactly 4 bytes.
+              #
+              # Without this, dyld cannot map the shared cache into the shared region -- the kernel
+              # refuses it as not SIP-protected -- and launchd stops right after its ignition
+              # argument dump with no further block I/O at all. ios-sweet, which boots iOS userland
+              # to SpringBoard on a Redmi Note 10 Pro, hit the same wall and fixed it exactly here.
+              #
+              # 0x6f allows untrusted kexts, unrestricted filesystem, task_for_pid, kernel debugger,
+              # unrestricted dtrace and unrestricted nvram. lp-sip1 adds unauthenticated root.
+              node('asmb', [('lp-sip0', struct.pack('<Q', 0x6f)),
+                            ('lp-sip1', struct.pack('<I', 1))])]),
         # The device DT declares /cpus #address-cells = 2, #size-cells = 0, so each
         # cpuN reg is a 64-bit cell. IODTPlatformExpert reads reg with those cells;
         # without them it falls back to the root node's cells and misreads the MPIDR.
