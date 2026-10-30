@@ -88,7 +88,15 @@ def main():
             run('sudo', 'dd', f'if={raw_device}', f'of={raw}', 'bs=4096',
                 f'count={size // 4096}')
         finally:
-            run('hdiutil', 'detach', device, '-force')
+            # The image has already been read by this point, so a busy detach is not a reason to fail
+            # the build -- the runner is ephemeral. Retry once, then warn.
+            for attempt in range(2):
+                try:
+                    run('hdiutil', 'detach', device, '-force')
+                    break
+                except subprocess.CalledProcessError:
+                    if attempt:
+                        print(f'warning: could not detach {device}; continuing', file=sys.stderr)
 
         if args.defconfig:
             config = Path(args.defconfig)
