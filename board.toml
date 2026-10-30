@@ -201,6 +201,11 @@ kernel_args = [
   # Read by the UFS driver to authorize the root and to resolve the SystemOS volume by APFS UUID,
   # which is what the owner cache mount calls before it can union the cryptex onto the root.
   "native-ufs-allow-unverified=1",
+  # The boot now reads through the SystemOS cryptex for the dyld shared cache -- thousands of block
+  # requests -- and then resets with no panic text on the console. A reset without a panic is what a
+  # hardware watchdog looks like, and reading a 1.5 GB cache over UFS takes long enough to trip one.
+  # sheng disables it the same way.
+  "wdt=-1",
   "io=0x232",
   # smmu=6 programs the SMMU route itself and logs the plan; reset=pshold returns to fastboot after
   # a panic.
