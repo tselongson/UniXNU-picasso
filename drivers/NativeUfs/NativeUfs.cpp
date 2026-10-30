@@ -1768,9 +1768,13 @@ IOReturn NativeUfsBlock::doAsyncReadWrite (IOMemoryDescriptor *buffer, UInt64 bl
   // The whole boot issues about 256 requests and none at all after launchd starts, so logging each
   // one past the probe costs a couple of hundred lines and shows exactly which read was last before
   // the stall -- which is the difference between knowing where it stopped and guessing again.
+  // Per-request logging served its purpose: it showed the boot stalling at 264 requests with no I/O
+  // after launchd. Now that the cryptex union mount works the boot issues thousands, and one console
+  // line each saturates 115200 baud -- roughly 90 KB of text for 1800 requests -- which delays the
+  // boot and buries any panic that follows. One line per 256 keeps the signal without the flood.
   static uint64_t requestCount = 0;
   ++requestCount;
-  if (requestCount > 12) {
+  if (requestCount > 12 && requestCount % 256 == 0) {
     IOLog ("NativeUfs blk[%s]: #%llu block=%llu count=%llu\n",
            label, requestCount, block, count);
   }
