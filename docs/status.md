@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-30 01:45（v92，commit `2c66b08`）
+最后更新：2026-10-30 08:20（v96，commit `1c0481c`）
 
 ## 一句话
 
@@ -169,8 +169,53 @@ data.dbr: 110704 bytes packed from 3 GiB
 payload 里确实有了（`payload.json` 的 `data_ramdisk_sha256` 非空，payload.img 里能搜到
 `PackedRAMDisk` 占位符）。**但 ignition 依然停在 `ignition level: 0x5` 之后，输出与 v89 完全相同。**
 
-所以"缺 Data 卷"这个假设**已被证伪**，或者至少不是唯一原因。下一步要查 ignition 在 level 5
-到底等什么，而不是继续猜。
+所以"缺 Data 卷"这个假设**已被证伪**，或者至少不是唯一原因。
+
+### 用块计数器测出的确定事实（v93/v94）
+
+给驱动加了 I/O 计数器之后，答案很干脆：
+
+```
+NativeUfs blk[OS]: #263 block=10711530 count=72
+shared_region: [1(launchd)] vm_shared_region_start_address() failed
+NativeUfs blk[OS]: #264 block=10711314 count=40      ← 最后一次 I/O
+Darwin Ignition Sequence ... ignition level: 0x5
+（之后零 I/O）
+```
+
+**整个启动只有 252~264 次块请求，ignition 开始后一次都没有。**
+所以 launchd 不是"安静地工作"，是**阻塞**，而且阻塞在不再触碰磁盘之后。
+
+读的模式也记下来了：全部集中在 `10710970`–`10711602` 这个约 630 块的窄区间，长度杂乱
+（32/40/56/64/72/80），是**随机访问元数据**，不是顺序读大文件。
+
+### 试过无效的（都来自能启动的参考项目）
+
+| 尝试 | 来源 | 结果 |
+|---|---|---|
+| `-apfs_shared_datavolume` | sheng | 输出不变 |
+| `launchd_unsecure_cache=1` | ios-sweet / qemu-t8030 | 输出不变 |
+| ADT `/chosen/asmb`（`lp-sip0`=0x6f，`lp-sip1`=1） | ios-sweet | **输出不变，252 次 I/O 一字不差** |
+
+`asmb` 节点已确认写进了 ADT（`lp-sip0` 8 字节值 0x6f、`lp-sip1` 4 字节值 1），
+但启动路径毫无变化——**SIP 不是这个内核在这个位置的阻塞点**。
+
+### 与 ios-sweet 的结构性差异
+
+`dipa-studio/ios-sweet` 在 Redmi Note 10 Pro 上跑到 SpringBoard，但它和我们有本质区别：
+
+| 维度 | ios-sweet | 本移植 |
+|---|---|---|
+| 根文件系统 | **日志式 HFS+ 卷**（自建镜像，`mkiosroot.sh`） | APFS 原始 OS dmg |
+| dyld 共享缓存 | 镜像里做了 **44 个 cryptex 缓存文件的硬链接** | 未处理 |
+| 内核补丁 | **69 组**（含最小 AMFI、宽松沙盒、AppleKeyStore 桩） | 少量 |
+| 启动参数 | `ignition_level=1`、`wdt=-1`、`-noprogress` | 无 |
+
+**它绕开了整个 APFS 封印/根哈希/cryptex 问题，代价是自建根镜像和大量内核补丁。**
+本移植走的是相反的路线，而现在的卡点（launchd 启动后阻塞、dyld 共享缓存不可用）
+正是它用那套方案解决掉的问题。
+
+**继续调参数收益很低，需要决定是否转向它的方案。**
 
 ### 另一条可借鉴的参数
 
