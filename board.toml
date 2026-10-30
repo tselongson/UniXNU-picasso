@@ -62,6 +62,11 @@ archives = [
   # Same remedy as udon: extract the original dispatch from the kernel image and bind
   # its addresses as absolute symbols.
   "build-picasso-ufs-bindings.py",
+  # The owner-root stack needs a verified block transport, and the build gate that guards it wants
+  # XNU_NATIVE_VIRTIO_BLOCK even on a board with no virtio. sheng satisfies it exactly this way: the
+  # component is built and linked, and never matches because no virtio device exists. Without this
+  # entry the build stops with "libVirtioMmioBlock.a not found; no builder makes it".
+  "component:VirtioMmioBlock",
 ]
 
 [kernel.prelink]
