@@ -49,7 +49,7 @@ CONFIG_XNU_OWNER_BOOT_MANIFEST=y
 CONFIG_XNU_OWNER_CACHE_MOUNT=y
 CONFIG_XNU_OWNER_CACHE_STARTUP=y
 CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
-CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/virtio-mmio-block-verified-bundle/libVirtioMmioBlock.a"
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/native-virtio-block/libNativeVirtioBlock.a"
 CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
 # CONFIG_XNU_OWNER_CACHE_MOUNT is not set
 # CONFIG_XNU_OWNER_CACHE_STARTUP is not set
