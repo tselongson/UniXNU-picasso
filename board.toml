@@ -66,6 +66,7 @@ archives = [
   # XNU_NATIVE_VIRTIO_BLOCK even on a board with no virtio. sheng satisfies it exactly this way: the
   # component is built and linked, and never matches because no virtio device exists. Without this
   # entry the build stops with "libVirtioMmioBlock.a not found; no builder makes it".
+  "build-arm-driver.py NativeRamBlock",
   "build-arm-driver.py NativeVirtioBlock",
 ]
 
