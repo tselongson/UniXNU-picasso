@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-30 22:20（commit `9faba75`，**launchd 已运行并执行启动任务**）
+最后更新：2026-10-31 00:35（launchd 已运行；owner-root 归档链路已定位，构建集成待完成）
 
 ## 一句话
 
@@ -343,6 +343,43 @@ coredump (mount, pid 3): failed to open core dump file /private/var/cores/mount.
 下一步：
 1. 让 ram block 对缺失页返回零而不是 not ready
 2. 查 `/private/var` 的 graft 是否发生（`native_owner_data_prepare` 挂载后应该 graft 到 /private/var）
+
+### 更正：owner-root 栈不是关闭的
+
+之前判断"需要苹果签发的 policy"是**错的**。看 `build-owner-os-policy.py` 的实际行为：
+
+```python
+source = '.cache/firmware/target-volumes/044-76040-038.dmg'
+expected_uuid = '04769D26-2CA0-4825-B443-E2E5F88300F2'
+keys = ROOT / 'build/verified-root-host/keys'
+record = manifest.make(stream, info['TotalSize'],
+                       keys / 'owner.pem', keys / 'owner-public.pem', ...)
+```
+
+**"owner" 指设备所有者——我们自己。** 策略是从原始 OS 镜像推导、用我们自己的密钥签名的。
+
+而且它硬编码的两个值**正好是我们的**：
+- OS 镜像 sha256 `3f99b859...` —— 与 `out/ipsw/21H461/044-76040-038.dmg` 完全一致
+- 根卷 UUID `04769D26-...` —— 与 ADT 里的 `root-match-volume-uuid` 一致
+
+**所以这个脚本就是为这个设备写的。** 链路：
+
+| 步骤 | 工具 | 状态 |
+|---|---|---|
+| 1. owner 密钥对（RSA-3072） | `openssl genpkey` | 已实现 |
+| 2. `verified-root.dylib` | `xcrun clang -dynamiclib` | 已实现 |
+| 3. 签名 manifest | `build-owner-os-policy.py` | 已实现（挂载点已修） |
+| 4. 生成 `libVerifiedRootProbe.a` | `build-verified-root-probe.py --component os` | **待打通** |
+
+脚本在 `scripts/picasso-owner-root.sh`。
+
+### 构建集成还差两步（2026-10-31 续）
+
+1. **路径不一致**：占位归档写进了 `$TREE/build/...`，而构建读的是 `out/picasso/tree/build/...`
+2. **`bsd_init.o.json` 不存在**：`build-verified-root-probe.py` 需要每个目标文件的编译记录，
+   而第一遍在归档检查处就中止，从没编译过
+
+第 2 条的解法：让第一遍先编一遍（占位归档 + 允许链接失败），产生记录后再建真归档，第二遍链接。
 
 ### 剩下的路：ios-sweet 的 HFS+ 方案
 
