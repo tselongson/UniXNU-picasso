@@ -1,0 +1,21 @@
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+index 11a8212..f9453a6 100644
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1707,6 +1707,16 @@ proc_should_trigger_panic(proc_t p, int rv)
+ 		return false;
+ 	}
+ 
++	/*
++	 * Bring-up: launchd marks its critical boot tasks POSIX_SPAWN_PANIC_ON_EXIT, so the first one
++	 * that fails takes the kernel with it and nothing after it is ever seen. launchd itself dying
++	 * is still fatal -- that is the check above. For every other process, report the exit and let
++	 * the boot continue so the next failure is observable instead of hidden behind this one.
++	 */
++	if (1) {
++		return false;
++	}
++
+ 	if ((p->p_crash_behavior & POSIX_SPAWN_PANIC_ON_EXIT) != 0) {
+ 		return true;
+ 	}
