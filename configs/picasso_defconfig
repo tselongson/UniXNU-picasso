@@ -28,29 +28,25 @@ CONFIG_XNU_NATIVE_UFS=y
 # CONFIG_XNU_NATIVE_ADRENO is not set
 # CONFIG_XNU_ARMVIRT_PLATFORM is not set
 # CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE is not set
-# The owner-root stack is NOT usable on this board, and the reason is not the virtio gate.
+# The SystemOS cache mount, in the bring-up form uke uses.
 #
-# sheng enables VERIFIED_ROOT_PROBE, OWNER_ROOT_AUDIT, OWNER_ROOT_TRUST, OWNER_CACHE_MOUNT,
-# OWNER_CACHE_STARTUP and OWNER_UNION_SYSTEMOS. The piece that would help here is the union mount of
-# the SystemOS cryptex, which is where the dyld shared cache lives.
+# The dyld shared cache lives in the SystemOS cryptex, so the boot needs it union-mounted on the root.
+# sheng reaches it through the full owner-root stack, but that stack needs libVerifiedRootProbe.a,
+# and build-verified-root-probe.py refuses to produce it without "the positive original OS policy" --
+# Apple-signed material bound to a real device, which this board cannot have.
 #
-# Enabling it stops the build at XNU_VERIFIED_ROOT_ARCHIVE: scripts/build-verified-root-probe.py
-# refuses with "The two-volume bundle requires the positive original OS policy". That policy is
-# Apple-signed material tied to a real device and OS, the same class of input as the root hash --
-# unobtainable for a Xiaomi board. The virtio archive the gate also wants was solvable and is now
-# built by build-arm-driver.py, but it is not the obstacle.
+# uke carries XNU_BRINGUP_OWNER_CACHE for exactly this: the cache mount, the dyld startup selection,
+# the scratch Data mount and the union mount, without OWNER_ROOT_TRUST or VERIFIED_ROOT_PROBE. Two
+# patches make that possible here -- one adds the switch to build-xnu-4k-baseline.sh, the other
+# relaxes the #error in kern_exec.c that guards DATA_MOUNT without BOOT_MANIFEST.
 #
-# Reverted to the configuration that builds and boots through launchd. The remaining route is the
-# one ios-sweet took: an HFS+ root with the dyld cache linked in, which needs no cryptex and no
-# policy at all.
-# CONFIG_XNU_VERIFIED_ROOT_PROBE is not set
-# CONFIG_XNU_OWNER_ROOT_AUDIT is not set
-# CONFIG_XNU_OWNER_ROOT_TRUST is not set
-# CONFIG_XNU_OWNER_CACHE_MOUNT is not set
-# CONFIG_XNU_OWNER_CACHE_STARTUP is not set
-# CONFIG_XNU_OWNER_BOOT_MANIFEST is not set
-# CONFIG_XNU_OWNER_DATA_MOUNT is not set
-# CONFIG_XNU_OWNER_UNION_SYSTEMOS is not set
+# Note what is deliberately absent: no VERIFIED_ROOT_PROBE, no OWNER_ROOT_AUDIT, no OWNER_ROOT_TRUST,
+# no OWNER_BOOT_MANIFEST, and no virtio block. uke's configuration has none of them either.
+CONFIG_XNU_BRINGUP_OWNER_CACHE=y
+CONFIG_XNU_OWNER_CACHE_MOUNT=y
+CONFIG_XNU_OWNER_CACHE_STARTUP=y
+CONFIG_XNU_OWNER_DATA_MOUNT=y
+CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
 # CONFIG_XNU_BOOT_PROGRESS is not set
 
 CONFIG_XNU_OWNER_DATA_VOLUME_UUID="00000000-0000-0000-0000-000000000000"
