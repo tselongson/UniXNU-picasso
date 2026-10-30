@@ -34,6 +34,8 @@ def main():
                         help='upstream tree, for drivers/DarwinBoot/Test/packed_ramdisk.py')
     parser.add_argument('--gib', type=int, default=3, help='container size in GiB')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--defconfig', type=Path,
+                        help='picasso_defconfig to receive the generated volume UUID')
     args = parser.parse_args()
 
     packer = args.tree / 'drivers/DarwinBoot/Test/packed_ramdisk.py'
@@ -60,6 +62,23 @@ def main():
             # does not exist on the runner, which is how the first attempt failed.
             info = plistlib.loads(run('diskutil', 'info', '-plist', device, capture=True).encode())
             size = int(info['TotalSize'])
+            # The kernel resolves the Data volume by APFS UUID (NativeRamBlock's selectVolumeSeed
+            # matches IOMedia on that property), so the UUID this container gets has to reach the
+            # build. hdiutil picks it at random, so it is read here rather than assumed -- an earlier
+            # build had the all-zero placeholder in the config and the mount failed with ENOENT.
+            volume_uuid = info.get('VolumeUUID')
+            if not volume_uuid:
+                for suffix in ('s1', 's2'):
+                    try:
+                        vinfo = plistlib.loads(run('diskutil', 'info', '-plist',
+                                                   device + suffix, capture=True).encode())
+                    except subprocess.CalledProcessError:
+                        continue
+                    if vinfo.get('VolumeUUID'):
+                        volume_uuid = vinfo['VolumeUUID']
+                        break
+            if not volume_uuid:
+                raise SystemExit('could not read the Data volume UUID from diskutil')
             # Copy in page-sized blocks, not whole MiB: the attached size is not a multiple of 1 MiB
             # (3011469312 bytes for a nominal 3 GiB sparse image), so a MiB count stopped 984 KiB
             # short and the length check below rejected it. Rounding down to a page keeps the image
@@ -70,6 +89,18 @@ def main():
                 f'count={size // 4096}')
         finally:
             run('hdiutil', 'detach', device, '-force')
+
+        if args.defconfig:
+            config = Path(args.defconfig)
+            text = config.read_text(encoding='utf-8')
+            replaced, count = re.subn(r'^CONFIG_XNU_OWNER_DATA_VOLUME_UUID=.*$',
+                                      f'CONFIG_XNU_OWNER_DATA_VOLUME_UUID="{volume_uuid}"',
+                                      text, flags=re.MULTILINE)
+            if count != 1:
+                raise SystemExit(f'{config}: expected one CONFIG_XNU_OWNER_DATA_VOLUME_UUID line, '
+                                 f'found {count}')
+            config.write_text(replaced, encoding='utf-8')
+        print(f'data volume uuid: {volume_uuid}')
 
         if raw.stat().st_size != size:
             raise SystemExit(f'copied {raw.stat().st_size} bytes, expected {size}')

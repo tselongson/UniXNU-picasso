@@ -155,7 +155,7 @@ jobs:
           # own tests use, so the format is already the one the firmware validates.
           DATA="$TREE/.cache/firmware/target-volumes/data.dbr"
           rm -f "$DATA"
-          python3 ./scripts/make-data-seed.py --tree "$TREE" --gib 3 --output "$DATA"
+          python3 ./scripts/make-data-seed.py --tree "$TREE" --gib 3 --output "$DATA" --defconfig configs/picasso_defconfig
           test -s "$DATA" || { echo "Data seed was not produced"; exit 1; }
           ls -l "$DATA"
 
