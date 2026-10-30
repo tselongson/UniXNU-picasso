@@ -28,29 +28,24 @@ CONFIG_XNU_NATIVE_UFS=y
 # CONFIG_XNU_NATIVE_ADRENO is not set
 # CONFIG_XNU_ARMVIRT_PLATFORM is not set
 # CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE is not set
-# The owner-root stack, configured the way sheng configures it.
+# The owner-root stack is NOT usable on this board, and the reason is not the virtio gate.
 #
-# An earlier attempt gave up on this because build-xnu-4k-baseline.sh requires
-# XNU_NATIVE_VIRTIO_BLOCK for XNU_OWNER_ROOT_TRUST, and this board has no virtio block device. That
-# reading was wrong: the requirement is a build-time configuration check, and sheng enables the
-# virtio block driver for exactly this purpose while booting from UFS with native-ufs-root=1. The
-# driver compiles and never matches on hardware that has no virtio.
+# sheng enables VERIFIED_ROOT_PROBE, OWNER_ROOT_AUDIT, OWNER_ROOT_TRUST, OWNER_CACHE_MOUNT,
+# OWNER_CACHE_STARTUP and OWNER_UNION_SYSTEMOS. The piece that would help here is the union mount of
+# the SystemOS cryptex, which is where the dyld shared cache lives.
 #
-# What the stack buys, per docs/concepts/security.md: the root binding audit, the boot manifest
-# hash, the code signing cache carrier, and -- the one that matters here -- a union mount of the
-# SystemOS cryptex. The dyld shared cache lives in that cryptex, which is why launchd starts,
-# prints its ignition arguments and then blocks with no further block I/O.
-CONFIG_XNU_BUILD_ARCHIVES=y
-CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
-CONFIG_XNU_VERIFIED_ROOT_PROBE=y
-CONFIG_XNU_OWNER_ROOT_AUDIT=y
-CONFIG_XNU_OWNER_ROOT_TRUST=y
-CONFIG_XNU_OWNER_BOOT_MANIFEST=y
-CONFIG_XNU_OWNER_CACHE_MOUNT=y
-CONFIG_XNU_OWNER_CACHE_STARTUP=y
-CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
-CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/native-virtio-block/libNativeVirtioBlock.a"
-CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
+# Enabling it stops the build at XNU_VERIFIED_ROOT_ARCHIVE: scripts/build-verified-root-probe.py
+# refuses with "The two-volume bundle requires the positive original OS policy". That policy is
+# Apple-signed material tied to a real device and OS, the same class of input as the root hash --
+# unobtainable for a Xiaomi board. The virtio archive the gate also wants was solvable and is now
+# built by build-arm-driver.py, but it is not the obstacle.
+#
+# Reverted to the configuration that builds and boots through launchd. The remaining route is the
+# one ios-sweet took: an HFS+ root with the dyld cache linked in, which needs no cryptex and no
+# policy at all.
+# CONFIG_XNU_VERIFIED_ROOT_PROBE is not set
+# CONFIG_XNU_OWNER_ROOT_AUDIT is not set
+# CONFIG_XNU_OWNER_ROOT_TRUST is not set
 # CONFIG_XNU_OWNER_CACHE_MOUNT is not set
 # CONFIG_XNU_OWNER_CACHE_STARTUP is not set
 # CONFIG_XNU_OWNER_BOOT_MANIFEST is not set
