@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-30 16:10（commit `4342fbd`，构建可用，启动停在 ignition）
+最后更新：2026-10-30 18:35（commit `0524a2e`，cryptex 已联合挂载，卡在读共享缓存后复位）
 
 ## 一句话
 
@@ -230,6 +230,45 @@ sheng 能跑是因为它启用了整个 owner-root 栈。逐项试下来的结�
 
 **所以 sheng 的 `OWNER_UNION_SYSTEMOS`（把 cryptex 联合挂载到根上、提供 dyld 共享缓存）
 这条路走不通，不是因为构建细节，是因为路线本身关闭。**
+
+### 突破：SystemOS cryptex 联合挂载成功（uke 路线）
+
+用 uke 的 bringup 配置之后，`native_owner_cache_prepare` **通过了全部校验**，cryptex 挂载并联合到根：
+
+```
+apfs_log_op_with_proc: disk3s1 mounting volume DawnUpdate21H461.J120J121J207J208SystemCryptex, requested by: init (pid 1)
+apfs_log_op_with_proc: disk3s1 mount-complete volume DawnUpdate21H461.J120J121J207J208SystemCryptex
+load_init_program: attempting to load /sbin/launchd
+```
+
+**这是本项目第一次把 cryptex 挂起来。** 之前 launchd 卡住正是因为共享缓存在 cryptex 里而没挂载。
+
+关键改动（全部照 uke）：
+- `CONFIG_XNU_BRINGUP_OWNER_CACHE=y` + 缓存挂载/联合挂载，不开验证根
+- `build-xnu-4k-baseline.sh` 四处改动（`picasso-bringup-owner-cache.patch`）
+- `kern_exec.c` 的 `#error` 放宽（`picasso-bringup-kern-exec.patch`）
+- `native_verified_block_*` 由 UFS 驱动提供（`native-ufs-allow-unverified=1`）
+
+### 当前卡点：读共享缓存后复位，无 panic 文本
+
+挂载之后 launchd 开始从 SystemOS 读共享缓存，请求量从 264 涨到 **2560+**（每次 1 MB）：
+
+```
+NativeUfs blk[SystemOS]: #2304 block=1984944 count=2048
+NativeUfs blk[SystemOS]: #2560 block=6238200 count=8
+```
+
+然后设备复位回 fastboot，**控制台没有任何 panic 文本**。
+
+已排除：
+- **不是我们驱动的 pshold 复位** —— 那条路径会先打印 `PICASSO CDC: reset begin`
+- **`wdt=-1` 无效** —— `wdt` 只在 `osfmk/arm/arm_init.c` 和 `zalloc.c` 里解析，**arm64 没有处理路径**，是空操作
+
+两个候选方向：
+1. **panic 输出被吞掉** —— panic 走了别的控制台（屏幕上是帧缓冲花屏，可能就是 panic 文本用了错误格式）
+2. **硬件看门狗** —— 读 2.5 GB 缓存耗时够长，而内核无法关它
+
+下一步优先验证方向 1：让 panic 路径强制冲刷 USB 控制台，否则后面每次复位都是瞎的。
 
 ### 剩下的路：ios-sweet 的 HFS+ 方案
 
