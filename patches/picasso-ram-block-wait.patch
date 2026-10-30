@@ -1,6 +1,6 @@
 --- a/drivers/NativeRamBlock/NativeRamBlock.cpp
 +++ b/drivers/NativeRamBlock/NativeRamBlock.cpp
-@@ -365,9 +365,25 @@
+@@ -365,9 +365,29 @@
    IOBlockStorageDevice::free();
  }
  
@@ -15,7 +15,11 @@
  {
 +  for (unsigned attempt = 0; attempt < 100; ++attempt) {
 +    if (selectVolumeSeedOnce(uuid, device, path, size, seedBase, seedBytes, seedDigest)) return 1;
-+    IOSleep(100);
++    // Spin rather than IOSleep: this runs from bsd_init before the IOKit work loop is servicing
++    // timers, and a sleeping wait here hangs about half the time. The whole wait is bounded at ten
++    // seconds, which is acceptable during bring-up.
++    for (volatile uint64_t spin = 0; spin < 100000000; ++spin) {
++    }
 +  }
 +  return 0;
 +}
