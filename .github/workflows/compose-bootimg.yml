@@ -158,16 +158,6 @@ jobs:
           python3 ./scripts/make-data-seed.py --tree "$TREE" --gib 3 --output "$DATA" --defconfig configs/picasso_defconfig
           test -s "$DATA" || { echo "Data seed was not produced"; exit 1; }
           ls -l "$DATA"
-          # The owner-root policy, built from the original OS image and signed with a key this
-          # project generates. "Owner" is the device owner, not Apple: this is the archive sheng
-          # links and this board never had. It has to exist before the kernel link asks for it.
-          DMG_DIR="$TREE/.cache/firmware/target-volumes"
-          mkdir -p "$DMG_DIR"
-          if [ ! -f "$DMG_DIR/044-76040-038.dmg" ]; then
-            unzip -o -q "$UNIXNU_IPSW" 044-76040-038.dmg -d "$DMG_DIR"
-          fi
-          sh ./scripts/picasso-owner-root.sh "$TREE" "$DMG_DIR/044-76040-038.dmg"
-
           # The seed step wrote the volume UUID into configs/picasso_defconfig, but "unixnu defconfig"
           # copied that file to the build's working config before the seed existed, and the build
           # reads the copy. Re-selecting picks up the UUID; without this the kernel kept the
@@ -180,6 +170,17 @@ jobs:
           # candidate to read and emits an empty archive. The second pass sees the candidate from
           # the first and links the real bindings in.
           python3 ./unixnu build kernel payload -j 3 --trust-cache "$TRUST" --data-ramdisk "$DATA" 2>&1 | tee out/picasso/logs/actions-build.log
+
+          # The owner-root policy, built from the original OS image and signed with a key this project
+          # generates. "Owner" is the device owner, not Apple: this is the archive sheng links and this
+          # board never had. It runs between the passes because build-verified-root-probe.py compiles
+          # against the recorded kernel compile commands, which the first pass is what produces.
+          DMG_DIR="$TREE/.cache/firmware/target-volumes"
+          mkdir -p "$DMG_DIR"
+          if [ ! -f "$DMG_DIR/044-76040-038.dmg" ]; then
+            unzip -o -q "$UNIXNU_IPSW" 044-76040-038.dmg -d "$DMG_DIR"
+          fi
+          sh ./scripts/picasso-owner-root.sh "$TREE" "$DMG_DIR/044-76040-038.dmg"
           python3 ./unixnu build kernel payload -j 3 --trust-cache "$TRUST" --data-ramdisk "$DATA" 2>&1 | tee -a out/picasso/logs/actions-build.log
 
       - name: Report kernel/payload sizes
