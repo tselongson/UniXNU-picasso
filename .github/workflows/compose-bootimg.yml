@@ -172,8 +172,11 @@ jobs:
           # The archive check runs before any compilation, so a missing file would abort the pass
           # before the compile records this step needs are written. An empty archive gets the pass past
           # the check: it compiles, fails to link on the probe symbols, and leaves the records behind.
+          # ar refuses an empty argument list, so the placeholder is one object that defines nothing.
           mkdir -p "$TREE/build/verified-root-os-xnu-bundle"
-          ar rcs "$TREE/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
+          printf 'static int picasso_probe_placeholder;\n' > /tmp/picasso-placeholder.c
+          xcrun clang -c /tmp/picasso-placeholder.c -o /tmp/picasso-placeholder.o
+          ar rcs "$TREE/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a" /tmp/picasso-placeholder.o
 
           # The first pass is allowed to fail: it exists to produce the compile records the owner-root
           # archive is built from, and with VERIFIED_ROOT_PROBE on it cannot link until that archive
