@@ -62,6 +62,11 @@ archives = [
   # Same remedy as udon: extract the original dispatch from the kernel image and bind
   # its addresses as absolute symbols.
   "build-picasso-ufs-bindings.py",
+  # The Data seed reaches the kernel as a PackedRAMDisk range, and NativeRamBlock is the component
+  # that reads /chosen/memory-map and publishes it. Its build gate wants XNU_NATIVE_AES, and the AES
+  # bindings builder needs the prelink candidate, so it sits after the archives that produce one.
+  "build-native-aes-bindings.py",
+  "build-arm-driver.py NativeRamBlock",
 ]
 
 [kernel.prelink]
