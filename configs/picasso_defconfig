@@ -43,6 +43,13 @@ CONFIG_XNU_NATIVE_UFS=y
 #
 # Note what is deliberately absent: no VERIFIED_ROOT_PROBE, no OWNER_ROOT_AUDIT, no OWNER_ROOT_TRUST,
 # no OWNER_BOOT_MANIFEST, and no virtio block. uke's configuration has none of them either.
+# The verified root, now that the archive can be produced: build-owner-os-policy.py signs a manifest
+# of the original OS image with a key this project generates, and build-verified-root-probe.py turns
+# it into libVerifiedRootProbe.a between the two kernel passes. The audit mode is what records the
+# compile commands that probe build reads.
+CONFIG_XNU_VERIFIED_ROOT_PROBE=y
+CONFIG_XNU_OWNER_ROOT_AUDIT=y
+CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
 CONFIG_XNU_BRINGUP_OWNER_CACHE=y
 CONFIG_XNU_OWNER_CACHE_MOUNT=y
 CONFIG_XNU_OWNER_CACHE_STARTUP=y
