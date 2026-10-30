@@ -21,7 +21,6 @@ CONFIG_XNU_EXTRA_LD_ARCHIVES=""
 # CONFIG_XNU_SOURCE_MOCKFS is not set
 CONFIG_XNU_NATIVE_UFS=y
 # CONFIG_XNU_NATIVE_AES is not set
-# CONFIG_XNU_NATIVE_VIRTIO_BLOCK is not set
 # CONFIG_XNU_NATIVE_VIRTIO_CONSOLE is not set
 # CONFIG_XNU_NATIVE_RAM_BLOCK is not set
 # CONFIG_XNU_NATIVE_MOBILE_DISPLAY is not set
@@ -29,13 +28,29 @@ CONFIG_XNU_NATIVE_UFS=y
 # CONFIG_XNU_NATIVE_ADRENO is not set
 # CONFIG_XNU_ARMVIRT_PLATFORM is not set
 # CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE is not set
-# Reverted: build-xnu-4k-baseline.sh:289 requires XNU_NATIVE_VIRTIO_BLOCK for the owner-root
-# acceptance path, and this board has no virtio block device. sheng enables it because sheng's root
-# comes from virtio block in a VM; the native UFS root takes the unverified path instead. So the
-# three options below stay off here, and the block driver keeps its verification compiled out.
-# CONFIG_XNU_VERIFIED_ROOT_PROBE is not set
-# CONFIG_XNU_OWNER_ROOT_AUDIT is not set
-# CONFIG_XNU_OWNER_ROOT_TRUST is not set
+# The owner-root stack, configured the way sheng configures it.
+#
+# An earlier attempt gave up on this because build-xnu-4k-baseline.sh requires
+# XNU_NATIVE_VIRTIO_BLOCK for XNU_OWNER_ROOT_TRUST, and this board has no virtio block device. That
+# reading was wrong: the requirement is a build-time configuration check, and sheng enables the
+# virtio block driver for exactly this purpose while booting from UFS with native-ufs-root=1. The
+# driver compiles and never matches on hardware that has no virtio.
+#
+# What the stack buys, per docs/concepts/security.md: the root binding audit, the boot manifest
+# hash, the code signing cache carrier, and -- the one that matters here -- a union mount of the
+# SystemOS cryptex. The dyld shared cache lives in that cryptex, which is why launchd starts,
+# prints its ignition arguments and then blocks with no further block I/O.
+CONFIG_XNU_BUILD_ARCHIVES=y
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK=y
+CONFIG_XNU_VERIFIED_ROOT_PROBE=y
+CONFIG_XNU_OWNER_ROOT_AUDIT=y
+CONFIG_XNU_OWNER_ROOT_TRUST=y
+CONFIG_XNU_OWNER_BOOT_MANIFEST=y
+CONFIG_XNU_OWNER_CACHE_MOUNT=y
+CONFIG_XNU_OWNER_CACHE_STARTUP=y
+CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
+CONFIG_XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE="{tree}/build/virtio-mmio-block-verified-bundle/libVirtioMmioBlock.a"
+CONFIG_XNU_VERIFIED_ROOT_ARCHIVE="{tree}/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
 # CONFIG_XNU_OWNER_CACHE_MOUNT is not set
 # CONFIG_XNU_OWNER_CACHE_STARTUP is not set
 # CONFIG_XNU_OWNER_BOOT_MANIFEST is not set
