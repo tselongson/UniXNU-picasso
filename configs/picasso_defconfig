@@ -46,11 +46,11 @@ CONFIG_XNU_OWNER_CACHE_MOUNT=y
 CONFIG_XNU_OWNER_CACHE_STARTUP=y
 CONFIG_XNU_OWNER_DATA_MOUNT=y
 CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
-# The owner-cache code calls native_ram_block_gpu_addon and the two native_verified_block_* lookups.
-# Those live in NativeRamBlock and NativeVirtioBlock, so both archives have to be linked even though
-# this board has neither a ram block nor a virtio device at runtime -- uke enables NATIVE_RAM_BLOCK
-# for the same reason.
-CONFIG_XNU_NATIVE_RAM_BLOCK=y
+# No ram block and no virtio device on this board. NativeUfs answers the owner-cache calls itself:
+# the two native_verified_block_* lookups come from the driver, and native_ram_block_gpu_addon is a
+# stub there because the payload carries no GPU addon. Linking NativeRamBlock instead would drag in
+# the NativeAES prelink closure this board does not have.
+# CONFIG_XNU_NATIVE_RAM_BLOCK is not set
 # CONFIG_XNU_NATIVE_VIRTIO_BLOCK is not set
 # CONFIG_XNU_BOOT_PROGRESS is not set
 

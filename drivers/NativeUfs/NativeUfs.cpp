@@ -1963,6 +1963,17 @@ extern "C" int native_verified_block_volume_device (const char *uuid, dev_t *dev
   return 0;
 }
 
+// The owner Data mount also calls native_ram_block_gpu_addon, the GPU addon transport. This payload
+// carries no GpuAddon range and the display/GPU stack is not part of the bring-up, so report "no
+// addon" here instead of linking NativeRamBlock, whose build gate requires the whole NativeAES
+// prelink closure. A weak import alone was not enough: the kernel link still demanded a definition.
+extern "C" int native_ram_block_gpu_addon (const uint8_t **data, uint64_t *bytes)
+{
+  if (data) *data = nullptr;
+  if (bytes) *bytes = 0;
+  return 0;
+}
+
 // Ordered publication of the root windows. The original owner-trust code resolves the SystemOS
 // volume by UUID immediately after the root is mounted, so SystemOS must already have published its
 // volume media by then; the OS window (whose volume is the root being waited for) goes last.
