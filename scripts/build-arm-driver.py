@@ -159,6 +159,12 @@ def main():
             '-I', str(ROOT / 'build/storage-abi/include'),
             '-I', str(ROOT / 'drivers/NativeUfs'),
         ]),
+        # Built only to satisfy the owner-root configuration gate, which wants verified block
+        # storage present. The driver links and never matches: this board has no virtio device.
+        'NativeVirtioBlock': ('native-virtio-block', 'NativeVirtioBlock', 'NativeVirtioBlock.cpp', [
+            '-I', str(ROOT / 'build/storage-abi/include'),
+            '-I', str(ROOT / 'drivers/NativeVirtioBlock'),
+        ]),
     }
     dir_name, sub_dir, src_file, extra_flags = out_map[args.component]
     out = ROOT / 'build' / dir_name
