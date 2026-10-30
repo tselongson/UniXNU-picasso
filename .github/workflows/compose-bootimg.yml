@@ -169,7 +169,11 @@ jobs:
           # the archive step, which runs before that link, so on the first pass it has no
           # candidate to read and emits an empty archive. The second pass sees the candidate from
           # the first and links the real bindings in.
-          python3 ./unixnu build kernel payload -j 3 --trust-cache "$TRUST" --data-ramdisk "$DATA" 2>&1 | tee out/picasso/logs/actions-build.log
+          # The first pass is allowed to fail: it exists to produce the compile records the owner-root
+          # archive is built from, and with VERIFIED_ROOT_PROBE on it cannot link until that archive
+          # exists. The second pass is the one that has to succeed.
+          python3 ./unixnu build kernel payload -j 3 --trust-cache "$TRUST" --data-ramdisk "$DATA" 2>&1 | tee out/picasso/logs/actions-build.log \
+            || echo "first pass did not link, expected until the owner-root archive exists"
 
           # The owner-root policy, built from the original OS image and signed with a key this project
           # generates. "Owner" is the device owner, not Apple: this is the archive sheng links and this
