@@ -169,6 +169,12 @@ jobs:
           # the archive step, which runs before that link, so on the first pass it has no
           # candidate to read and emits an empty archive. The second pass sees the candidate from
           # the first and links the real bindings in.
+          # The archive check runs before any compilation, so a missing file would abort the pass
+          # before the compile records this step needs are written. An empty archive gets the pass past
+          # the check: it compiles, fails to link on the probe symbols, and leaves the records behind.
+          mkdir -p "$TREE/build/verified-root-os-xnu-bundle"
+          ar rcs "$TREE/build/verified-root-os-xnu-bundle/libVerifiedRootProbe.a"
+
           # The first pass is allowed to fail: it exists to produce the compile records the owner-root
           # archive is built from, and with VERIFIED_ROOT_PROBE on it cannot link until that archive
           # exists. The second pass is the one that has to succeed.
