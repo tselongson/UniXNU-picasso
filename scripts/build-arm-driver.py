@@ -138,7 +138,7 @@ def prelink_slide():
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('component', choices=['ArmDTPlatform', 'ArmCpu', 'NativeRamBlock', 'NativeUfs', 'NativeAdreno'])
+    parser.add_argument('component', choices=['ArmDTPlatform', 'ArmCpu', 'NativeRamBlock', 'NativeUfs', 'NativeAdreno', 'NativeVirtioBlock'])
     args = parser.parse_args()
 
     recipe = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
