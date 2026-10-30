@@ -1,0 +1,28 @@
+--- a/drivers/NativeRamBlock/NativeRamBlock.cpp
++++ b/drivers/NativeRamBlock/NativeRamBlock.cpp
+@@ -365,9 +365,25 @@
+   IOBlockStorageDevice::free();
+ }
+ 
++static int selectVolumeSeedOnce(const char *uuid, dev_t *device, char *path, size_t size,
++    uint64_t *seedBase,uint64_t *seedBytes,uint8_t seedDigest[32]);
++
++// The Data mount runs from bsd_init, before the APFS volume media exists: the screen shows disk5s2
++// being published after the failure. One lookup therefore finds nothing and the mount panics with
++// ENOENT, so wait for the media the way the verified-block path already does.
+ static int selectVolumeSeed(const char *uuid, dev_t *device, char *path, size_t size,
+     uint64_t *seedBase,uint64_t *seedBytes,uint8_t seedDigest[32])
+ {
++  for (unsigned attempt = 0; attempt < 100; ++attempt) {
++    if (selectVolumeSeedOnce(uuid, device, path, size, seedBase, seedBytes, seedDigest)) return 1;
++    IOSleep(100);
++  }
++  return 0;
++}
++
++static int selectVolumeSeedOnce(const char *uuid, dev_t *device, char *path, size_t size,
++    uint64_t *seedBase,uint64_t *seedBytes,uint8_t seedDigest[32])
++{
+   if (!uuid || strlen(uuid) != 36 || !device || !path || size < 6) return 0;
+   *device = NODEV;
+   path[0] = 0;
