@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-31 02:35（launchd 运行；`mount-phase-1` 根因已定位并修复，待验证）
+最后更新：2026-10-31 14:30（**mount-phase-1 通过，16 个启动任务启动**）
 
 ## 一句话
 
@@ -412,6 +412,38 @@ com.apple.xpc.launchd| <Emergency>: Panicking in 3 seconds.
 - `boot-manifest-hash` 已加入 ADT（v123）
 - 忙等已改（v124，构建中）
 - **待验证**：`mount-phase-1` 是否能通过
+
+### 里程碑：mount-phase-1 通过，16 个启动任务启动
+
+`boot-manifest-hash` 加上之后，launchd 一路往下走了：
+
+```
+(exclaves-boot)        Doing boot task
+(fsck)                 Doing boot task
+(mount-phase-1)        Doing boot task        ← 之前在这里退出 66
+(mount-phase-2)        Doing boot task
+(init-with-data-volume) Doing boot task
+(fixup-mobile-tmp)     Doing boot task
+(fixup-mobile-tmp)     Finished boot task     ← 第一个完成的任务
+(MSUEarlyBootTask)     Doing boot task
+(fips)                 Doing boot task
+(keybag)               Doing boot task
+(usermanagerd)         Doing boot task
+(dirs_cleaner)         Doing boot task
+```
+
+**统计：16 个任务启动，1 个完成。** 对比之前的 3 个（且全部失败）。
+
+### 当前卡点：系统日志 socket
+
+```
+<Error>: Could not bind to system logger socket: error = 2: No such file or directory
+```
+
+之后设备静默。`/var/run/syslog` 不存在——`/private/var/run` 需要由 `init-with-data-volume` 建立，
+或者我们的 Data 卷里缺这个目录结构。
+
+下一步：查 `init-with-data-volume` 有没有完成，以及 `/private/var` 的目录结构。
 
 ### 剩下的路：ios-sweet 的 HFS+ 方案
 
