@@ -114,10 +114,14 @@ jobs:
           # step inside it then produces the candidates. That kernel is never booted.
           sed -i '' 's|"build-sheng-platform-power.py"|"build-arm-driver.py ShengPlatformPower"|' board.toml
           sed -i '' '/"build-native-legacy-display.py"/d' board.toml
+          # The display archive is gone from the list, so the configuration that links it has to go
+          # too; otherwise the build stops at 'test -f $LEGACY_DISPLAY_ARCHIVE failed' before it
+          # compiles anything.
+          sed -i '' 's|^CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y|# CONFIG_XNU_NATIVE_LEGACY_DISPLAY is not set|' configs/picasso_defconfig
           python3 ./unixnu defconfig picasso_defconfig
           python3 ./unixnu build kernel -j 3 2>&1 | tee out/picasso/logs/pass1.log \
             || echo "first pass did not finish; it exists to produce the kernel and the candidates"
-          git checkout -- board.toml
+          git checkout -- board.toml configs/picasso_defconfig
           python3 ./unixnu defconfig picasso_defconfig
 
           # Second pass: the real archives, now that both inputs exist.
