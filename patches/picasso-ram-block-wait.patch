@@ -1,6 +1,6 @@
 --- a/drivers/NativeRamBlock/NativeRamBlock.cpp
 +++ b/drivers/NativeRamBlock/NativeRamBlock.cpp
-@@ -365,9 +365,29 @@
+@@ -365,9 +365,32 @@
    IOBlockStorageDevice::free();
  }
  
@@ -21,6 +21,9 @@
 +    for (volatile uint64_t spin = 0; spin < 100000000; ++spin) {
 +    }
 +  }
++  // Say which UUID was searched for and how many media answered; without this a miss is silent.
++  IOLog ("NativeRamBlock: no volume media for UUID %s after 100 attempts
++", uuid);
 +  return 0;
 +}
 +
