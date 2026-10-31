@@ -70,7 +70,7 @@ archives = [
   "build-arm-driver.py NativeRamBlock",
   # The archive is link-only: it removes the class initializer and supplies
   # guarded reference stubs. It never enters attach, allocation or publish.
-  "build-native-legacy-display.py",
+  "build-arm-driver.py NativeLegacyDisplay",
 ]
 
 [kernel.prelink]

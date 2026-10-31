@@ -23,14 +23,3 @@ extern "C" kern_return_t native_start_kext_and_report(const char *, const char *
 extern "C" void sheng_pmgr_run(void)
 {
 }
-
-// The display side is dropped from the first pass as well, and these two are referenced from
-// bsd_init and from the USB console patch, so they need stand-ins too.
-extern "C" void native_legacy_display_probe(void)
-{
-}
-
-extern "C" kern_return_t native_publish_display_and_report(void)
-{
-  return 0;
-}
