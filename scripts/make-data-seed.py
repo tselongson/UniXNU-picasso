@@ -115,8 +115,15 @@ def main():
                          'containers/Data', 'containers/Shared', 'preferences', 'keychains',
                          'lib', 'spool', 'folders', 'vm', 'hardware', 'audit', 'backups',
                          'wireless', 'networkd', 'protect', 'MSUData', 'MobileSoftwareUpdate',
-                         'DeviceRegistry', 'Caches'):
+                         'DeviceRegistry', 'Caches', 'log/com.apple.xpc.launchd',
+                         'db/timezone', 'db/timezone/tz'):
             run('sudo', 'mkdir', '-p', str(volume_root / relative))
+        # tzinit rebuilds /private/var/db/timezone from the system partition and fails here, so the
+        # zoneinfo tree is copied in directly. /usr/share/zoneinfo on the root is a symlink into this
+        # directory on a real device; an empty one leaves it dangling.
+        run('sudo', 'cp', '-R', '/usr/share/zoneinfo', str(volume_root / 'db/timezone/zoneinfo'))
+        run('sudo', 'ln', '-sfn', '/private/var/db/timezone/zoneinfo/UTC',
+            str(volume_root / 'db/timezone/localtime'))
         print(f'data volume skeleton: {volume_root}')
 
         if args.defconfig:
