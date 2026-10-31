@@ -184,12 +184,6 @@ def main():
                         ('dram-size', struct.pack('<Q', args.dram_size)),
                         # Image4 hash algorithm. sha2-384 in /chosen; selects the algorithm only.
                         ('crypto-hash-method', b'sha2-384\0'),
-                        # mount reads /chosen/boot-manifest-hash and refuses to run without it:
-                        # "mount: failed to get boot manifest hash - No such file or directory", which
-                        # is what fails launchd's mount-phase-1 with exit 66. The root here is not
-                        # sealed, so the value is the sha2-384 length of zeros rather than a real
-                        # manifest digest; it exists so the property resolves.
-                        ('boot-manifest-hash', bytes(48)),
                         *( [('root-matching', ('<dict><key>IOProviderClass</key><string>IOMedia</string>'
                                                '<key>IOPropertyMatch</key><dict><key>UUID</key><string>' +
                                                args.root_match_volume_uuid.upper() + '</string></dict></dict>\0').encode())]
