@@ -23,3 +23,14 @@ extern "C" kern_return_t native_start_kext_and_report(const char *, const char *
 extern "C" void sheng_pmgr_run(void)
 {
 }
+
+// The first pass also drops the display archive, and the kernel references these two from bsd_init
+// and from the USB console patch, so the stand-ins live here for that pass.
+extern "C" void native_legacy_display_probe(void)
+{
+}
+
+extern "C" kern_return_t native_publish_display_and_report(void)
+{
+  return 0;
+}

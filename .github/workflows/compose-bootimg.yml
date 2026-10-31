@@ -113,6 +113,8 @@ jobs:
           # both exist. Stand-ins and a smaller archive list let this pass link a kernel; the prelink
           # step inside it then produces the candidates. That kernel is never booted.
           sed -i '' 's|"build-sheng-platform-power.py"|"build-arm-driver.py ShengPlatformPower"|' board.toml
+          sed -i '' '/"build-arm-driver.py NativeLegacyDisplay"/d' board.toml
+          sed -i '' 's|^CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y|# CONFIG_XNU_NATIVE_LEGACY_DISPLAY is not set|' configs/picasso_defconfig
           python3 ./unixnu defconfig picasso_defconfig
           python3 ./unixnu build kernel -j 3 2>&1 | tee out/picasso/logs/pass1.log \
             || echo "first pass did not finish; it exists to produce the kernel and the candidates"
@@ -122,6 +124,10 @@ jobs:
           # cleared to make that pass compile them again. out/picasso/kernel/kernel.macho is outside
           # it and stays, which is what the shim reads.
           rm -rf out/picasso/tree/build/xnu/ios-obj
+          git checkout -- configs/picasso_defconfig
+          # The display stand-in has to exist before the kernel script tests for it, and it needs
+          # nothing but its own source, so it is built here rather than in the archive phase.
+          ( cd out/picasso/tree && python3 scripts/build-arm-driver.py NativeLegacyDisplay )
           python3 ./unixnu defconfig picasso_defconfig
 
           # Second pass: the real archives, now that both inputs exist.
