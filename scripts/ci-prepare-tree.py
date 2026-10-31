@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Adjust the assembled build tree for a clean CI run.
+"""Adjust every copy of the build tree a clean CI run will use.
 
-`unixnu tree` refreshes scripts/ from the pinned upstream revision, so edits made while the cache
-was being prepared do not survive into the tree the build actually uses. Two upstream scripts assume
-a workstation that has built before:
+`unixnu tree` assembles out/<device>/tree from two script sources -- the prepared upstream cache and
+this device repository -- and copies scripts/ over each time, so an edit made to one copy is thrown
+away by the next assembly. Two upstream scripts assume a workstation that has built before:
 
     build-native-aes-bindings.py   writes build/native-aes/*.o without creating the directory, which
                                    only works where a previous build left it behind.
@@ -13,7 +13,8 @@ a workstation that has built before:
                                    loop. The audit checks a contract; it does not feed the shim, so a
                                    missing reference is reported and skipped.
 
-Both adjustments are idempotent. Run this after `unixnu tree` and before `unixnu build`.
+Run with the device repository as the argument: every .cache/upstream-* tree and the assembled
+out/<device>/tree are adjusted. Both adjustments are idempotent.
 """
 import pathlib
 import sys
@@ -47,26 +48,35 @@ def tolerate_missing_pmgr_candidate(root):
         if index and 'except subprocess.CalledProcessError' in lines[index - 1]:
             return False
         indent = line[:len(line) - len(line.lstrip())]
-        wrapped = (indent + 'try:' + NL
-                   + indent + '    ' + line.strip() + NL
-                   + indent + 'except subprocess.CalledProcessError:' + NL
-                   + indent + "    print('amfi/pmgr contract audit skipped: no reference "
-                   + "prelink candidate')" + NL)
-        lines[index] = wrapped
+        lines[index] = (indent + 'try:' + NL
+                        + indent + '    ' + line.strip() + NL
+                        + indent + 'except subprocess.CalledProcessError:' + NL
+                        + indent + "    print('amfi/pmgr contract audit skipped: no reference "
+                        + "prelink candidate')" + NL)
         script.write_text(''.join(lines))
         return True
     return False
 
 
+def candidate_roots(device):
+    roots = sorted(device.glob('.cache/upstream-*'))
+    roots.extend(sorted(device.glob('out/*/tree')))
+    return [root for root in roots if (root / 'scripts').is_dir()]
+
+
 def main():
     if len(sys.argv) != 2:
-        raise SystemExit('usage: ci-prepare-tree.py <tree>')
-    root = pathlib.Path(sys.argv[1])
-    if not root.is_dir():
-        raise SystemExit(f'not a directory: {root}')
-    aes = ensure_aes_output_dir(root)
-    pmgr = tolerate_missing_pmgr_candidate(root)
-    print(f'tree prepared: aes-dir={aes} pmgr-audit={pmgr}')
+        raise SystemExit('usage: ci-prepare-tree.py <device repository>')
+    device = pathlib.Path(sys.argv[1]).resolve()
+    if not device.is_dir():
+        raise SystemExit(f'not a directory: {device}')
+    roots = candidate_roots(device)
+    if not roots:
+        raise SystemExit(f'no build trees under {device}; run unixnu tree first')
+    for root in roots:
+        aes = ensure_aes_output_dir(root)
+        pmgr = tolerate_missing_pmgr_candidate(root)
+        print(f'prepared {root}: aes-dir={aes} pmgr-audit={pmgr}')
 
 
 if __name__ == '__main__':
