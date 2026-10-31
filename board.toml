@@ -305,6 +305,10 @@ root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
 # payload has only a few MiB free, so the seed is the packed DBRDISK1 form: DarwinBoot validates the
 # extent table and copies the extents, and omitted ranges come up as zeroed RAM.
 packed_data_ramdisk = true
+# sheng carries this and this board did not. Its Data volume survives across boots through the UFS
+# store rather than living only in RAM, which is what init-with-data-volume expects to find when it
+# runs apfs_boot_util.
+persistent_data = true
 # DarwinBoot requests one contiguous window of this size from the firmware and
 # hands it to the kernel as boot_args.memSize. The kernel then builds its physmap
 # over exactly that range, so the window has to fit inside a single
