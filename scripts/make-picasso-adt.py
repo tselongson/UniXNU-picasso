@@ -131,6 +131,8 @@ def main():
                              'SM7250 numbers its cores 0x000..0x700 in Affinity1. More than one adds /psci')
     parser.add_argument('--psci-method', choices=['smc', 'hvc'], default='smc',
                         help='/psci method used by the secondary-CPU start (the board DT declares smc)')
+    parser.add_argument('--persistent-data', action='store_true',
+                        help='/chosen/ephemeral-storage is omitted: the Data volume is not ephemeral')
     parser.add_argument('--packed-data-ramdisk', action='store_true', help='Hand off validated DBRDISK1 bytes to the native sparse block driver, without a dense memdev alias')
     parser.add_argument('--data-ramdisk', action='store_true',
                         help='/chosen/memory-map RAMDisk placeholder; the loader fills in the real range for a scratch Data seed')
@@ -177,7 +179,11 @@ def main():
                         # described separately by ephemeral-storage below.
                         ('osenvironment', b'main\0'),
                         # This property describes the actual volatile Data RAM disk.
-                        *([('ephemeral-storage', struct.pack('<I', 1))] if (args.data_ramdisk or args.packed_data_ramdisk) else []),
+                        # ephemeral-storage tells userspace the Data volume lives only in memory.
+                        # A persistent volume must not say that: mount reports "data volume missing"
+                        # and init-with-data-volume runs apfs_boot_util and waits forever.
+                        *([('ephemeral-storage', struct.pack('<I', 1))]
+                          if (args.data_ramdisk or args.packed_data_ramdisk) and not args.persistent_data else []),
                         *( [('darwinboot-memory-size', struct.pack('<Q', args.owned_memory_size))]
                            if args.owned_memory_size else [] ),
                         ('dram-base', struct.pack('<Q', DRAM_BASE)),
