@@ -216,6 +216,10 @@ jobs:
             device/out/picasso/boot/**
             device/out/picasso/kernel/**
             device/out/picasso/payload/**
+            # The userdata image carries the OS and SystemOS windows the kernel mounts, and its
+            # verified-root policy is derived from exactly this image. Without it on the device the
+            # kernel has nothing that matches the policy and stops before the console comes up.
+            device/out/picasso/userdata/**
             device/out/picasso/logs/**
           if-no-files-found: warn
           retention-days: 7
