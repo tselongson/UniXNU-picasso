@@ -69,12 +69,35 @@ def main():
             # matches IOMedia on that property), so the UUID this container gets has to reach the
             # build. hdiutil picks it at random, so it is read here rather than assumed -- an earlier
             # build had the all-zero placeholder in the config and the mount failed with ENOENT.
-            volume_uuid = info.get('VolumeUUID')
+            # The volume UUID is also listed by the APFS container itself, which does not depend on
+            # how the slices happen to be named. This is tried first because the slice lookup below
+            # is what failed on a 2 GiB container: the disk answered, no slice did.
+            def apfs_volume_uuid(target):
+                try:
+                    listing = run('diskutil', 'apfs', 'list', '-plist', target, capture=True)
+                except subprocess.CalledProcessError:
+                    return None
+                try:
+                    parsed = plistlib.loads(listing.encode())
+                except Exception:
+                    return None
+                for container in parsed.get('Containers', []):
+                    for volume in container.get('Volumes', []):
+                        uuid = volume.get('APFSVolumeUUID')
+                        if uuid:
+                            return uuid
+                return None
+
+            volume_uuid = apfs_volume_uuid(device) or info.get('VolumeUUID')
             # The volume is not necessarily published by the time the disk answers, and at 1 GiB the
             # first query came back without one and the build stopped here. Poll instead of assuming
             # the layout is ready: the disk itself first, then its slices.
             for attempt in range(30):
                 if volume_uuid:
+                    break
+                found = apfs_volume_uuid(device)
+                if found:
+                    volume_uuid = found
                     break
                 for name in (device, device + 's1', device + 's2'):
                     try:
