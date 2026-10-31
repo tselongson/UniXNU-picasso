@@ -99,6 +99,11 @@ jobs:
             --verified-root out/picasso/tree/kits/VerifiedRoot \
             --output out/picasso/tree/build/verified-root-picasso
           ls -l out/picasso/tree/build/verified-root-picasso
+          # The shim and display archives audit against build/native-prelink/*-candidate.macho, which
+          # a previous successful build leaves behind on a workstation. prelink is a step of its own
+          # and does not need the kernel to link, so it can produce those candidates here.
+          python3 ./unixnu build prelink -j 3
+          ls -l out/picasso/tree/build/native-prelink | head
 
       - name: Build kernel + payload
         env:
