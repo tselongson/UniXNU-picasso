@@ -233,7 +233,7 @@ def build_adreno(record: dict):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('component', choices=['ArmDTPlatform', 'ArmCpu', 'NativeRamBlock', 'NativeUfs', 'NativeAdreno', 'NativeAES', 'ShengPlatformPower'])
+    parser.add_argument('component', choices=['ArmDTPlatform', 'ArmCpu', 'NativeRamBlock', 'NativeUfs', 'NativeAdreno', 'NativeAES', 'ShengPlatformPower', 'NativeLegacyDisplay'])
     args = parser.parse_args()
 
     recipe = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
@@ -249,6 +249,9 @@ def main():
         # bindings object, but nothing in the tree produces that .o -- it only exists on a machine
         # where an earlier build left it behind, so a clean checkout fails at 'ar: NativeAES.o: No
         # such file'. Building the component here writes exactly the path that step expects.
+        # Produces build/native-legacy-display/libNativeLegacyDisplay.a, the path the display
+        # configuration links. See the source for why the real subclass cannot be generated here.
+        'NativeLegacyDisplay': ('native-legacy-display', 'DisplayStub', 'DisplayStub.cpp', []),
         # Link-only stand-ins that produce build/sheng-platform-power/libShengPlatformPower.a, the
         # exact path the kernel links. Used for the first pass only; see the stub's own comment.
         'ShengPlatformPower': ('sheng-platform-power', 'ShengPlatformPowerStub',
