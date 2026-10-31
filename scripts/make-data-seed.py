@@ -98,6 +98,20 @@ def main():
                     if attempt:
                         print(f'warning: could not detach {device}; continuing', file=sys.stderr)
 
+        # The Data volume is mounted at /private/var, so its root is what /private/var contains. A bare
+        # container has none of the directories launchd's boot tasks expect -- syslogd cannot bind
+        # /var/run/syslog, dirs_cleaner and usermanagerd have nothing to work with -- so the skeleton
+        # is laid down here, before the image is packed.
+        volume_root = Path('/Volumes') / info.get('VolumeName', 'Data')
+        for relative in ('run', 'db', 'db/com.apple.directoryservices', 'tmp', 'logs', 'cores',
+                         'mobile', 'mobile/Library', 'mobile/Media', 'root', 'containers',
+                         'containers/Data', 'containers/Shared', 'preferences', 'keychains',
+                         'lib', 'spool', 'folders', 'vm', 'hardware', 'audit', 'backups',
+                         'wireless', 'networkd', 'protect', 'MSUData', 'MobileSoftwareUpdate',
+                         'DeviceRegistry', 'Caches'):
+            (volume_root / relative).mkdir(parents=True, exist_ok=True)
+        print(f'data volume skeleton: {volume_root}')
+
         if args.defconfig:
             config = Path(args.defconfig)
             text = config.read_text(encoding='utf-8')
