@@ -45,10 +45,10 @@ __attribute__((weak)) void native_legacy_display_probe(void)
 // Weak: the display subclass is generated from a prelink candidate that a clean tree cannot produce,
 // so this build may carry a stand-in instead. See the guard in native_register_display_and_report.
 extern "C" void native_legacy_display_static_init(void)
-    __asm__("__GLOBAL__sub_I_NativeLegacyDisplay.cpp") __attribute__((weak));
+    __asm__("__GLOBAL__sub_I_NativeLegacyDisplay.cpp") __attribute__((weak_import));
 struct NativeLegacyMetaStorage;
 extern NativeLegacyMetaStorage NativeLegacyDisplay_gMetaClass
-    __asm("__ZN19NativeLegacyDisplay10gMetaClassE") __attribute__((weak));
+    __asm("__ZN19NativeLegacyDisplay10gMetaClassE") __attribute__((weak_import));
 
 // Step 2b: run the owned display class's stripped static initializer inside
 // XNU's own preModLoad/postModLoad window, exactly like the runtime probe.
