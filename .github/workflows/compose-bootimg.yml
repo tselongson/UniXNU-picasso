@@ -123,11 +123,12 @@ jobs:
           # The archive steps of the second pass run nm over those objects, so the object directory is
           # cleared to make that pass compile them again. out/picasso/kernel/kernel.macho is outside
           # it and stays, which is what the shim reads.
-          rm -rf out/picasso/tree/build/xnu/ios-obj
           git checkout -- configs/picasso_defconfig
-          # The display stand-in has to exist before the kernel script tests for it, and it needs
-          # nothing but its own source, so it is built here rather than in the archive phase.
+          # The display stand-in has to exist before the kernel script tests for it, and it is built
+          # from the compile record the first pass left behind -- so it comes before the object
+          # directory is cleared, not after.
           ( cd out/picasso/tree && python3 scripts/build-arm-driver.py NativeLegacyDisplay )
+          rm -rf out/picasso/tree/build/xnu/ios-obj
           python3 ./unixnu defconfig picasso_defconfig
 
           # Second pass: the real archives, now that both inputs exist.
