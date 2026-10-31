@@ -129,10 +129,20 @@ jobs:
           # directory is cleared, not after.
           ( cd out/picasso/tree && python3 scripts/build-arm-driver.py NativeLegacyDisplay )
           rm -rf out/picasso/tree/build/xnu/ios-obj
+
+          # The Data seed: 8 GiB, packed, with the /private/var skeleton the boot tasks expect, and
+          # its volume UUID written into the defconfig so the kernel can find it. board.toml asks for
+          # a packed seed (packed_data_ramdisk = true) and sheng-data-persist=2 writes changed pages
+          # through the NativeUfs store, so the size is bounded by the packed image, not by RAM.
+          DMG=$(find out -name '044-76040-038.dmg' | head -1)
+          python3 ./scripts/make-data-seed.py --tree out/picasso/tree --gib 8 \
+            --output out/picasso/data-seed.dbr --defconfig configs/picasso_defconfig \
+            ${DMG:+--os-dmg "$DMG"}
           python3 ./unixnu defconfig picasso_defconfig
 
           # Second pass: the real archives, now that both inputs exist.
-          python3 ./unixnu build kernel payload -j 3 2>&1 | tee out/picasso/logs/actions-build.log
+          python3 ./unixnu build kernel payload -j 3 --data-ramdisk out/picasso/data-seed.dbr 2>&1 \
+            | tee out/picasso/logs/actions-build.log
 
       - name: Report kernel/payload sizes
         run: |

@@ -287,7 +287,10 @@ def main():
         extra_objects.extend(build_verified_root_policy(record, out, extra_flags))
         extra_objects.append(build_storage_bindings(out))
 
-    archive = out / ('lib' + args.component + '.a')
+    # The display archive is linked late and the build script names it that way:
+    # build/native-legacy-display/libNativeLegacyDisplay.late.a. Everything else is lib<Class>.a.
+    suffix = '.late.a' if args.component == 'NativeLegacyDisplay' else '.a'
+    archive = out / ('lib' + args.component + suffix)
     archive.unlink(missing_ok=True)
     subprocess.run(['xcrun', 'ar', 'rcs', str(archive), str(destination)] + [str(o) for o in extra_objects], check=True)
     print(f'{args.component}: ARM64/iOS 17 archive built')
