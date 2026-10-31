@@ -86,6 +86,12 @@ jobs:
           python3 ./unixnu defconfig picasso_defconfig
           python3 ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily
           mkdir -p out/picasso/logs
+          # build-native-aes-bindings.py writes build/native-aes/original-bindings.o without creating
+          # the directory first, so a clean runner fails with "clang -cc1as: error: unable to open
+          # output file ... No such file or directory" and the whole build stops. It only works on a
+          # machine where an earlier build already made that directory. The script lives in the
+          # pinned upstream tree, so the directory is created here instead of patching it.
+          mkdir -p "$UNIXNU_TREE/build/native-aes"
           python3 ./unixnu build kernel payload -j 3 2>&1 | tee out/picasso/logs/actions-build.log
 
       - name: Report kernel/payload sizes
