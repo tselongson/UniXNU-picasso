@@ -65,7 +65,7 @@ jobs:
       # kernel are cached so a rerun only rebuilds what changed. The key carries the run id so every
       # run saves, and restore-keys takes the newest matching entry.
       - name: Restore the build tree
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             device/out/picasso/tree/build
@@ -158,6 +158,18 @@ jobs:
           # Second pass: the real archives, now that both inputs exist.
           python3 ./unixnu build kernel payload -j 3 --data-ramdisk out/picasso/data-seed.dbr 2>&1 \
             | tee out/picasso/logs/actions-build.log
+
+      # Saved even when the build fails, which is when it matters: the objects and archives a failed
+      # run produced are exactly what the next attempt would otherwise rebuild from scratch.
+      - name: Save the build tree
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            device/out/picasso/tree/build
+            device/out/picasso/kernel
+            device/out/picasso/payload
+          key: picasso-build-${{ github.run_id }}
 
       - name: Report kernel/payload sizes
         run: |
