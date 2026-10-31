@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-31 15:00（16 个启动任务；卡在 init-with-data-volume）
+最后更新：2026-10-31 16:30（**40 个启动任务**；卡在 tzinit）
 
 ## 一句话
 
@@ -465,6 +465,40 @@ PICASSO EXEC[2]: /System/Library/Filesystems/apfs.fs/apfs_boot_util
 下一步方向：
 1. 查 `native_owner_data_prepare` 挂载后 `vnode_lookup("/private/var")` 的校验是否真的通过
 2. 或者在挂载后主动打印 `vfs_statfs("/private/var")` 的文件系统名和设备号
+
+### 里程碑：40 个启动任务
+
+`persistent_data = true`（对应去掉 `/chosen/ephemeral-storage`）之后，`init-with-data-volume` 通过，
+启动任务从 16 个涨到 **40 个**：
+
+```
+(mount-phase-2)         Doing boot task
+(init-with-data-volume) Doing boot task      ← 之前永远不返回
+(fixup-mobile-tmp)      Finished boot task
+(xpcroleaccountd)       Doing boot task
+(init_featureflags)     Doing boot task
+(auearlyboot)           Doing boot task
+(tzinit)                Doing boot task
+```
+
+**这条经验来自 sweet 的排障手册**：`--persistent-data` 必须默认开，否则 Data 卷只存在内存里。
+
+### 当前卡点：tzinit 找不到 system dataset
+
+```
+tzinit: Unable to locate data; resetting to system partition: No such file or directory
+tzinit: Last resort force_system_dataset() failed: No such file or directory
+Boot task failed: tzinit - exited due to exit(2)
+Panicking in 3 seconds.
+```
+
+试过两种时区数据来源，都不行：
+1. 宿主 macOS 的 `/usr/share/zoneinfo` —— 布局和版本都不同
+2. **OS 镜像自己的 `/usr/share/zoneinfo`** —— 仍然同样的错误
+
+所以问题不在时区数据本身，在 `force_system_dataset()`——它要的是 iOS 的
+`/System/Volumes/Data` firmlink 结构，而我们的根是一个 APFS 卷 + cryptex 联合挂载，
+没有这套布局。
 
 ### 剩下的路：ios-sweet 的 HFS+ 方案
 
