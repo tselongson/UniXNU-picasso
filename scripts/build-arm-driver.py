@@ -251,7 +251,7 @@ def main():
         # such file'. Building the component here writes exactly the path that step expects.
         # Produces build/native-legacy-display/libNativeLegacyDisplay.a, the path the display
         # configuration links. See the source for why the real subclass cannot be generated here.
-        'NativeLegacyDisplay': ('native-legacy-display', 'DisplayStub', 'DisplayStub.cpp', []),
+        'NativeLegacyDisplay': ('native-legacy-display', 'DisplayStub', 'NativeLegacyDisplay.cpp', []),
         # Link-only stand-ins that produce build/sheng-platform-power/libShengPlatformPower.a, the
         # exact path the kernel links. Used for the first pass only; see the stub's own comment.
         'ShengPlatformPower': ('sheng-platform-power', 'ShengPlatformPowerStub',
