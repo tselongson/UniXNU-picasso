@@ -86,6 +86,66 @@ def main():
             # short and the length check below rejected it. Rounding down to a page keeps the image
             # page aligned, which the packer requires.
             size = size // 4096 * 4096
+
+            # The Data volume is mounted at /private/var, so its root is what /private/var contains.
+            # A bare container has none of the directories launchd's boot tasks expect -- launchd
+            # cannot open its own log, syslogd cannot bind /var/run/syslog, tzinit has no data -- so
+            # the skeleton is laid down BEFORE the image is copied out.
+            #
+            # This ordering is the whole point. The copy used to happen first and the directories were
+            # created afterwards, so every seed shipped an empty container regardless of what was
+            # added here, and the boot reported the consequences one at a time.
+            mount = re.search(r'<key>mount-point</key>\s*<string>([^<]+)</string>', attached)
+            if not mount:
+                raise SystemExit(f'could not find the mount point in:\n{attached}')
+            volume_root = Path(mount.group(1))
+            # The mounted volume root is not writable by the runner user, and these directories are
+            # owned by root on a real device anyway.
+            for relative in ('run', 'db', 'db/com.apple.directoryservices', 'tmp', 'logs', 'cores',
+                             'mobile', 'mobile/Library', 'mobile/Media', 'root', 'containers',
+                             'containers/Data', 'containers/Shared', 'preferences', 'keychains',
+                             'lib', 'spool', 'folders', 'vm', 'hardware', 'audit', 'backups',
+                             'wireless', 'networkd', 'protect', 'MSUData', 'MobileSoftwareUpdate',
+                             'DeviceRegistry', 'Caches', 'log/com.apple.xpc.launchd',
+                             'db/timezone', 'db/timezone/tz'):
+                run('sudo', 'mkdir', '-p', str(volume_root / relative))
+            # tzinit rebuilds /private/var/db/timezone from the system partition and fails here, so
+            # the zoneinfo tree is copied in directly. It has to come from the OS image, not the build
+            # host: the macOS tree is a different layout and version.
+            if args.os_dmg:
+                attached_os = run('hdiutil', 'attach', str(args.os_dmg), '-readonly', '-nobrowse',
+                                  '-noautoopen', '-plist', capture=True)
+                os_mount = re.search(r'<key>mount-point</key>\s*<string>([^<]+)</string>',
+                                     attached_os)
+                if not os_mount:
+                    raise SystemExit('could not find the OS image mount point')
+                try:
+                    source_zoneinfo = Path(os_mount.group(1)) / 'usr/share/zoneinfo'
+                    if not source_zoneinfo.exists():
+                        raise SystemExit(f'{source_zoneinfo} is not in the OS image')
+                    run('sudo', 'cp', '-R', str(source_zoneinfo),
+                        str(volume_root / 'db/timezone/zoneinfo'))
+                finally:
+                    run('hdiutil', 'detach', os_mount.group(1), '-force')
+            else:
+                run('sudo', 'cp', '-R', '/usr/share/zoneinfo',
+                    str(volume_root / 'db/timezone/zoneinfo'))
+            run('sudo', 'ln', '-sfn', '/private/var/db/timezone/zoneinfo/UTC',
+                str(volume_root / 'db/timezone/localtime'))
+            print(f'data volume skeleton: {volume_root}')
+
+            # Unmount so the filesystem is flushed and the device is quiescent. Reading the raw
+            # device bypasses the page cache, so a copy taken while the volume is still mounted can
+            # miss everything just written -- which is the failure this whole block exists to avoid.
+            run('sync')
+            for attempt in range(3):
+                try:
+                    run('diskutil', 'unmount', 'force', str(volume_root))
+                    break
+                except subprocess.CalledProcessError:
+                    if attempt == 2:
+                        raise
+            run('sync')
             # Reading a raw device needs root; the macOS runners allow passwordless sudo.
             run('sudo', 'dd', f'if={raw_device}', f'of={raw}', 'bs=4096',
                 f'count={size // 4096}')
@@ -100,48 +160,26 @@ def main():
                     if attempt:
                         print(f'warning: could not detach {device}; continuing', file=sys.stderr)
 
-        # The Data volume is mounted at /private/var, so its root is what /private/var contains. A bare
-        # container has none of the directories launchd's boot tasks expect -- syslogd cannot bind
-        # /var/run/syslog, dirs_cleaner and usermanagerd have nothing to work with -- so the skeleton
-        # is laid down here, before the image is packed.
-        # The mount point comes from the attach output; VolumeName is empty for this container and
-        # joining an empty name gave /Volumes itself.
-        mount = re.search(r'<key>mount-point</key>\s*<string>([^<]+)</string>', attached)
-        if not mount:
-            raise SystemExit(f'could not find the mount point in://n{attached}')
-        volume_root = Path(mount.group(1))
-        # The mounted volume root is not writable by the runner user, and these directories are owned
-        # by root on a real device anyway.
-        for relative in ('run', 'db', 'db/com.apple.directoryservices', 'tmp', 'logs', 'cores',
-                         'mobile', 'mobile/Library', 'mobile/Media', 'root', 'containers',
-                         'containers/Data', 'containers/Shared', 'preferences', 'keychains',
-                         'lib', 'spool', 'folders', 'vm', 'hardware', 'audit', 'backups',
-                         'wireless', 'networkd', 'protect', 'MSUData', 'MobileSoftwareUpdate',
-                         'DeviceRegistry', 'Caches', 'log/com.apple.xpc.launchd',
-                         'db/timezone', 'db/timezone/tz'):
-            run('sudo', 'mkdir', '-p', str(volume_root / relative))
-        # tzinit rebuilds /private/var/db/timezone from the system partition and fails here, so the
-        # zoneinfo tree is copied in directly. It has to come from the OS image, not the build host:
-        # the macOS tree is a different layout and version, and tzinit rejected it with "Unable to
-        # locate data" exactly as it rejected an empty directory.
-        if args.os_dmg:
-            attached_os = run('hdiutil', 'attach', str(args.os_dmg), '-readonly', '-nobrowse',
-                              '-noautoopen', '-plist', capture=True)
-            os_mount = re.search(r'<key>mount-point</key>\s*<string>([^<]+)</string>', attached_os)
-            if not os_mount:
-                raise SystemExit('could not find the OS image mount point')
-            try:
-                source_zoneinfo = Path(os_mount.group(1)) / 'usr/share/zoneinfo'
-                if not source_zoneinfo.exists():
-                    raise SystemExit(f'{source_zoneinfo} is not in the OS image')
-                run('sudo', 'cp', '-R', str(source_zoneinfo), str(volume_root / 'db/timezone/zoneinfo'))
-            finally:
-                run('hdiutil', 'detach', os_mount.group(1), '-force')
-        else:
-            run('sudo', 'cp', '-R', '/usr/share/zoneinfo', str(volume_root / 'db/timezone/zoneinfo'))
-        run('sudo', 'ln', '-sfn', '/private/var/db/timezone/zoneinfo/UTC',
-            str(volume_root / 'db/timezone/localtime'))
-        print(f'data volume skeleton: {volume_root}')
+        # Verify what was actually copied rather than what was intended. The seed is packed from a raw
+        # copy, and a copy that silently omits the skeleton is indistinguishable from a working one
+        # until the boot fails three tasks later -- which is exactly what happened for several builds.
+        check = run('hdiutil', 'attach', str(raw), '-readonly', '-nobrowse', '-noautoopen',
+                    '-plist', capture=True)
+        check_mount = re.search(r'<key>mount-point</key>\s*<string>([^<]+)</string>', check)
+        if not check_mount:
+            raise SystemExit('the copied image does not mount; the seed would arrive unreadable')
+        try:
+            copied_root = Path(check_mount.group(1))
+            missing = [name for name in ('run', 'log/com.apple.xpc.launchd', 'db/timezone/zoneinfo',
+                                         'mobile', 'containers', 'tmp', 'preferences')
+                       if not (copied_root / name).exists()]
+            if missing:
+                raise SystemExit(f'the copied seed is missing {missing}; '
+                                 f'the copy did not carry the skeleton')
+            print(f'seed verified: {copied_root} carries the skeleton')
+        finally:
+            run('hdiutil', 'detach', check_mount.group(1), '-force')
+
 
         if args.defconfig:
             config = Path(args.defconfig)
