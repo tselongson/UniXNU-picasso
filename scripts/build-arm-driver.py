@@ -298,7 +298,6 @@ def main():
         # The kernel build verifies this archive against build-report.json beside it: the archive's
         # own digest, and the digest of every source it was made from. Writing the report here keeps
         # that check meaningful for the stand-in instead of leaving it to fail on a missing file.
-        import hashlib, json
         report = {
             'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
             'source_sha256': {
