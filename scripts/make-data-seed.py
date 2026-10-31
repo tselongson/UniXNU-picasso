@@ -102,7 +102,12 @@ def main():
         # container has none of the directories launchd's boot tasks expect -- syslogd cannot bind
         # /var/run/syslog, dirs_cleaner and usermanagerd have nothing to work with -- so the skeleton
         # is laid down here, before the image is packed.
-        volume_root = Path('/Volumes') / info.get('VolumeName', 'Data')
+        # The mount point comes from the attach output; VolumeName is empty for this container and
+        # joining an empty name gave /Volumes itself.
+        mount = re.search(r'<key>mount-point</key>\s*<string>([^<]+)</string>', attached)
+        if not mount:
+            raise SystemExit(f'could not find the mount point in://n{attached}')
+        volume_root = Path(mount.group(1))
         for relative in ('run', 'db', 'db/com.apple.directoryservices', 'tmp', 'logs', 'cores',
                          'mobile', 'mobile/Library', 'mobile/Media', 'root', 'containers',
                          'containers/Data', 'containers/Shared', 'preferences', 'keychains',
