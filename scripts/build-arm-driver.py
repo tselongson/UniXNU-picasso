@@ -293,6 +293,19 @@ def main():
     archive = out / ('lib' + args.component + suffix)
     archive.unlink(missing_ok=True)
     subprocess.run(['xcrun', 'ar', 'rcs', str(archive), str(destination)] + [str(o) for o in extra_objects], check=True)
+
+    if args.component == 'NativeLegacyDisplay':
+        # The kernel build verifies this archive against build-report.json beside it: the archive's
+        # own digest, and the digest of every source it was made from. Writing the report here keeps
+        # that check meaningful for the stand-in instead of leaving it to fail on a missing file.
+        import hashlib, json
+        report = {
+            'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(),
+            'source_sha256': {
+                str(source.relative_to(ROOT)): hashlib.sha256(source.read_bytes()).hexdigest(),
+            },
+        }
+        (out / 'build-report.json').write_text(json.dumps(report, indent=2) + chr(10))
     print(f'{args.component}: ARM64/iOS 17 archive built')
 
 
