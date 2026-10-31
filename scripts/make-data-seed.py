@@ -34,6 +34,8 @@ def main():
                         help='upstream tree, for drivers/DarwinBoot/Test/packed_ramdisk.py')
     parser.add_argument('--gib', type=int, default=3, help='container size in GiB')
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--os-dmg', type=Path,
+                        help='original OS image; its own /usr/share/zoneinfo is copied into the seed')
     parser.add_argument('--defconfig', type=Path,
                         help='picasso_defconfig to receive the generated volume UUID')
     args = parser.parse_args()
