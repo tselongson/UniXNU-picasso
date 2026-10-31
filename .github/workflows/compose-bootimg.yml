@@ -91,6 +91,10 @@ jobs:
           python3 ./unixnu defconfig picasso_defconfig
           python3 ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily
           python3 ./unixnu tree
+          # unixnu tree refreshes scripts/ from the pinned revision, so edits made while preparing the
+          # cache are discarded. The two adjustments the clean build needs are applied here, to the
+          # assembled tree, which is the one the build uses.
+          python3 ./scripts/ci-prepare-tree.py out/picasso/tree
           python3 ./unixnu build userdata -j 3
           # The kit lives in the assembled tree, not in the device repo, so the signer path is given
           # explicitly -- the default points at device/kits/VerifiedRoot, which does not exist.
@@ -108,6 +112,8 @@ jobs:
           python3 ./unixnu defconfig picasso_defconfig
           python3 ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily
           mkdir -p out/picasso/logs
+          # Again, because this step re-assembles the tree; the preparation is idempotent.
+          python3 ./scripts/ci-prepare-tree.py out/picasso/tree
           python3 ./unixnu build kernel payload -j 3 2>&1 | tee out/picasso/logs/actions-build.log
 
       - name: Report kernel/payload sizes
