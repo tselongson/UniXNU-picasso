@@ -47,11 +47,6 @@ extern "C" void native_legacy_display_probe(void)
 {
 }
 
-extern "C" kern_return_t native_publish_display_and_report(void)
-{
-  return 0;
-}
-
 // The keystore hooks are declared weak by the shim and tested for null before use, so an empty
 // implementation is the same as the feature being absent.
 extern "C" void picasso_keystore_probe(void)
