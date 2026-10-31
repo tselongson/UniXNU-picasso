@@ -1,6 +1,6 @@
 # 移植状态
 
-最后更新：2026-10-31 14:30（**mount-phase-1 通过，16 个启动任务启动**）
+最后更新：2026-10-31 15:00（16 个启动任务；卡在 init-with-data-volume）
 
 ## 一句话
 
@@ -444,6 +444,27 @@ com.apple.xpc.launchd| <Emergency>: Panicking in 3 seconds.
 或者我们的 Data 卷里缺这个目录结构。
 
 下一步：查 `init-with-data-volume` 有没有完成，以及 `/private/var` 的目录结构。
+
+### 当前卡点：init-with-data-volume 不返回
+
+```
+mount: data volume missing, but not required in env: 0        ← mount-phase-1 和 2 各一次
+PICASSO EXEC[2]: /System/Library/Filesystems/apfs.fs/apfs_boot_util
+(init-with-data-volume) Doing boot task                        ← 启动后没有 Finished
+```
+
+**内核挂了 Data 卷，但用户态看不见它。** `mount` 报 `data volume missing`，
+`apfs_boot_util` 被 exec 之后不返回，launchd 在等它。
+
+试过：给 seed 加 `/private/var` 目录骨架（`run`、`db`、`mobile` 等 29 个目录），
+构建日志确认 `data volume skeleton: /Volumes/Data` 创建成功，**但启动结果一字未变**。
+
+所以问题不在目录内容，在**挂载的可见性**：`native_owner_data_prepare` 的 `mount()` 没有 panic，
+说明它认为自己成功了，但用户态的 `getfsstat` 看不到。
+
+下一步方向：
+1. 查 `native_owner_data_prepare` 挂载后 `vnode_lookup("/private/var")` 的校验是否真的通过
+2. 或者在挂载后主动打印 `vfs_statfs("/private/var")` 的文件系统名和设备号
 
 ### 剩下的路：ios-sweet 的 HFS+ 方案
 
