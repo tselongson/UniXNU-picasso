@@ -29,8 +29,12 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustC
 # board; those values stay unverified here and the kernel/payload steps do not read
 # them, so the safe placeholder is kept until "unixnu build userdata" is brought up.
 [userdata]
-first_lba = 0x0
-last_lba = 0x0
+# Measured on the device, not assumed: /sys/class/block/sda34/start = 23068672 and size = 224485336
+# in 512-byte sectors with a 4096-byte logical block, so the partition starts at 0x2C0000 and spans
+# 28060667 blocks of 4096 bytes. The zeros that were here made the partition 4096 bytes long, and the
+# userdata step stopped with "the image is larger than the userdata partition".
+first_lba = 0x2C0000
+last_lba = 0x1D82BFA
 lba_bytes = 4096
 windows = [
   { name = "OS", component = "OS" },
