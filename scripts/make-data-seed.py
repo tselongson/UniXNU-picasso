@@ -18,6 +18,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -69,18 +70,25 @@ def main():
             # build. hdiutil picks it at random, so it is read here rather than assumed -- an earlier
             # build had the all-zero placeholder in the config and the mount failed with ENOENT.
             volume_uuid = info.get('VolumeUUID')
-            if not volume_uuid:
-                for suffix in ('s1', 's2'):
+            # The volume is not necessarily published by the time the disk answers, and at 1 GiB the
+            # first query came back without one and the build stopped here. Poll instead of assuming
+            # the layout is ready: the disk itself first, then its slices.
+            for attempt in range(30):
+                if volume_uuid:
+                    break
+                for name in (device, device + 's1', device + 's2'):
                     try:
-                        vinfo = plistlib.loads(run('diskutil', 'info', '-plist',
-                                                   device + suffix, capture=True).encode())
+                        vinfo = plistlib.loads(run('diskutil', 'info', '-plist', name,
+                                                   capture=True).encode())
                     except subprocess.CalledProcessError:
                         continue
                     if vinfo.get('VolumeUUID'):
                         volume_uuid = vinfo['VolumeUUID']
                         break
+                if not volume_uuid:
+                    time.sleep(1)
             if not volume_uuid:
-                raise SystemExit('could not read the Data volume UUID from diskutil')
+                raise SystemExit('could not read the Data volume UUID from diskutil after 30 attempts')
             # Copy in page-sized blocks, not whole MiB: the attached size is not a multiple of 1 MiB
             # (3011469312 bytes for a nominal 3 GiB sparse image), so a MiB count stopped 984 KiB
             # short and the length check below rejected it. Rounding down to a page keeps the image
