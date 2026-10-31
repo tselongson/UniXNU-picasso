@@ -20,14 +20,9 @@ class NativeLegacyDisplay : public IOService
 
 OSDefineMetaClassAndStructors(NativeLegacyDisplay, IOService)
 
-// The shim calls this unit's static initializer by name. An empty constructor produces no dynamic
-// initializer, so the symbol is defined outright under the name the shim expects rather than left to
-// whatever the compiler decides to emit.
-extern "C" void picasso_display_static_init(void)
-    __asm__("__GLOBAL__sub_I_NativeLegacyDisplay.cpp");
-extern "C" void picasso_display_static_init(void)
-{
-}
+// The shim calls this unit's static initializer by name. The metaclass macros already give the unit a
+// global to initialize, so clang emits __GLOBAL__sub_I_NativeLegacyDisplay.cpp itself -- defining it
+// here as well is a duplicate symbol.
 
 extern "C" IOService *native_legacy_display_allocate(void)
 {
