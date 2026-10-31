@@ -162,7 +162,13 @@ jobs:
           if [ ! -f "$DMG_DIR/044-76040-038.dmg" ]; then
             unzip -o -q "$UNIXNU_IPSW" 044-76040-038.dmg -d "$DMG_DIR"
           fi
-          python3 ./scripts/make-data-seed.py --tree "$TREE" --gib 3 --output "$DATA" \
+          # 1 GiB, not 3: NativeRamBlock switches to its "big" layout above 0x80000000 bytes
+          # (2 GiB), and that layout refuses every write while no persistent store is attached --
+          # which on this board is always, because NativeUfs is read-only. The symptom was a steady
+          # "disk5: device is not ready" once userspace started writing, and tzinit failing to create
+          # its localtime link. Under 2 GiB the driver uses the in-memory sparse layout, where writes
+          # allocate pages as needed.
+          python3 ./scripts/make-data-seed.py --tree "$TREE" --gib 1 --output "$DATA" \
             --defconfig configs/picasso_defconfig --os-dmg "$DMG_DIR/044-76040-038.dmg"
           test -s "$DATA" || { echo "Data seed was not produced"; exit 1; }
           ls -l "$DATA"
