@@ -12,6 +12,29 @@ DEVICE = Path(__file__).resolve().parent
 UPSTREAM = 'https://github.com/UniXNU/UniXNU.git'
 
 
+def ensure_aes_output_dir(root):
+    """Make build-native-aes-bindings.py create the directory it writes into.
+
+    It compiles scripts/data/native-aes-original-bindings.S straight to
+    build/native-aes/original-bindings.o and never creates that directory, so a clean checkout
+    stops with "clang -cc1as: error: unable to open output file ... No such file or directory".
+    It only succeeds where an earlier build left the directory behind, which is why it never
+    showed up locally. The script comes from the pinned upstream tree, so it is adjusted here.
+    """
+    script = root / 'scripts/build-native-aes-bindings.py'
+    if not script.is_file():
+        return
+    text = script.read_text()
+    if 'objects_dir.mkdir(parents=True' in text:
+        return
+    anchor = 'args = parser.parse_args()\n'
+    if anchor not in text:
+        return
+    script.write_text(text.replace(
+        anchor, anchor + 'args.objects_dir.mkdir(parents=True, exist_ok=True)\n', 1))
+
+
+
 def prepare(device=DEVICE, source=None):
     revision = (device / 'upstream.rev').read_text().strip()
     if not re.fullmatch('[0-9a-f]{40}', revision):
@@ -59,6 +82,9 @@ def prepare(device=DEVICE, source=None):
 
 def main():
     tree = prepare()
+    # Both places, because the build may run from the prepared cache or from its copy under out/.
+    ensure_aes_output_dir(tree)
+    ensure_aes_output_dir(DEVICE / 'out/picasso/tree')
     if sys.argv[1:] == ['--prepare']:
         print(tree)
         return
