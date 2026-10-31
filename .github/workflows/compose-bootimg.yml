@@ -150,7 +150,12 @@ jobs:
           # a packed seed (packed_data_ramdisk = true) and sheng-data-persist=2 writes changed pages
           # through the NativeUfs store, so the size is bounded by the packed image, not by RAM.
           DMG=$(find out -name '044-76040-038.dmg' | head -1)
-          python3 ./scripts/make-data-seed.py --tree out/picasso/tree --gib 8 \
+          # 2 GiB, not 8: ABL loads kernel and ramdisk into one ~57 MiB window (board.toml
+          # [bootimg.image]), so the payload has to stay under about 54 MiB. An 8 GiB container
+          # packs to 128 MiB and is truncated on load, which looks like a hang at the firmware
+          # splash. Changed pages go through the NativeUfs store (sheng-data-persist=2), so the
+          # container only has to hold the skeleton.
+          python3 ./scripts/make-data-seed.py --tree out/picasso/tree --gib 2 \
             --output out/picasso/data-seed.dbr --defconfig configs/picasso_defconfig \
             ${DMG:+--os-dmg "$DMG"}
           python3 ./unixnu defconfig picasso_defconfig
