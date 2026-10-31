@@ -22,8 +22,7 @@
 +    }
 +  }
 +  // Say which UUID was searched for and how many media answered; without this a miss is silent.
-+  IOLog ("NativeRamBlock: no volume media for UUID %s after 100 attempts
-+", uuid);
++  IOLog ("NativeRamBlock: no volume media for UUID %s after 100 attempts\\n", uuid);
 +  return 0;
 +}
 +
