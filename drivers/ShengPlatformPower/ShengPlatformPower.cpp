@@ -61,46 +61,13 @@ native_register_display_and_report(void)
   if (picasso_aks_ready) {
     printf("PICASSO_AKS ready=%u at CDC register\n", picasso_aks_ready() ? 1u : 0u);
   }
-  static bool registered = false;
-  // The subclass's metaclass and its initializer are weak: a build without the generated display
-  // archive still has to link and boot, it simply has no panel driver to register.
-  if (!&NativeLegacyDisplay_gMetaClass || !native_legacy_display_static_init) {
-    printf("NATIVE DISPLAY REG: no display class in this build; skipped\n");
-    return kOSReturnSuccess;
-  }
-  const OSMetaClass *meta = reinterpret_cast<const OSMetaClass *>(
-      &NativeLegacyDisplay_gMetaClass);
-  if (registered) {
-    const OSMetaClass *super = meta->getSuperClass();
-    printf("NATIVE DISPLAY REG: already registered meta=%p super=%s size=%u\n",
-        meta, super ? super->getClassName() : "missing",
-        meta->getClassSize());
-    return kOSReturnSuccess;
-  }
-  if (native_legacy_display_probe_ready()) {
-    const OSMetaClass *super = meta->getSuperClass();
-    printf("NATIVE DISPLAY REG: early probe already initialized meta=%p super=%s size=%u\n",
-        meta, super ? super->getClassName() : "missing",
-        meta->getClassSize());
-    registered = true;
-    return kOSReturnSuccess;
-  }
-  printf("NATIVE DISPLAY REG: kmod name=%s\n", g_kernel_kmod_info.name);
-  void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
-  printf("NATIVE DISPLAY REG: preModLoad handle=%p\n", handle);
-  if (!handle) {
-    return kOSReturnError;
-  }
-  native_legacy_display_static_init();
-  OSReturn status = OSMetaClass::postModLoad(handle);
-  const OSMetaClass *super = meta->getSuperClass();
-  printf("NATIVE DISPLAY REG: postModLoad=%d meta=%p super=%s size=%u\n",
-      status, meta, super ? super->getClassName() : "missing",
-      meta->getClassSize());
-  if (status == kOSReturnSuccess) {
-    registered = true;
-  }
-  return status;
+  // The generated display subclass cannot be produced in this build: its input,
+  // build/native-prelink/native-owner-mobile-graphics-candidate.macho, has no producer in this
+  // repository or the pinned tree. Registering it would mean binding to a metaclass that is never
+  // initialised, so the registration is skipped outright and the shim keeps only its PMGR work.
+  // drivers/DisplayStub supplies the entry points the kernel itself calls.
+  printf("NATIVE DISPLAY REG: no generated display subclass in this build; skipped\n");
+  return kOSReturnSuccess;
 }
 
 extern "C" kern_return_t
