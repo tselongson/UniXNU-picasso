@@ -117,6 +117,11 @@ jobs:
           python3 ./unixnu build kernel -j 3 2>&1 | tee out/picasso/logs/pass1.log \
             || echo "first pass did not finish; it exists to produce the kernel and the candidates"
           git checkout -- board.toml
+          # The first pass linked, and a completed link prunes the object files it no longer needs.
+          # The archive steps of the second pass run nm over those objects, so the object directory is
+          # cleared to make that pass compile them again. out/picasso/kernel/kernel.macho is outside
+          # it and stays, which is what the shim reads.
+          rm -rf out/picasso/tree/build/xnu/ios-obj
           python3 ./unixnu defconfig picasso_defconfig
 
           # Second pass: the real archives, now that both inputs exist.
