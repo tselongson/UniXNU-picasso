@@ -108,13 +108,15 @@ def main():
         if not mount:
             raise SystemExit(f'could not find the mount point in://n{attached}')
         volume_root = Path(mount.group(1))
+        # The mounted volume root is not writable by the runner user, and these directories are owned
+        # by root on a real device anyway.
         for relative in ('run', 'db', 'db/com.apple.directoryservices', 'tmp', 'logs', 'cores',
                          'mobile', 'mobile/Library', 'mobile/Media', 'root', 'containers',
                          'containers/Data', 'containers/Shared', 'preferences', 'keychains',
                          'lib', 'spool', 'folders', 'vm', 'hardware', 'audit', 'backups',
                          'wireless', 'networkd', 'protect', 'MSUData', 'MobileSoftwareUpdate',
                          'DeviceRegistry', 'Caches'):
-            (volume_root / relative).mkdir(parents=True, exist_ok=True)
+            run('sudo', 'mkdir', '-p', str(volume_root / relative))
         print(f'data volume skeleton: {volume_root}')
 
         if args.defconfig:
