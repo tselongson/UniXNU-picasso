@@ -47,6 +47,9 @@ defconfig = "picasso_defconfig"
 # would be "build-libpthread-kernel.py", "build-arm-driver.py NativeUfs" and
 # "build-arm-driver.py NativeAdreno" appended below.
 archives = [
+  # NativeAES first: build-native-aes-bindings.py archives build/native-aes/NativeAES.o, and this is
+  # the step that produces it. Without it a clean tree stops at "ar: ... NativeAES.o: No such file".
+  "build-arm-driver.py NativeAES",
   "build-native-aes-bindings.py",
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
