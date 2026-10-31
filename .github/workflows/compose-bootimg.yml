@@ -78,6 +78,25 @@ jobs:
           ls -lh "$IPSW"
           echo "UNIXNU_IPSW=$PWD/$IPSW" >> "$GITHUB_ENV"
 
+      - name: Generate the verified-root policy from the userdata image
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          UNIXNU_UNIQUE_CHIP_ID: "41a551c0dec0de01"
+        run: |
+          # build-arm-driver.py builds NativeUfs with an embedded VerifiedRoot policy and stops with
+          # "run scripts/build-picasso-verified-policy.py first" when it is absent. The policy is
+          # derived from the SHNGROOT userdata image, which is itself a build product, so the image
+          # has to exist before the kernel build: assemble the tree, build only the userdata step,
+          # write the policy into the tree the archives read, then let the kernel build run.
+          python3 ./unixnu defconfig picasso_defconfig
+          python3 ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily
+          python3 ./unixnu tree
+          python3 ./unixnu build userdata -j 3
+          python3 ./scripts/build-picasso-verified-policy.py \
+            --image out/picasso/userdata/userdata-root.img \
+            --output out/picasso/tree/build/verified-root-picasso
+          ls -l out/picasso/tree/build/verified-root-picasso
+
       - name: Build kernel + payload
         env:
           GITHUB_TOKEN: ${{ github.token }}
