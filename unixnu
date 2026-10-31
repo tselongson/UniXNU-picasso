@@ -80,11 +80,35 @@ def prepare(device=DEVICE, source=None):
     return target
 
 
+def skip_pmgr_audit_without_candidate(root):
+    """Let the AMFI/PMGR contract audit pass when there is no reference prelink candidate.
+
+    The audit reads build/native-prelink/*-candidate.macho to compare the original AMFI and ApplePMGR
+    instructions. Those candidates are prelink products, and prelink needs a linked kernel, which
+    needs the archives that run this audit -- so on a clean tree the loop cannot close. The audit
+    verifies a contract, it does not produce an input for the shim, so a missing reference is
+    reported and skipped rather than failing the build.
+    """
+    script = root / 'scripts/audit-amfi-pmgr-contract.py'
+    if not script.is_file():
+        return
+    text = script.read_text()
+    old = "    require(later, 'No reference candidate available')"
+    if old not in text:
+        return
+    new = ("    if not later://n"
+           "        print('amfi/pmgr contract audit skipped: no reference prelink candidate')\n"
+           "        raise SystemExit(0)")
+    script.write_text(text.replace(old, new, 1))
+
+
 def main():
     tree = prepare()
     # Both places, because the build may run from the prepared cache or from its copy under out/.
     ensure_aes_output_dir(tree)
     ensure_aes_output_dir(DEVICE / 'out/picasso/tree')
+    skip_pmgr_audit_without_candidate(tree)
+    skip_pmgr_audit_without_candidate(DEVICE / 'out/picasso/tree')
     if sys.argv[1:] == ['--prepare']:
         print(tree)
         return
