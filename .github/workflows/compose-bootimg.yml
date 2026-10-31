@@ -108,6 +108,19 @@ jobs:
           python3 ./unixnu defconfig picasso_defconfig
           python3 ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily
           mkdir -p out/picasso/logs
+          # First pass: the shim derives slot addresses from out/picasso/kernel/kernel.macho, and the
+          # display archive needs build/native-prelink candidates, while the kernel cannot link until
+          # both exist. Stand-ins and a smaller archive list let this pass link a kernel; the prelink
+          # step inside it then produces the candidates. That kernel is never booted.
+          sed -i '' 's|"build-sheng-platform-power.py"|"build-arm-driver.py ShengPlatformPower"|' board.toml
+          sed -i '' '/"build-native-legacy-display.py"/d' board.toml
+          python3 ./unixnu defconfig picasso_defconfig
+          python3 ./unixnu build kernel -j 3 2>&1 | tee out/picasso/logs/pass1.log \
+            || echo "first pass did not finish; it exists to produce the kernel and the candidates"
+          git checkout -- board.toml
+          python3 ./unixnu defconfig picasso_defconfig
+
+          # Second pass: the real archives, now that both inputs exist.
           python3 ./unixnu build kernel payload -j 3 2>&1 | tee out/picasso/logs/actions-build.log
 
       - name: Report kernel/payload sizes
