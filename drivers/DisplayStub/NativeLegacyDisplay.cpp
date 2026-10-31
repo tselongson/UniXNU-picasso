@@ -20,13 +20,13 @@ class NativeLegacyDisplay : public IOService
 
 OSDefineMetaClassAndStructors(NativeLegacyDisplay, IOService)
 
-// The shim calls the unit's static initializer by name. A translation unit only emits one when it has
-// a global with a constructor, so this object exists to produce the symbol.
-namespace {
-struct StaticInit {
-  StaticInit() {}
-};
-StaticInit gStaticInit;
+// The shim calls this unit's static initializer by name. An empty constructor produces no dynamic
+// initializer, so the symbol is defined outright under the name the shim expects rather than left to
+// whatever the compiler decides to emit.
+extern "C" void picasso_display_static_init(void)
+    __asm__("__GLOBAL__sub_I_NativeLegacyDisplay.cpp");
+extern "C" void picasso_display_static_init(void)
+{
 }
 
 extern "C" IOService *native_legacy_display_allocate(void)
