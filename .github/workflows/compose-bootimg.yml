@@ -60,6 +60,21 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
+      # A full kernel build here costs about twenty minutes, and almost all of it repeats work the
+      # previous run already did. The object directory, the archives built from it and the linked
+      # kernel are cached so a rerun only rebuilds what changed. The key carries the run id so every
+      # run saves, and restore-keys takes the newest matching entry.
+      - name: Restore the build tree
+        uses: actions/cache@v4
+        with:
+          path: |
+            device/out/picasso/tree/build
+            device/out/picasso/kernel
+            device/out/picasso/payload
+          key: picasso-build-${{ github.run_id }}
+          restore-keys: |
+            picasso-build-
+
       - name: Download the target IPSW
         run: |
           mkdir -p out/ipsw
