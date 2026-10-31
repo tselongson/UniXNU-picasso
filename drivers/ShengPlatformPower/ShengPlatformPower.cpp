@@ -42,11 +42,13 @@ __attribute__((weak)) void native_legacy_display_probe(void)
   printf("NATIVE LEGACY: unavailable; built without legacy display\n");
 }
 
+// Weak: the display subclass is generated from a prelink candidate that a clean tree cannot produce,
+// so this build may carry a stand-in instead. See the guard in native_register_display_and_report.
 extern "C" void native_legacy_display_static_init(void)
-    __asm__("__GLOBAL__sub_I_NativeLegacyDisplay.cpp");
+    __asm__("__GLOBAL__sub_I_NativeLegacyDisplay.cpp") __attribute__((weak));
 struct NativeLegacyMetaStorage;
 extern NativeLegacyMetaStorage NativeLegacyDisplay_gMetaClass
-    __asm("__ZN19NativeLegacyDisplay10gMetaClassE");
+    __asm("__ZN19NativeLegacyDisplay10gMetaClassE") __attribute__((weak));
 
 // Step 2b: run the owned display class's stripped static initializer inside
 // XNU's own preModLoad/postModLoad window, exactly like the runtime probe.
@@ -60,6 +62,12 @@ native_register_display_and_report(void)
     printf("PICASSO_AKS ready=%u at CDC register\n", picasso_aks_ready() ? 1u : 0u);
   }
   static bool registered = false;
+  // The subclass's metaclass and its initializer are weak: a build without the generated display
+  // archive still has to link and boot, it simply has no panel driver to register.
+  if (!&NativeLegacyDisplay_gMetaClass || !native_legacy_display_static_init) {
+    printf("NATIVE DISPLAY REG: no display class in this build; skipped\n");
+    return kOSReturnSuccess;
+  }
   const OSMetaClass *meta = reinterpret_cast<const OSMetaClass *>(
       &NativeLegacyDisplay_gMetaClass);
   if (registered) {
