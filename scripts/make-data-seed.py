@@ -119,9 +119,24 @@ def main():
                          'db/timezone', 'db/timezone/tz'):
             run('sudo', 'mkdir', '-p', str(volume_root / relative))
         # tzinit rebuilds /private/var/db/timezone from the system partition and fails here, so the
-        # zoneinfo tree is copied in directly. /usr/share/zoneinfo on the root is a symlink into this
-        # directory on a real device; an empty one leaves it dangling.
-        run('sudo', 'cp', '-R', '/usr/share/zoneinfo', str(volume_root / 'db/timezone/zoneinfo'))
+        # zoneinfo tree is copied in directly. It has to come from the OS image, not the build host:
+        # the macOS tree is a different layout and version, and tzinit rejected it with "Unable to
+        # locate data" exactly as it rejected an empty directory.
+        if args.os_dmg:
+            attached_os = run('hdiutil', 'attach', str(args.os_dmg), '-readonly', '-nobrowse',
+                              '-noautoopen', '-plist', capture=True)
+            os_mount = re.search(r'<key>mount-point</key>\s*<string>([^<]+)</string>', attached_os)
+            if not os_mount:
+                raise SystemExit('could not find the OS image mount point')
+            try:
+                source_zoneinfo = Path(os_mount.group(1)) / 'usr/share/zoneinfo'
+                if not source_zoneinfo.exists():
+                    raise SystemExit(f'{source_zoneinfo} is not in the OS image')
+                run('sudo', 'cp', '-R', str(source_zoneinfo), str(volume_root / 'db/timezone/zoneinfo'))
+            finally:
+                run('hdiutil', 'detach', os_mount.group(1), '-force')
+        else:
+            run('sudo', 'cp', '-R', '/usr/share/zoneinfo', str(volume_root / 'db/timezone/zoneinfo'))
         run('sudo', 'ln', '-sfn', '/private/var/db/timezone/zoneinfo/UTC',
             str(volume_root / 'db/timezone/localtime'))
         print(f'data volume skeleton: {volume_root}')

@@ -155,7 +155,15 @@ jobs:
           # own tests use, so the format is already the one the firmware validates.
           DATA="$TREE/.cache/firmware/target-volumes/data.dbr"
           rm -f "$DATA"
-          python3 ./scripts/make-data-seed.py --tree "$TREE" --gib 3 --output "$DATA" --defconfig configs/picasso_defconfig
+          # The OS image is needed before the seed is built: its own /usr/share/zoneinfo is what
+          # tzinit accepts, and the host's copy is not the same tree.
+          DMG_DIR="$TREE/.cache/firmware/target-volumes"
+          mkdir -p "$DMG_DIR"
+          if [ ! -f "$DMG_DIR/044-76040-038.dmg" ]; then
+            unzip -o -q "$UNIXNU_IPSW" 044-76040-038.dmg -d "$DMG_DIR"
+          fi
+          python3 ./scripts/make-data-seed.py --tree "$TREE" --gib 3 --output "$DATA" \
+            --defconfig configs/picasso_defconfig --os-dmg "$DMG_DIR/044-76040-038.dmg"
           test -s "$DATA" || { echo "Data seed was not produced"; exit 1; }
           ls -l "$DATA"
           # The seed step wrote the volume UUID into configs/picasso_defconfig, but "unixnu defconfig"
