@@ -91,6 +91,27 @@ CONFIG_XNU_OWNER_UNION_SYSTEMOS=y
   证明 `launchd_unsecure_cache=1` 的用法。
 - **限制**：虚拟机场景，有真实 iBoot 链的部分能力。
 
+### 5b. `zeroninevibedslop/UniXNU-sweet`（SM7150，iOS 16.7.16）—— 非 sheng 的成功案例
+
+状态：**UFS 根挂载、launchd、`backboardd`/`SpringBoard` 表面交换、USB CDC-ECM 遥测**。
+iOS 16 / Darwin 22，根用 `rd=ufsroot0`，**不走 APFS 封印**。
+
+它有 `docs/troubleshooting-pitfalls.md`，是这份文档之外最有价值的排障资料。摘出来的要点：
+
+| 经验 | 说明 |
+|---|---|
+| `--persistent-data` 必须默认开 | 否则 Data 卷只存在内存里，`init-with-data-volume` 永远等下去 |
+| ADT 必须有 `RAMDisk` / `TrustCache` 占位 | 缺了 `DarwinBoot` 直接报 `Compromised Data`，连内核都进不去 |
+| `/chosen/asmb` 设 `lp-sip0 = 0x6f` | 放宽 dyld 共享缓存限制 |
+| BindFS 联合挂载 | 把可写内容透明覆盖到只读的 `/System/Library/Extensions` |
+| IOKit 类不能超过 16 KB | 大结构体要改成堆指针 |
+| `weak_import` 在静态内核里会链接失败 | 要用 `__attribute__((weak))` 存根 |
+| Adreno 寄存器要相对 `SOC_BASE` 写 | ADT 里写绝对地址会映射到非法范围 |
+| GMU 时钟未解除时碰 GPU 寄存器会总线死锁 | 必须先开 GCC 的 GX/CX 供电域 |
+
+**最有用的一条**：它的 boot args 里 `rd=ufsroot0` —— 根是 UFS 上的普通文件系统，
+**没有 APFS 封印、没有 cryptex、没有根哈希**。这条路线绕开了我们卡住的大半问题。
+
 ### 6. 其他 UniXNU 移植
 
 `docs/devices/` 下有 30 多个机型。**看它们的状态表判断参考价值**：
