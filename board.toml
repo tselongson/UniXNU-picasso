@@ -255,6 +255,16 @@ kernel_args = [
   "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1",
   "sheng-vsync=60",
+  # The diagnostic log (package/BootLog.c) and the userspace export (package/BootDiagExport.c).
+  # NativeUfs in this port already carries the log window and the export region they write through,
+  # and both are compiled into the display archive, so this is the switch that turns them on: the
+  # kernel message buffer and the board page go to the last 32 MiB of userdata every two seconds,
+  # and once the system has had 120 s to settle, the unified log (/private/var/db/diagnostics, its
+  # uuidtext format strings and the crash reports) plus a half-resolution capture of the scanout
+  # are written below it. Reading them back needs a way into that window -- sheng uses its Linux
+  # payload, uke reads it from TWRP -- so this is off by default and costs nothing until then.
+  "sheng-log=1",
+  "sheng-diag-export=120",
   # State-only AppleKeyStore probe used by the display/keystore diagnostics.
   "picasso-aks-state=1",
 ]

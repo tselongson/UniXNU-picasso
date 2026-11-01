@@ -21,6 +21,7 @@ DEVICE = Path(os.environ.get("UNIXNU_DEVICE", ROOT))
 OUT = ROOT / "build/native-legacy-display"
 DRIVER = DEVICE / "drivers/NativeMobileDisplay"
 KEYSTORE = DEVICE / "drivers/AppleKeyStoreState"
+PACKAGE = DEVICE / "package"
 RECORD = ROOT / (
     "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/"
     "iokit/DEVELOPMENT/IOPlatformExpert.cpo.json"
@@ -90,7 +91,7 @@ def require(condition, message):
         raise SystemExit(message)
 
 
-def compile_source(source, destination, extra_flags):
+def compile_source(source, destination, extra_flags, cxx=True):
     record = json.loads(RECORD.read_text().strip().rstrip(","))
     command = []
     arguments = record["arguments"]
@@ -104,6 +105,10 @@ def compile_source(source, destination, extra_flags):
             index += 1
         elif value == "-Xclang" and arguments[index + 1].startswith("-W"):
             index += 1
+        elif not cxx and value.startswith("-std="):
+            # The record is a C++ compile. clang takes the language from the extension, so a .c
+            # source only has to lose the standard it would otherwise be held to.
+            pass
         elif not value.startswith("-W"):
             command.append(value)
         index += 1
@@ -111,12 +116,17 @@ def compile_source(source, destination, extra_flags):
         "-Wall",
         "-Wextra",
         "-Wno-unused-parameter",
-        "-Wno-c99-designator",
-        "-Wno-reorder-init-list",
-        "-Wno-deprecated-enum-enum-conversion",
-        "-Wno-unnecessary-virtual-specifier",
-        "-Wno-unused-variable",
-        "-Wno-unused-private-field",
+    ])
+    if cxx:
+        command.extend([
+            "-Wno-c99-designator",
+            "-Wno-reorder-init-list",
+            "-Wno-deprecated-enum-enum-conversion",
+            "-Wno-unnecessary-virtual-specifier",
+            "-Wno-unused-variable",
+            "-Wno-unused-private-field",
+        ])
+    command.extend([
         "-I",
         str(ROOT / ".cache/xnu-work/osfmk"),
         "-I",
@@ -519,6 +529,25 @@ def main():
         ["-I", str(DRIVER)],
     )
     support_objects = [support_object]
+
+    # The diagnostic log writer (boot argument sheng-log=1) and the userspace log exporter
+    # (sheng-diag-export=<seconds>). NativeUfs in this port already carries the log window and the
+    # export region they write through -- native_ufs_log_open, native_ufs_log_write,
+    # native_ufs_export_write and native_ufs_log_sync are all exported there -- and BootLog drives
+    # BootDiagExport's stream, so the two go into this archive together. Everything sheng-specific
+    # they also report (audio, touch, battery) is a weak import and simply reads as absent here.
+    for diagnostic_name in ("BootLog.c", "BootDiagExport.c"):
+        diagnostic_source = PACKAGE / diagnostic_name
+        require(diagnostic_source.is_file(), f"missing {diagnostic_source}")
+        diagnostic_object = OUT / (Path(diagnostic_name).stem + ".o")
+        compile_source(
+            diagnostic_source,
+            diagnostic_object,
+            ["-I", str(PACKAGE)],
+            cxx=False,
+        )
+        support_objects.append(diagnostic_object)
+        print(f"diagnostics: {diagnostic_name} -> {diagnostic_object.name}")
     keyevents_source = KEYSTORE / "NativeKeyStoreEvents.cpp"
     keyevents_object = OUT / "NativeKeyStoreEvents.o"
     compile_source(
