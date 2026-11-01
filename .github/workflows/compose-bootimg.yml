@@ -71,6 +71,20 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
+      # Two inputs cost minutes on every run and do not change between them: the IPSW (83 s of
+      # download) and the kernel object directory, which is most of the 350 s compile. The key
+      # carries the run id so every run saves an entry and restore-keys takes the newest, which is
+      # what makes a rebuild incremental. Everything else here is a few seconds.
+      - name: Restore the IPSW and the object directory
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            device/out/ipsw
+            device/out/picasso/tree/build
+          key: picasso-build-${{ github.run_id }}
+          restore-keys: |
+            picasso-build-
+
       - name: Download the target IPSW
         run: |
           mkdir -p out/ipsw
@@ -223,3 +237,14 @@ jobs:
             device/out/picasso/.config
           if-no-files-found: warn
           retention-days: 7
+
+      # Saved even on failure: a run that stopped at the link still leaves the objects the next
+      # attempt would otherwise rebuild from scratch.
+      - name: Save the IPSW and the object directory
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            device/out/ipsw
+            device/out/picasso/tree/build
+          key: picasso-build-${{ github.run_id }}
