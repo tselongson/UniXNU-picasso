@@ -48,15 +48,20 @@ for _name in ("RECORD", "CANDIDATE", "AUDIT_JSON"):
 # then exits with 'No reference candidate available'. The tree's build/ is recreated by the build, so
 # a copy made by CI before the build does not survive; it is staged here instead, from the device
 # repository, immediately before the audit runs.
-_staging = ROOT / "build/xnu-prelink"
-_source = DEVICE / "build/xnu-prelink"
-if _source.is_dir() and _source.resolve() != _staging.resolve():
-    _staging.mkdir(parents=True, exist_ok=True)
-    for _item in _source.iterdir():
-        _target = _staging / _item.name
-        if not _target.exists():
-            shutil.copy2(_item, _target)
-            print(f"staged {_item.name} for the audit")
+#
+# display-analysis is staged for the same reason and a later reader: build-xnu-4k-baseline.sh has an
+# inline python at line 769 that re-reads mobile-graphics-legacy-abi.json while it verifies the
+# display archive against the linked kernel, and it looks in the tree, not in this repository.
+for _directory in ("xnu-prelink", "display-analysis"):
+    _staging = ROOT / "build" / _directory
+    _source = DEVICE / "build" / _directory
+    if _source.is_dir() and _source.resolve() != _staging.resolve():
+        _staging.mkdir(parents=True, exist_ok=True)
+        for _item in _source.iterdir():
+            _target = _staging / _item.name
+            if not _target.exists():
+                shutil.copy2(_item, _target)
+                print(f"staged {_directory}/{_item.name} for the build")
 
 sys.path.insert(0, str(ROOT / "kits/NativePrelink"))
 from native_prelink import backed_offset, exports, macho  # noqa: E402
