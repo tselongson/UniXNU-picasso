@@ -246,7 +246,68 @@ Couldn't build index for com.apple.init_exclavekit: Not eligible for acceleratio
   镜像扫描那条路没被用到。
 - 下一步：见 P5。
 
-### 2026-11-01 15:45 Step 2 —— 新卡点
+### 2026-11-01 15:56 Step 3 —— **里程碑：Apple logo 出屏**
+
+- 输入：作者发来的 `picasso-handoff-20261101.zip`（48M，解压 234M）
+- 动作：`fastboot boot handoff/.../boot-logo.img`（62M，他的镜像）刷到**我们自己的机器**
+- 观测（CDC 日志 + 屏幕）：
+  ```
+  disk1s1 mount-complete volume OwnerData
+  NATIVE_OWNER_DATA mount returned error=0
+  NATIVE_OWNER_DATA done stage=4 error=0 readonly=0 device=1000002 path=/dev/disk1s1
+  load_init_program: attempting to load /sbin/launchd
+  (init-exclavekit) Doing boot task
+  (boot) Early boot complete. Continuing system boot.
+  amfid[48] triggered unnest of range ... of DYLD shared region
+  MobileGestaltHel[94] ...
+  KextLog: driverkitd is active
+  ```
+  屏幕：**Apple logo（backboardd 提交的 4 帧静态画面）**
+- 结果：**通过**。这是整台设备第一次显示 iOS 启动画面。
+
+**这一步定死了三件事：**
+
+1. **设备、刷法、userdata 都没问题。** 他的镜像在我们的机器上正常启动。
+2. **差异在构建，不在环境。** 我们的镜像停在 `init_exclavekit`，他的过去了。
+3. **超 ABL 窗口是容忍的。** 他的 payload 是 60 MiB（62914560），比窗口 54.93 MiB 大 5.3 MB，照样跑。
+   所以之前 124 MiB 失败不是「超窗口」本身，而是超太多导致 FAT 不可信。
+
+**我们缺的是什么（对比 args）**
+
+| 能力 | 他的 args | 我们的 args |
+|---|---|---|
+| UFS 根 | `native-ufs-root=1` | `native-ufs-probe=12` |
+| PMGR | `sheng-pmgr=2` | 无 |
+| 持久 Data | `sheng-data-persist=2` | `-apfs_shared_datavolume` |
+| 显示 | `offline-mobile-graphics-load=1` + `offline-legacy-*` | **无** |
+| 看门狗 | `sheng-disable-watchdogd=1` | `wdt=-1 picasso-wdt-off=1` |
+| 诊断页 | 无 | `boot-progress=2`（会盖掉 logo） |
+| CPU | `cpus=2` | `cpus=1` |
+
+对应驱动：基线 `drivers/` 只有 `ArmCpu`、`NativeUfs`；他有显示、PMGR shim、keystore 一整套。
+
+- 下一步：见 Step 4。
+
+### 2026-11-01 16:00 Step 4 计划 —— 复现他的构建
+
+**关键发现**：他的分支 `stage7/watchdog-integration` @ `861c2dc` **已经推到 GitHub**，
+就是产出这张 logo 的代码。CI 生成不出来的东西，他已经在包里给了：
+
+| 输入 | 包内路径 | 大小 |
+|---|---|---|
+| prelink 候选 | `build/native-prelink/native-owner-mobile-graphics-candidate.macho` | 52M |
+| 候选记录 | `build/native-prelink/native-owner-mobile-graphics-candidate.json` | 13M |
+| ABI 分析 | `build/display-analysis/mobile-graphics-legacy-abi.json` | 48K |
+| 编译记录 | `build/xnu-ios-obj-record/IOPlatformExpert.cpo.json` | 9.6K |
+| 显示驱动产物 | `build/native-legacy-display/*.o` | 2.5M |
+
+**做法**：把这批产物作为构建输入随仓库提交（或 CI 里解包），然后构建他的分支。
+`build-native-legacy-display.py` 需要的三处输入就齐了，`gdb-stop.json` 那条路可以绕开。
+
+**待确认**：这些候选是否与 CI 重新链接的内核兼容（候选里含内核地址）。
+若地址对不上，`build-native-legacy-display.py` 会在 `audit-mobile-graphics-legacy.py` 处报哈希/ABI 不符。
+
+### 2026-11-01 15:45 Step 2 —— 我们的镜像停在 init_exclavekit（拿到作者镜像之前的状态）
 
 - 观测：日志停在
   ```
