@@ -43,6 +43,21 @@ for _name in ("RECORD", "CANDIDATE", "AUDIT_JSON"):
             globals()[_name] = _fallback
             print(f"using the device repository copy of {_in_tree.name}")
 
+# The audit this script runs next takes no arguments: it reads ROOT/build/xnu-prelink/ directly and,
+# finding nothing, falls back to a native-owner-ufs-cpu-desktop candidate that does not exist here,
+# then exits with 'No reference candidate available'. The tree's build/ is recreated by the build, so
+# a copy made by CI before the build does not survive; it is staged here instead, from the device
+# repository, immediately before the audit runs.
+_staging = ROOT / "build/xnu-prelink"
+_source = DEVICE / "build/xnu-prelink"
+if _source.is_dir() and _source.resolve() != _staging.resolve():
+    _staging.mkdir(parents=True, exist_ok=True)
+    for _item in _source.iterdir():
+        _target = _staging / _item.name
+        if not _target.exists():
+            shutil.copy2(_item, _target)
+            print(f"staged {_item.name} for the audit")
+
 sys.path.insert(0, str(ROOT / "kits/NativePrelink"))
 from native_prelink import backed_offset, exports, macho  # noqa: E402
 
