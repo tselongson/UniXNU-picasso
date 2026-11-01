@@ -2927,7 +2927,7 @@ index 0000000..4cddf14
 +			    ud.control_ms);
 +			ud_poll_serialized();
 +			picasso_usb_watchdog_pet();
-+			if (settle_ms % 100 == 99) {
++			if (ud.control_ms % 100 == 99) {
 +				ud_dump_ep_state("settle", EP_RX);
 +			}
 +		}
