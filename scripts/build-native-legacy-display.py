@@ -109,6 +109,10 @@ def compile_source(source, destination, extra_flags, cxx=True):
             # The record is a C++ compile. clang takes the language from the extension, so a .c
             # source only has to lose the standard it would otherwise be held to.
             pass
+        elif not cxx and value == "-xc++":
+            # The record pins the language with -xc++; a .c source needs it changed, not dropped,
+            # or clang keeps compiling it as C++ and rejects every implicit void* conversion.
+            command.append("-xc")
         elif not value.startswith("-W"):
             command.append(value)
         index += 1
