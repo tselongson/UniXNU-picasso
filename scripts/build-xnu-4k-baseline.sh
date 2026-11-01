@@ -71,7 +71,11 @@ if [ "$BOOTSTRAP" != 0 ] && [ "$BOOTSTRAP" != 1 ]; then
   echo 'XNU_BOOTSTRAP must be 0 or 1' >&2
   exit 1
 fi
-BOOT_PROGRESS=${XNU_BOOT_PROGRESS:-0}
+# The unixnu driver does not pass these through: it hardcodes XNU_BOOT_PROGRESS=0 for the
+# bootstrap pass and leaves both unset for the build, so a workstation has to export them by
+# hand and a clean CI run got 0. Default from whether this repository carries the script, which
+# is what the flag actually gates.
+BOOT_PROGRESS=${XNU_BOOT_PROGRESS:-$([ -f scripts/build-boot-progress.py ] && echo 1 || echo 0)}
 if [ "$BOOT_PROGRESS" != 0 ] && [ "$BOOT_PROGRESS" != 1 ]; then
   echo 'XNU_BOOT_PROGRESS must be 0 or 1' >&2
   exit 1
@@ -84,7 +88,7 @@ if [ "$BOOT_PROGRESS" = 1 ]; then
   fi
   python3 scripts/build-boot-progress.py
 fi
-SHENG_HIDINPUT=${XNU_SHENG_HIDINPUT:-0}
+SHENG_HIDINPUT=${XNU_SHENG_HIDINPUT:-$([ -f scripts/build-sheng-hid-input.py ] && echo 1 || echo 0)}
 if [ "$SHENG_HIDINPUT" != 0 ] && [ "$SHENG_HIDINPUT" != 1 ]; then
   echo 'XNU_SHENG_HIDINPUT must be 0 or 1' >&2
   exit 1
