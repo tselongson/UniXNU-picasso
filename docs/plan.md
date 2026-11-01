@@ -401,6 +401,87 @@ ValueError: Persistent UFS store must remain disabled
 
 **待作者回答**：他是否真的进过界面，还是同样只有 logo。这决定上面两件事是「照抄做法」还是「从零做」。
 
+### 2026-11-01 17:30 Step 8 —— 找到「进界面」的正确参照：uke，不是 sheng
+
+用户提示「看看 sheng 是怎么做的」。查证结果**和预期不同**，但更关键：
+
+| 设备 | 状态 | 依据 |
+|---|---|---|
+| `sheng`（小米平板 6S Pro，SM8550） | `implemented` | 走 GOP 静态帧 + DPU 探针，未见用户态呈现证据 |
+| `sirius` | `implemented` | `NativeMobileDisplay.cpp` 文件头写明「Prototype only，No registry publication」 |
+| **`uke`（小米平板 7，SM7675）** | **`device-verified`** | **「put real UI on screen (white lock screen, home indicator, swipe prompt)」** |
+
+**uke 是唯一有界面证据的端口**，而且记录了根因：
+
+> 2026-10-28 root cause: those frozen-screen runs never set `offline-legacy-base-present=1`,
+> so presentBase returned before doing anything and never logged
+
+症状 `swap accepted=0 reason=2 surface=0` —— 与我们「停在 logo」完全一致。
+
+**结论：界面走的是 legacy display 自己的 present 路径，不是 DPU。** 这推翻了 Step 7 里
+「需要新写 DPU 驱动」的判断，范围大幅缩小。
+
+**picasso 与 uke 的差距精确到函数**：
+
+| 函数 | uke | picasso |
+|---|---|---|
+| `native_legacy_prepare_scanout` | ✅ | ✅ |
+| `native_legacy_pm_observed` | ✅ | ✅ |
+| **`native_legacy_present_base`** | ✅ | ❌ 完全没有 |
+
+**移植受阻**：`native_legacy_present_base` 在 uke 仓库只有声明和调用；它 pin 的
+`GopFramebuffer@cf3b429` 没有定义；`git log -S` 查遍该组件全部历史也从未出现。**实现未公开。**
+
+**机制已从 uke 的记录还原**（可作为自研依据）：
+1. 拦截 `IOMobileFramebufferUserClient` 的 selector 5（SwapEnd）
+2. 从 transaction record 的 `0x14c`（层掩码）+ `0x9c+layer*4`（surface ID）取本帧 surface
+3. 原 SwapEnd 成功后调用 present，把该 surface 拷到 framebuffer
+4. 特例：surface ID 等于默认 surface 时直接用 `fb+0x1618`
+
+### 2026-11-01 17:42 Step 9 —— silenzio 进锁屏了
+
+用户反馈：silenzio 已进锁屏。**这证明 picasso 也能出界面**，进一步确认 Step 8 的判断。
+
+查其全部远程分支，**代码尚未推送**：
+
+| 分支 | 最新提交 |
+|---|---|
+| `stage7/watchdog-integration` | `861c2dc` 11-01 10:04（我们的基准） |
+| `pr/picasso-boot-timer-dispatch` | `af12daf` 10-30 |
+| `pr/picasso-cdc-control-window` | `56b7e59` 10-29 |
+| `codex/picasso-usb-console` | `99c9a18` 10-26 |
+
+对方答应稍后提 PR。
+
+### 2026-11-01 17:45 Step 10 —— 移植官方诊断工具（代码侧完成）
+
+来源：`sheng` 的 `package/BootLog.c` + `package/BootDiagExport.c`（官方诊断实现）。
+
+**为什么可行**：picasso 的 `NativeUfs` **已经带有**整套机制——
+`native_ufs_log_open` / `log_write` / `export_write` / `log_sync` 全部导出，
+日志窗口和 export 区在 1210–1364 行已描述。缺的只是消费端两个文件。
+
+**做了什么**
+- 拷贝 `BootLog.c`、`BootDiagExport.c`、`ShengAudioAbi.h` 到 `package/`
+- `compile_source` 增加 `cxx` 参数：去掉 `-std=`，让 clang 按扩展名判语言（编译记录是 C++ 的）
+- 两个文件编入显示归档
+- `boot_log_tick` 挂在 `vsyncTick` 的**提前返回之前**——compositor 卡住（无客户端要 vsync）时日志仍要写
+- 参数 `sheng-log=1`、`sheng-diag-export=120`
+
+**导出内容**（这才是关键）
+```
+/private/var/db/diagnostics  +  uuidtext      用户态统一日志
+/private/var/mobile/Library/Logs/CrashReporter
+.../com.apple.backboardd/m2v/prime.log, frames.trace, shadow.log, cpu.profile
+screen.bgrx                                   面板实际扫描输出的半分辨率截图
+```
+
+**已知限制**：读回需要进入 UFS 窗口。sheng 用自己的 Linux payload
+（`package/linux-log`，独立用户态），uke 从 TWRP 用 `dd` 读。**这一步尚未接通。**
+
+- 状态：代码侧完成，构建验证中
+- 下一步：等 silenzio 的 PR；同时评估 picasso 走 TWRP 读窗口的可行性
+
 ### 2026-11-01 15:45 Step 2 —— 我们的基线停在 init_exclavekit（拿到作者镜像之前）
 
 - 观测：日志停在
