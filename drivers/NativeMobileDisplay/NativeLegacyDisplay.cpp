@@ -42,11 +42,12 @@ extern "C" void native_legacy_vsync_notify(void *display,uint64_t timestamp,uint
 // The unchanged original setDisplayRefreshProperties: publishes IOMFBDisplayRefresh from slot 301 (getRefreshAttributes below).
 extern "C" bool native_legacy_set_refresh_properties(void *display);
 extern "C" void native_legacy_vsync_observed(unsigned event,unsigned hz);
-// The diagnostic log (package/BootLog.c, boot argument sheng-log=1) is driven from the refresh
+// The userspace log export (package/PicassoDiagExport.c, boot argument sheng-diag-export) is
+// driven from the refresh
 // tick rather than from a timer of its own: the work loop already runs at sheng-vsync Hz and the
 // log decides for itself whether enough time has passed. Weak, because a build without the file
 // must still link.
-extern "C" void boot_log_tick(unsigned now) __attribute__((weak_import));
+extern "C" void picasso_diag_tick(unsigned now) __attribute__((weak_import));
 extern "C" uint64_t mach_continuous_time(void);
 class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     OSDeclareDefaultStructors(NativeLegacyDisplay)
@@ -91,7 +92,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         vsyncArmed=false;
         // Before the early returns: the log has to keep writing when no client is asking for
         // vsync, which is exactly the state a stalled compositor leaves the display in.
-        if(boot_log_tick)boot_log_tick((unsigned)(mach_absolute_time()/1000000ull));
+        if(picasso_diag_tick)picasso_diag_tick((unsigned)(mach_absolute_time()/1000000ull));
         if(!vsyncTimer)return;
         if(!vsyncWanted()){native_legacy_vsync_observed(2,vsyncHz);return;}
         const uint64_t now=mach_absolute_time();

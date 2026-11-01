@@ -536,7 +536,7 @@ def main():
     # native_ufs_export_write and native_ufs_log_sync are all exported there -- and BootLog drives
     # BootDiagExport's stream, so the two go into this archive together. Everything sheng-specific
     # they also report (audio, touch, battery) is a weak import and simply reads as absent here.
-    for diagnostic_name in ("BootLog.c", "BootDiagExport.c"):
+    for diagnostic_name in ("BootDiagExport.c", "PicassoDiagExport.c"):
         diagnostic_source = PACKAGE / diagnostic_name
         require(diagnostic_source.is_file(), f"missing {diagnostic_source}")
         diagnostic_object = OUT / (Path(diagnostic_name).stem + ".o")
