@@ -212,6 +212,20 @@ jobs:
             2>&1 | tee out/picasso/logs/bootimg.log
           ls -lh out/picasso/boot/boot.img
 
+          # The boot partition on this device is 134217728 bytes. An image larger than that
+          # is not rejected by the build, only by fastboot -- 'Error flashing partition :
+          # Volume Full' -- and the phone then keeps running the previous boot image, which
+          # looks exactly like a hang on the firmware splash. Fail here instead.
+          python3 - <<'PY'
+          import os, sys
+          path = 'out/picasso/boot/boot.img'
+          size = os.path.getsize(path)
+          limit = 134217728
+          print(f'boot.img {size} bytes, partition {limit} bytes, slack {limit - size}')
+          if size > limit:
+              sys.exit(f'boot.img exceeds the boot partition by {size - limit} bytes')
+          PY
+
       - name: Upload boot image + kernel + payload + logs
         if: always()
         uses: actions/upload-artifact@v4

@@ -161,7 +161,15 @@ volume = "PICASSOESP"
 # The 226 MiB carrier with a 128 MiB Data seed faults in ArmCpuDxe before XNU.
 # Keep the proven 128 MiB carrier; larger mutable storage must come from a
 # different backend rather than inflating the early boot ramdisk.
-size_mib = 128
+#
+# 124, not 128: this device's boot partition is exactly 134217728 bytes, and boot.img is
+# the payload plus a 4 KiB header and the 2.08 MiB BootShim in the kernel slot. A 128 MiB
+# carrier made boot.img 136409088 bytes, so fastboot refused it outright --
+# 'Error flashing partition : Volume Full' -- and the phone kept booting whatever was
+# already there, which is why the screen stayed on the firmware splash with no console.
+# 124 MiB leaves about 1.9 MiB of slack, and the FAT has ~74 MiB free after the kernel,
+# so nothing the payload carries is lost.
+size_mib = 124
 trust_cache_sha256 = [
   "7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7",
 ]
