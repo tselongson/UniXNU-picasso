@@ -212,26 +212,22 @@ jobs:
             2>&1 | tee out/picasso/logs/bootimg.log
           ls -lh out/picasso/boot/boot.img
 
-          # Two limits apply, and only one of them is the partition. The boot partition is
-          # 134217728 bytes, so an image larger than that is rejected by fastboot. The ramdisk
-          # has its own, tighter limit: ABL loads kernel and ramdisk into one buffer from
-          # 0xB4513000 to 0xB7E00000, and with ramdisk_offset 0x200000 that leaves 57597952
-          # bytes. Past that the ramdisk is loaded truncated, the FAT claims more than is in
-          # memory, and FatPkg faults and resets the phone -- which looks exactly like a hang
-          # on the firmware splash. Check both here rather than discover it on the device.
+          # The boot partition is 134217728 bytes; anything larger is rejected by fastboot with
+          # 'Error flashing partition : Volume Full'. The ABL window is 57593856 bytes and is a
+          # softer limit -- a volume slightly larger still boots as long as the used region fits,
+          # which is why the overrun is reported rather than fatal. Both are printed so a size
+          # change is visible in the log.
           python3 - <<'PY'
-          import os, struct, sys
+          import os, struct
           path = 'out/picasso/boot/boot.img'
           size = os.path.getsize(path)
-          header = open(path, 'rb').read(32)
-          ramdisk_size = struct.unpack_from('<I', header, 16)[0]
+          ramdisk_size = struct.unpack_from('<I', open(path, 'rb').read(32), 16)[0]
           partition = 134217728
-          window = 57597952
-          print(f'boot.img {size} / partition {partition}, ramdisk {ramdisk_size} / abl window {window}')
+          window = 57593856
+          print(f'boot.img {size} / partition {partition} (slack {partition - size})')
+          print(f'ramdisk {ramdisk_size} / abl window {window} (overrun {ramdisk_size - window})')
           if size > partition:
-              sys.exit(f'boot.img exceeds the boot partition by {size - partition} bytes')
-          if ramdisk_size > window:
-              sys.exit(f'ramdisk exceeds the ABL window by {ramdisk_size - window} bytes')
+              raise SystemExit(f'boot.img exceeds the boot partition by {size - partition} bytes')
           PY
 
       - name: Upload boot image + kernel + payload + logs

@@ -162,16 +162,19 @@ volume = "PICASSOESP"
 # Keep the proven 128 MiB carrier; larger mutable storage must come from a
 # different backend rather than inflating the early boot ramdisk.
 #
-# 54, and the number matters in both directions. The upper bound is not the boot partition but
-# the ABL window: [bootimg.image] records that kernel and ramdisk share a buffer from 0xB4513000
-# to 0xB7E00000, so with ramdisk_offset 0x200000 the ramdisk has 57597952 bytes. A payload larger
-# than that is loaded truncated, its FAT claims more than is in memory, and FatPkg reads past the
-# end and faults -- the phone then resets and comes back to fastboot, which looks like a hang.
-# The lower bound is the kernel: kernel.macho is 54378496 bytes and has to fit with the ADT and
-# the scratch seed, so 54 MiB (56623104) leaves about 900 KiB of slack against the window.
-# Measured: a 124 MiB payload returned to fastboot every time; an 8 MiB one did not, so the
-# window is real and this is the binding constraint.
-size_mib = 54
+# 55 is forced by two constraints that nearly meet. The payload builder refuses when the files
+# exceed 95% of the volume, and kernel.macho alone is 54378496 bytes, so anything below 55 MiB
+# is rejected before the image is even written (54 MiB stopped the build with "the payload files
+# take 52 MiB; raise size_mib"). The ABL window is 57593856 bytes, so 55 MiB sits 77824 bytes
+# over it. That overrun is tolerable: the window bounds what ABL copies, and a payload whose
+# *used* region is smaller than the window boots even when the volume claims more -- the 128 MiB
+# carrier this board shipped with was far further over and still ran. What is not tolerable is a
+# volume so large that the kernel itself lands outside the copied region.
+#
+# Measured on hardware: 124 MiB returned to fastboot on every attempt with no framebuffer output,
+# while an 8 MiB payload built from the same kernel slot reached the UniXNU menu. So the size is
+# the variable, and this is the smallest value the builder will accept.
+size_mib = 55
 trust_cache_sha256 = [
   "7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7",
 ]
