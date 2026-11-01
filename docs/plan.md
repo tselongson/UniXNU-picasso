@@ -307,7 +307,59 @@ Couldn't build index for com.apple.init_exclavekit: Not eligible for acceleratio
 **待确认**：这些候选是否与 CI 重新链接的内核兼容（候选里含内核地址）。
 若地址对不上，`build-native-legacy-display.py` 会在 `audit-mobile-graphics-legacy.py` 处报哈希/ABI 不符。
 
-### 2026-11-01 15:45 Step 2 —— 我们的镜像停在 init_exclavekit（拿到作者镜像之前的状态）
+### 2026-11-01 17:10 Step 5 —— **里程碑：我们自己构建的镜像跑到 Early boot complete**
+
+- 分支：`stage7-wd`（作者的 `861c2dc` + 我们的 CI 修复），构建 `41290575899`
+- 产物：`picasso-bootimg-208`，payload 62,914,560 字节（与他的一致），kernel 54,448,128
+- 验证方式（**省掉一整轮构建**）：把我们的 payload 用 `rebuild-bootimg.py` 换进他的
+  `boot-logo.img`（两者尺寸完全相同 62,914,560），得到 `boot-ours.img`，直接刷
+- 观测：
+  ```
+  NATIVE_OWNER_DATA mount returned error=0
+  (init-exclavekit) Doing boot task
+  (boot) Early boot complete. Continuing system boot.
+  amfid[48] triggered unnest of range ... of DYLD shared region
+  KextLog: driverkitd is active
+  ```
+  与他的镜像**完全同位置**
+- 结果：**通过**。不再依赖他手打包的镜像。
+
+**打通 CI 的四个提交（按顺序）**
+
+| 提交 | 解决什么 |
+|---|---|
+| `386c5bf` | 提交 `build/native-prelink` 等产物（CI 生成不出来） |
+| `bd9d112` | 脚本在树里找不到时回退到设备仓库；候选同时放 `xnu-prelink/` |
+| `b23bc26` | 审计前把候选暂存进树（审计只认树里的路径） |
+| `3933e44` | 已有 ABI 分析时跳过审计（它只是生成那份 JSON） |
+| `7ddbe01` | 同时暂存 `display-analysis`（`build-xnu-4k-baseline.sh:769` 也要读） |
+| `47f9765` | 打包步骤无条件执行，校验失败也能拿到 boot.img |
+| `adbe818` | 缓存 IPSW 与 objdir |
+
+**已知的非致命问题**
+
+```
+ValueError: Persistent UFS store must remain disabled
+```
+`check-picasso-data-artifacts.py` 与 `board.toml` 的 `sheng-data-persist=2` 不一致。
+不影响镜像（payload 和 kernel 都正常），但会挡住后续校验步骤，待查。
+
+### 2026-11-01 16:40 Step 6 计划 —— 编译提速
+
+实测耗时（run `41289081487`，总计约 9.5 分钟）：
+
+| 步骤 | 耗时 |
+|---|---|
+| Build kernel + payload | 350 s |
+| Download the target IPSW | 83 s |
+| Install host tools | 46 s |
+| Prepare APFS Data | 44 s |
+| 其余合计 | ~40 s |
+
+已加 `adbe818`：缓存 IPSW + objdir（带 run id，`restore-keys` 取最新，保存用 `if: always()`）。
+预期降到约 3 分钟。若 objdir 缓存因树重组失效，下一步上 **ccache**（内容哈希，更稳）。
+
+### 2026-11-01 15:45 Step 2 —— 我们的基线停在 init_exclavekit（拿到作者镜像之前）
 
 - 观测：日志停在
   ```
