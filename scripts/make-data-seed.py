@@ -33,9 +33,13 @@ def volume_uuid_from_image(path):
     """Read the APFS volume UUID out of a raw image, without asking macOS.
 
     The volume superblock is an object whose magic 'APSB' sits 32 bytes in, and apfs_vol_uuid is
-    260 bytes into that object, so the UUID is 228 bytes after the magic. diskutil reports this
-    for some container sizes and nothing at all for others -- a 1 GiB seed stopped two builds --
-    while the image always has it.
+    at offset 0xF0 (240) of that object -- 208 bytes after the magic. That offset is the whole
+    difficulty: reading at 260 instead returns the tail of the checkpoint descriptor area, which
+    parses as a UUID but is not one, and the kernel then finds no IOMedia carrying it and the
+    Data mount fails with ENOENT.
+
+    diskutil reports this for some container sizes and nothing at all for others, so this is the
+    source that does not depend on how macOS happens to have published the volume.
     """
     import mmap
     import uuid as uuidlib
@@ -47,8 +51,8 @@ def volume_uuid_from_image(path):
             while position != -1 and seen < 64:
                 start = position - 32
                 if start >= 0:
-                    raw = mapped[start + 260:start + 276]
-                    if len(raw) == 16 and any(raw):
+                    raw = mapped[start + 240:start + 256]
+                    if len(raw) == 16 and any(raw) and raw != b'\0' * 16:
                         return str(uuidlib.UUID(bytes=bytes(raw))).upper()
                 seen += 1
                 position = mapped.find(b'APSB', position + 1)
@@ -204,12 +208,24 @@ def main():
                 str(volume_root / 'db/timezone/localtime'))
             print(f'data volume skeleton: {volume_root}')
 
-            # By now the volume is mounted, so asking the mount point is the most reliable source
-            # there is: the container has published the volume and its UUID.
+            # The mounted volume is the one target that always answers: `diskutil info` on the
+            # device reports nothing useful for this container size, and `apfs list` on the device
+            # did not either, but asking the mount point is a different code path and is what a
+            # person would type. It goes first, before anything that guesses from the image.
+            if not volume_uuid:
+                try:
+                    mounted_info = plistlib.loads(
+                        run('diskutil', 'info', '-plist', str(volume_root), capture=True).encode()
+                    )
+                    if mounted_info.get('VolumeUUID'):
+                        volume_uuid = mounted_info['VolumeUUID']
+                        print(f'data volume uuid (mount point info): {volume_uuid}')
+                except subprocess.CalledProcessError:
+                    pass
             if not volume_uuid:
                 volume_uuid = apfs_list_uuid(str(volume_root))
                 if volume_uuid:
-                    print(f'data volume uuid (mount point): {volume_uuid}')
+                    print(f'data volume uuid (mount point apfs list): {volume_uuid}')
 
             # Unmount so the filesystem is flushed and the device is quiescent. Reading the raw
             # device bypasses the page cache, so a copy taken while the volume is still mounted can
