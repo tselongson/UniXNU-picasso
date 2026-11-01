@@ -142,6 +142,31 @@ keybag 任务是否 `Finished`；`UMD_INIT` 是否还报 persona 失败。
 
 ---
 
+### P5 · 启动停在 init_exclavekit —— 进行中
+
+**现象**
+```
+Couldn't build index for com.apple.init_exclavekit: Not eligible for acceleration
+```
+之后日志静止（92 KB 后不再增长），设备不 panic、CDC 心跳正常。
+
+**怎么观测**
+- CDC 日志最后一条非噪声行
+- `grep -av PICASSO | grep -av "NativeUfs blk"` 过滤心跳后看尾部
+- 数 `Event: <name>` 去重后的启动任务个数（当前 18）
+
+**候选原因（未验证，按可能性排序）**
+1. `exclaves-boot` / `init_exclavekit` 在等 Exclave 硬件或 SEP，而本机**没有 SEP**
+2. launchd 在等某个 `Doing` 后没有 `Finished` 的任务
+3. 某个守护进程 exec 后卡住，launchd 阻塞
+
+**怎么修（预案）**
+先区分「等」还是「卡」：用 `init_exclavekit` 的日志时间戳和后续心跳时间戳对比。
+如果确认是 Exclave/SEP，考虑在 seed 或 launchd plist 里绕过该任务；
+如果是阻塞，找出被等的那一项。
+
+---
+
 ## 4. 步骤计划
 
 ### Step 1 —— 验证 Data 卷（进行中）
@@ -199,3 +224,40 @@ keybag 任务是否 `Finished`；`UMD_INIT` 是否还报 persona 失败。
 - 观测：待构建 `41283484096` 完成
 - 结果：进行中
 - 下一步：刷前跑 `check-seed.sh` 对比 UUID
+
+### 2026-11-01 15:40 Step 1 —— **通过**
+
+- 提交：`51f23d6` + `5739637`，构建 `41283484096`
+- 刷前本地验证（关键，省了一次瞎刷）：
+  ```
+  构建日志 data volume uuid (mount point info): 288B3D01-668A-404C-AEA1-3E9190A95600
+  check-seed.sh  seed volume uuid:              288B3D01-668A-404C-AEA1-3E9190A95600
+  ```
+  两条完全一致 —— 这是第一次配置值与 seed 真实值对上。
+- 观测：
+  - **`offline scratch Data mount failed` 消失，不再 panic**
+  - `PICASSO EXEC[0]/[1]`：launchd 正常 exec
+  - `mount: data volume missing` 消失
+  - 启动任务从 14 个涨到 **18 个**，新增：`dirs_cleaner`、`init_featureflags`、
+    `xpcroleaccountd`、`auearlyboot`、`exclaves-boot`
+  - `auearlyboot` 走完（`End Early Boot` / `Exiting Early Boot`）
+  - launchd 缓存发送成功（`Cache sent to launchd successfully`）
+- 结果：**通过**。P1、P2 都过了。`diskutil info /Volumes/Data` 是有效的 UUID 来源，
+  镜像扫描那条路没被用到。
+- 下一步：见 P5。
+
+### 2026-11-01 15:45 Step 2 —— 新卡点
+
+- 观测：日志停在
+  ```
+  Couldn't build index for com.apple.init_exclavekit: Not eligible for acceleration
+  ```
+  之后不再增长（92 KB 后静止）。设备仍活着（CDC 心跳正常），没有 panic。
+- 同时存在但不致命的错误：
+  ```
+  tzinit: Unable to locate data; resetting to system partition   （之后自行恢复）
+  failed to load kernel prng seed: (-76) (2) No such file or directory
+  failed to load virtual random: (-147) (-536870212)
+  ```
+- 结果：进行中，见 P5。
+- 下一步：查 `init_exclavekit` 与 `exclaves-boot` 是不是在等某个东西。
