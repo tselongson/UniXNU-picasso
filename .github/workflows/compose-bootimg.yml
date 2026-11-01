@@ -114,6 +114,15 @@ jobs:
         run: |
           python3 ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily
           mkdir -p out/picasso/logs
+          # The display archive is built from inputs that only exist on a workstation. Its
+          # build-native-legacy-display.py reads
+          # build/native-prelink/native-owner-mobile-graphics-candidate.macho, the ABI analysis in
+          # build/display-analysis/ and the compile record in build/xnu/ios-obj/, and none of those
+          # is produced by a clean build -- the candidate comes from a hand-run prelink against a
+          # GDB session's stop state. They are committed under build/ for this reason, and are
+          # copied into the tree the build actually reads.
+          mkdir -p "$UNIXNU_TREE/build"
+          cp -R build/. "$UNIXNU_TREE/build/"
           python3 ./unixnu build kernel payload -j 3 --trust-cache out/picasso/original-static-system.bundle --data-ramdisk out/picasso/ram-data/data.dbrdisk 2>&1 | tee out/picasso/logs/actions-build.log
 
       - name: Verify Data seed, compiled UUID and payload handoff
