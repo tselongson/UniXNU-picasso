@@ -165,11 +165,18 @@ def main():
             # The mounted volume root is not writable by the runner user, and these directories are
             # owned by root on a real device anyway.
             for relative in ('run', 'db', 'db/com.apple.directoryservices', 'tmp', 'logs', 'cores',
-                             'mobile', 'mobile/Library', 'mobile/Media', 'root', 'containers',
+                             'mobile', 'mobile/Library', 'mobile/Library/Caches',
+                             'mobile/Library/Keychains', 'mobile/Media', 'root', 'containers',
                              'containers/Data', 'containers/Shared', 'preferences', 'keychains',
                              'lib', 'spool', 'folders', 'vm', 'hardware', 'audit', 'backups',
                              'wireless', 'networkd', 'protect', 'MSUData', 'MobileSoftwareUpdate',
                              'DeviceRegistry', 'Caches', 'log/com.apple.xpc.launchd',
+                             # keybags is where MKB_INIT keeps systembag.kb. It was missing, and the
+                             # boot reported it three ways: "Could not open
+                             # /private/var/keybags/systembag.kb: No such file or directory", then
+                             # usermanagerd failing to write usersession.kb and persona.kb under the
+                             # same tree. The directory is not one MKB creates for itself.
+                             'keybags',
                              'db/timezone', 'db/timezone/tz'):
                 run('sudo', 'mkdir', '-p', str(volume_root / relative))
             # tzinit rebuilds /private/var/db/timezone from the system partition and fails here, so
