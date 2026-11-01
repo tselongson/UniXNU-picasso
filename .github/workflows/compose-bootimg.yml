@@ -92,8 +92,13 @@ jobs:
         with:
           path: device/out/picasso/tree/build
           key: picasso-obj-${{ github.sha }}-${{ github.run_id }}
+          # The commit is in the key so a run cannot pick up objects built from different sources,
+          # but the prefix-only fallback is kept: this repository's build script has no clean-tree
+          # bootstrap (the first link runs without the archives and fails on their symbols), so a
+          # run with no object directory at all cannot finish. Falling back to the newest entry of
+          # any commit is what makes a fresh checkout buildable here.
           restore-keys: |
-            picasso-obj-${{ github.sha }}-
+            picasso-obj-
 
       - name: Download the target IPSW
         run: |
