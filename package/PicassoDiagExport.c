@@ -25,6 +25,12 @@ extern int native_ufs_log_open(uint64_t *firstLba, uint64_t *blocks, const char 
 extern int boot_diag_stream(int (*emit)(const void *, uint32_t, void *), void *arg)
     __attribute__((weak_import));
 
+// BootDiagExport also captures the panel's scanout into screen.bgrx, through a virtual address the
+// display driver publishes in the sheng port. This port's driver does not publish one, and a
+// weak_import reference does not survive a static kernel link, so it is defined here as zero:
+// BootDiagExport checks it and skips the screenshot, while the log walk itself is unaffected.
+volatile uint64_t native_gop_virtual = 0;
+
 static uint8_t diag_block[DIAG_BLOCK];
 static uint32_t diag_fill;          // bytes pending in diag_block
 static uint64_t diag_block_index;   // next block to write
