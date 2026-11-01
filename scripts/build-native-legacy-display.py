@@ -28,6 +28,21 @@ RECORD = ROOT / (
 CANDIDATE = ROOT / "build/native-prelink/native-owner-mobile-graphics-candidate.macho"
 AUDIT_JSON = ROOT / "build/display-analysis/mobile-graphics-legacy-abi.json"
 
+# None of the three inputs below is produced by a clean build. The candidate comes from running
+# the prelink against the stop state of a hand-driven GDB session; the ABI analysis and the compile
+# record come out of the same workstation. A runner has none of them, and copying them into the
+# tree does not help either: the tree's build/ is recreated by the build itself, which is why the
+# first CI attempt still reported 'missing original candidate'. They are committed in the device
+# repository under build/, so each path is resolved in the tree first and in the device repository
+# second.
+for _name in ("RECORD", "CANDIDATE", "AUDIT_JSON"):
+    _in_tree = globals()[_name]
+    if not _in_tree.is_file():
+        _fallback = DEVICE / _in_tree.relative_to(ROOT)
+        if _fallback.is_file():
+            globals()[_name] = _fallback
+            print(f"using the device repository copy of {_in_tree.name}")
+
 sys.path.insert(0, str(ROOT / "kits/NativePrelink"))
 from native_prelink import backed_offset, exports, macho  # noqa: E402
 
