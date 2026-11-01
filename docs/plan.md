@@ -359,6 +359,48 @@ ValueError: Persistent UFS store must remain disabled
 已加 `adbe818`：缓存 IPSW + objdir（带 run id，`restore-keys` 取最新，保存用 `if: always()`）。
 预期降到约 3 分钟。若 objdir 缓存因树重组失效，下一步上 **ccache**（内容哈希，更稳）。
 
+### 2026-11-01 17:20 Step 7 —— **定位「进系统」的真实门槛：显示设备与 IOSurface**
+
+- 输入：`stage7-wd` 构建的 payload，本地改 `cpus=2` 重打包（`work/rebuild-bootimg.py`）
+- 墙钟时间线（`work/console-timeline.py`，`cpus=2`）：
+
+  | 时刻 | 事件 |
+  |---|---|
+  | 62.9 s | Data 卷挂载成功 |
+  | 63.0 s | launchd 启动 |
+  | 126.8 s | mount-phase-1 完成（这一段 64 s） |
+  | 136.0 s | Early boot complete |
+  | 166.1 s | driverkitd 激活 → logo |
+
+- **用户态其实已经起来了**（关键证据）：
+  ```
+  PICASSO_SYNC link ... name=SpringBoard ... dest_name=launchd
+  PICASSO_SYNC link ... name=backboardd ... dest_name=runningboardd
+  ```
+  SpringBoard、backboardd、runningboardd 都在运行。
+
+- 面板已映射，logo 画在上面：
+  ```
+  PICASSO_DISPLAY mapped ok=1 base=a0000000 bytes=9e3400 width=1080 height=2400 stride=4320 depth=32 scale=2
+  ```
+
+- **渲染链断在两处**：
+  ```
+  IOMobileFramebufferLegacy::start: provider was not AppleARMIODevice.
+  backboardd ... provider=IOMobileFramebuffer match=<absent>
+  backboardd ... detail=IOSurfaceRoot match=<absent>
+  IOMFB: default_fb_surface: No Default FB Surface found
+  ```
+
+**结论**：系统本身起来了，卡的是渲染。logo 走的是 `PicassoDisplaySupport` 直接写映射显存的旁路，
+所以能显示静态帧但无法刷新；backboardd 需要的是 IOMFB 设备 + IOSurface，两者都不在。
+
+**下一步只有两件事**
+1. 让 `IOMobileFramebufferLegacy::start` 接受 provider（它要求 `AppleARMIODevice`）
+2. 让 `IOSurfaceRoot` 发布出来
+
+**待作者回答**：他是否真的进过界面，还是同样只有 logo。这决定上面两件事是「照抄做法」还是「从零做」。
+
 ### 2026-11-01 15:45 Step 2 —— 我们的基线停在 init_exclavekit（拿到作者镜像之前）
 
 - 观测：日志停在
