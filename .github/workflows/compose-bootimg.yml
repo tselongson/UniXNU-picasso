@@ -201,6 +201,10 @@ jobs:
           EOF
 
       - name: Compose boot image (BootShim + repo FD + payload as ramdisk)
+        # The verification steps above check policy, not whether the image is usable. A run that
+        # builds a kernel and payload but trips a policy check still produced the thing worth
+        # booting, and a boot test is the only way to find out -- so this runs regardless.
+        if: always()
         run: |
           python3 ./unixnu bootimg \
             --uefi "$GITHUB_WORKSPACE/device/uefi/mu-silicium" \
