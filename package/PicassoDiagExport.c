@@ -127,7 +127,7 @@ static void diag_export(void)
 // Called from the display refresh tick. The delay lets the system reach the point where the
 // userspace log has something worth reading; a stalled compositor still ticks, which is exactly
 // the case this exists to diagnose.
-extern "C" void picasso_diag_tick(unsigned now)
+void picasso_diag_tick(unsigned now)
 {
 	if (diag_done) {
 		return;
