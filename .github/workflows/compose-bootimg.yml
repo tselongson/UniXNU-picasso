@@ -135,6 +135,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           UNIXNU_UNIQUE_CHIP_ID: "41a551c0dec0de01"
+          # These are read by build-xnu-4k-baseline.sh from the environment, not from the
+          # defconfig: CONFIG_XNU_BOOT_PROGRESS and CONFIG_XNU_SHENG_HIDINPUT only carry the choice
+          # into the kernel's own build, while the script decides from these whether to run
+          # scripts/build-boot-progress.py and scripts/build-sheng-hid-input.py. A workstation build
+          # exports them by hand; without them the HID input step stops with 'ShengHidInput needs
+          # the boot-progress build'.
+          XNU_BOOT_PROGRESS: "1"
+          XNU_SHENG_HIDINPUT: "1"
         run: |
           python3 ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily
           mkdir -p out/picasso/logs
