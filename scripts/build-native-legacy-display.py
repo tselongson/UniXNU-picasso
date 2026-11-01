@@ -553,6 +553,10 @@ def main():
                 "-I", str(ROOT / ".cache/xnu-work/libkern"),
                 "-I", str(ROOT / ".cache/xnu-work/pexpert"),
                 "-I", str(ROOT / ".cache/xnu-work/EXTERNAL_HEADERS"),
+                # BootLog.c uses MINPRI_KERNEL and BASEPRI_KERNEL without including kern/sched.h;
+                # a kernel compile picks that header up through the build's own prefix, which this
+                # one-off command does not have, so it is forced in here.
+                "-include", str(ROOT / ".cache/xnu-work/osfmk/kern/sched.h"),
             ],
             cxx=False,
         )
