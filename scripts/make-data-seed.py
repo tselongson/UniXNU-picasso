@@ -96,9 +96,37 @@ def main():
             # build. hdiutil picks it at random, so it is read here rather than assumed -- an earlier
             # build had the all-zero placeholder in the config and the mount failed with ENOENT.
             volume_uuid = info.get('VolumeUUID')
+
+            def apfs_list_uuid(target):
+                """Ask the APFS container for its volume UUIDs.
+
+                `diskutil info` answers per device, and for a 1 GiB container it answers for the
+                disk while no slice reports a VolumeUUID at all -- so the polling loop below never
+                filled the value and two builds stopped here. `apfs list` is keyed on the container
+                instead of a slice name, so it does not depend on how the slices happen to be
+                numbered.
+                """
+                try:
+                    listing = run('diskutil', 'apfs', 'list', '-plist', target, capture=True)
+                except subprocess.CalledProcessError:
+                    return None
+                try:
+                    parsed = plistlib.loads(listing.encode())
+                except Exception:
+                    return None
+                for container in parsed.get('Containers', []):
+                    for volume in container.get('Volumes', []):
+                        candidate = volume.get('APFSVolumeUUID')
+                        if candidate and candidate != '00000000-0000-0000-0000-000000000000':
+                            return candidate
+                return None
+
+            if not volume_uuid:
+                volume_uuid = apfs_list_uuid(device)
+                if volume_uuid:
+                    print(f'data volume uuid (apfs list): {volume_uuid}')
             # The volume is not necessarily published by the time the disk answers, and at 1 GiB the
-            # first query came back without one and the build stopped here. Poll instead of assuming
-            # the layout is ready: the disk itself first, then its slices.
+            # first query came back without one. Poll the slices as a second source before giving up.
             for attempt in range(30):
                 if volume_uuid:
                     break
@@ -114,9 +142,7 @@ def main():
                 if not volume_uuid:
                     time.sleep(1)
             if not volume_uuid:
-                # Not fatal any more. diskutil answered for a 3 GiB container and answered nothing
-                # at all for a 1 GiB one, so relying on it alone made the build a coin toss. The
-                # UUID is in the image itself and is read from there once the copy exists.
+                # Last resort: the value is in the copied image, read below once it exists.
                 print('warning: diskutil reported no Data volume UUID; reading it from the image')
             # Copy in page-sized blocks, not whole MiB: the attached size is not a multiple of 1 MiB
             # (3011469312 bytes for a nominal 3 GiB sparse image), so a MiB count stopped 984 KiB
@@ -170,6 +196,13 @@ def main():
             run('sudo', 'ln', '-sfn', '/private/var/db/timezone/zoneinfo/UTC',
                 str(volume_root / 'db/timezone/localtime'))
             print(f'data volume skeleton: {volume_root}')
+
+            # By now the volume is mounted, so asking the mount point is the most reliable source
+            # there is: the container has published the volume and its UUID.
+            if not volume_uuid:
+                volume_uuid = apfs_list_uuid(str(volume_root))
+                if volume_uuid:
+                    print(f'data volume uuid (mount point): {volume_uuid}')
 
             # Unmount so the filesystem is flushed and the device is quiescent. Reading the raw
             # device bypasses the page cache, so a copy taken while the volume is still mounted can
