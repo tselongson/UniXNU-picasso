@@ -71,19 +71,29 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
-      # Two inputs cost minutes on every run and do not change between them: the IPSW (83 s of
-      # download) and the kernel object directory, which is most of the 350 s compile. The key
-      # carries the run id so every run saves an entry and restore-keys takes the newest, which is
-      # what makes a rebuild incremental. Everything else here is a few seconds.
-      - name: Restore the IPSW and the object directory
+      # Two inputs cost minutes on every run: the IPSW (83 s of download) and the kernel object
+      # directory, which is most of the 350 s compile. They are cached separately because they
+      # age differently.
+      #
+      # The IPSW never changes, so one stable key serves every run. The object directory does
+      # change: restoring one written by a different commit broke the build outright -- the first
+      # archive failed with 'kern/assert.h file not found' because the restored tree carried
+      # include state from a source tree that no longer matched. Its key therefore names the
+      # commit, so a run only ever sees objects produced from the same sources, and a rerun of the
+      # same commit is still incremental.
+      - name: Restore the target IPSW
         uses: actions/cache/restore@v4
         with:
-          path: |
-            device/out/ipsw
-            device/out/picasso/tree/build
-          key: picasso-build-${{ github.run_id }}
+          path: device/out/ipsw
+          key: picasso-ipsw-21H461
+
+      - name: Restore the object directory
+        uses: actions/cache/restore@v4
+        with:
+          path: device/out/picasso/tree/build
+          key: picasso-obj-${{ github.sha }}-${{ github.run_id }}
           restore-keys: |
-            picasso-build-
+            picasso-obj-${{ github.sha }}-
 
       - name: Download the target IPSW
         run: |
@@ -243,12 +253,17 @@ jobs:
           retention-days: 7
 
       # Saved even on failure: a run that stopped at the link still leaves the objects the next
-      # attempt would otherwise rebuild from scratch.
-      - name: Save the IPSW and the object directory
+      # attempt at the same commit would otherwise rebuild from scratch.
+      - name: Save the target IPSW
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: |
-            device/out/ipsw
-            device/out/picasso/tree/build
-          key: picasso-build-${{ github.run_id }}
+          path: device/out/ipsw
+          key: picasso-ipsw-21H461
+
+      - name: Save the object directory
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: device/out/picasso/tree/build
+          key: picasso-obj-${{ github.sha }}-${{ github.run_id }}
