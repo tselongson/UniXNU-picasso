@@ -29,6 +29,32 @@ def run(*command, capture=False):
     return result.stdout if capture else ''
 
 
+def volume_uuid_from_image(path):
+    """Read the APFS volume UUID out of a raw image, without asking macOS.
+
+    The volume superblock is an object whose magic 'APSB' sits 32 bytes in, and apfs_vol_uuid is
+    260 bytes into that object, so the UUID is 228 bytes after the magic. diskutil reports this
+    for some container sizes and nothing at all for others -- a 1 GiB seed stopped two builds --
+    while the image always has it.
+    """
+    import mmap
+    import uuid as uuidlib
+
+    with open(path, 'rb') as handle:
+        with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+            position = mapped.find(b'APSB')
+            seen = 0
+            while position != -1 and seen < 64:
+                start = position - 32
+                if start >= 0:
+                    raw = mapped[start + 260:start + 276]
+                    if len(raw) == 16 and any(raw):
+                        return str(uuidlib.UUID(bytes=bytes(raw))).upper()
+                seen += 1
+                position = mapped.find(b'APSB', position + 1)
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--tree', type=Path, required=True,
@@ -88,7 +114,10 @@ def main():
                 if not volume_uuid:
                     time.sleep(1)
             if not volume_uuid:
-                raise SystemExit('could not read the Data volume UUID from diskutil after 30 attempts')
+                # Not fatal any more. diskutil answered for a 3 GiB container and answered nothing
+                # at all for a 1 GiB one, so relying on it alone made the build a coin toss. The
+                # UUID is in the image itself and is read from there once the copy exists.
+                print('warning: diskutil reported no Data volume UUID; reading it from the image')
             # Copy in page-sized blocks, not whole MiB: the attached size is not a multiple of 1 MiB
             # (3011469312 bytes for a nominal 3 GiB sparse image), so a MiB count stopped 984 KiB
             # short and the length check below rejected it. Rounding down to a page keeps the image
@@ -157,6 +186,17 @@ def main():
             # Reading a raw device needs root; the macOS runners allow passwordless sudo.
             run('sudo', 'dd', f'if={raw_device}', f'of={raw}', 'bs=4096',
                 f'count={size // 4096}')
+
+            # The APFS volume UUID is in the copied image whether or not diskutil would name it:
+            # the volume superblock carries the magic APSB 32 bytes into the object and
+            # apfs_vol_uuid 260 bytes in, so the UUID sits 228 bytes after the magic. Scanning the
+            # image is what makes this step independent of diskutil's answer.
+            if not volume_uuid:
+                volume_uuid = volume_uuid_from_image(raw)
+                if volume_uuid:
+                    print(f'data volume uuid (image): {volume_uuid}')
+            if not volume_uuid:
+                raise SystemExit('no APFS volume superblock in the copied image; the seed is unusable')
         finally:
             # The image has already been read by this point, so a busy detach is not a reason to fail
             # the build -- the runner is ephemeral. Retry once, then warn.
