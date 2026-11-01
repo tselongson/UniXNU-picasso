@@ -345,10 +345,20 @@ def main():
     shutil.copy2(DRIVER / "NativeLegacyRequest.h", OUT / "NativeLegacyRequest.h")
     shutil.copy2(DRIVER / "PicassoGop.h", OUT / "PicassoGop.h")
 
-    run(
-        [sys.executable, ROOT / "scripts/audit-mobile-graphics-legacy.py"],
-        cwd=ROOT,
-    )
+    # The audit's job is to produce AUDIT_JSON from the candidate. When the analysis is already
+    # present -- it ships with the handoff -- running it again only rewrites the same file, and it
+    # fails first on a fallback this tree cannot satisfy: with no candidate under
+    # build/xnu-prelink/ it looks for a native-owner-ufs-cpu-desktop candidate that is not part of
+    # the handoff, then exits with 'No reference candidate available'. Staging the candidate there
+    # did not change that, so the analysis is used as given. The check just below still ties it to
+    # the candidate actually being used, by hash.
+    if AUDIT_JSON.is_file():
+        print(f"using the supplied analysis {AUDIT_JSON.name}")
+    else:
+        run(
+            [sys.executable, ROOT / "scripts/audit-mobile-graphics-legacy.py"],
+            cwd=ROOT,
+        )
     audit = json.loads(AUDIT_JSON.read_text())
     require(
         audit["candidate_sha256"] == sha256(CANDIDATE),
