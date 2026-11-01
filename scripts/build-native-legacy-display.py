@@ -543,7 +543,17 @@ def main():
         compile_source(
             diagnostic_source,
             diagnostic_object,
-            ["-I", str(PACKAGE)],
+            [
+                "-I", str(PACKAGE),
+                # BootLog.c includes kernel headers (kern/sched_prim.h for MINPRI_KERNEL, bsd and
+                # libkern for the rest) that the IOKit compile record this script reuses does not
+                # put on the include path, because a driver source does not need them.
+                "-I", str(ROOT / ".cache/xnu-work/osfmk"),
+                "-I", str(ROOT / ".cache/xnu-work/bsd"),
+                "-I", str(ROOT / ".cache/xnu-work/libkern"),
+                "-I", str(ROOT / ".cache/xnu-work/pexpert"),
+                "-I", str(ROOT / ".cache/xnu-work/EXTERNAL_HEADERS"),
+            ],
             cxx=False,
         )
         support_objects.append(diagnostic_object)
