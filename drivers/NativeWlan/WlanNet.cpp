@@ -28,7 +28,6 @@
 #include <net/ethernet.h>
 #include <net/if_ether.h>
 #include <net/bpf.h>
-#include <net/dlil.h>
 #include <string.h>
 
 extern "C" {
