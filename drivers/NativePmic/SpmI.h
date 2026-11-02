@@ -14,9 +14,10 @@
 #define kSpmIChannelBase   0x0c600000u
 #define kSpmIChannelSize   0x2000000u
 
-// Slave ids on this board: pm8150 sits at 0, pm8150l at 4. Both appear in the board overlay as
-// qcom,pm8150@0 and qcom,pm8150l@4.
+// Slave ids on this board: pm8150 at 0, pm8150b at 2, pm8150l at 4. All three appear in the board
+// overlay; pm8150b is the one that carries the SMB5 charger and the pack sense channels.
 #define kSpmISlavePm8150   0u
+#define kSpmISlavePm8150B  2u
 #define kSpmISlavePm8150L  4u
 
 // Register addresses are 16 bits wide, split into a peripheral page and an offset inside it.
