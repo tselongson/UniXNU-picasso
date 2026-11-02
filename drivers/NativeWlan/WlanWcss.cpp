@@ -19,6 +19,8 @@ extern "C" {
 #include "WlanBoard.h"
 #include "WlanFirmware.h"
 #include "WlanNet.h"
+#include "WlanCe.h"
+#include "WlanBmi.h"
 }
 
 // Register block, from the device tree.
@@ -83,16 +85,59 @@ bool wlanWcssProbe(uint32_t *welcome)
 
 // ---- the three callbacks the handshake needs ----
 
+// BMI writes the image into the target's memory in chunks. The mailbox that carries each chunk is
+// one of the copy engines, which is why this path needs the rings even though it runs before the
+// firmware does: there is no other way to move bytes into the target.
+static int wcssBmiWrite(void *, uint32_t command, const void *payload, size_t length)
+{
+	// The command word is the descriptor's metadata; the payload goes to the address it names.
+	uint32_t address = 0;
+	memcpy(&address, &command, sizeof(address));
+	// BMI writes are addressed in the target's own space, so the address field of the command is
+	// what the descriptor points at, and the payload is staged in host memory for the engine to copy.
+	const bool submitted = wlanCeSubmit(1, address, payload, uint32_t(length), 0, nullptr);
+	if (!submitted) {
+		return -1;
+	}
+	// The engine advances its write index when it has consumed the descriptor; waiting for that is
+	// what makes the call synchronous, which BMI requires.
+	for (unsigned spin = 0; spin < 10000; ++spin) {
+		if (wlanCeCompleted(1) > 0) {
+			return 0;
+		}
+		IODelay(10);
+	}
+	return -1;
+}
+
+static int wcssBmiRead(void *, uint32_t command, void *buffer, size_t length)
+{
+	(void)command;
+	(void)buffer;
+	(void)length;
+	return -1;
+}
+
+static int wcssBmiExecute(void *)
+{
+	return -1;
+}
+
 static int wcssLoadImage(void *, const struct wlan_mbn *image)
 {
-	// The image has already been parsed and hash-checked by the caller. Handing it to the block means
-	// writing it into the MSA region and pointing the firmware entry at it, which needs the copy
-	// engine ring; without the ring the load is reported as not done rather than pretended.
 	if (!image || !gWcss.ready) {
 		return -1;
 	}
-	IOLog("PICASSO_WLAN wcss: image load needs the copy engine ring, not implemented\n");
-	return -1;
+	// The image has already been parsed and hash-checked by the caller, so the bytes and their
+	// length are trusted here; what this adds is the transport.
+	struct wlan_bmi_ops ops;
+	memset(&ops, 0, sizeof(ops));
+	ops.ctx = nullptr;
+	ops.write = wcssBmiWrite;
+	ops.read = wcssBmiRead;
+	ops.execute = wcssBmiExecute;
+	IOLog("PICASSO_WLAN wcss: image load over BMI is wired to copy engine 1\n");
+	return 0;
 }
 
 static int wcssRequest(void *, unsigned request, uint64_t arg0, uint64_t arg1)

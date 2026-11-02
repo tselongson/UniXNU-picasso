@@ -63,3 +63,22 @@ static inline uintptr_t ceBase(uintptr_t wcssBase, unsigned engine)
 {
 	return wcssBase + kCe0Offset + uintptr_t(engine) * kCeWindowSize;
 }
+
+// Sets up the twelve engines against the WCSS register window. Returns false if the base is zero.
+bool wlanCeInit(uintptr_t wcssBase);
+
+// Reads the chip identity through the copy engine block, which answers before any ring exists.
+bool wlanCeProbeChipId(uintptr_t wcssBase, uint32_t *chipId);
+
+// Points one engine's source and destination rings at memory the caller owns. Both descriptor arrays
+// must be kCeRingEntries long and page aligned.
+bool wlanCeRingSetup(unsigned engine, void *sourceDescriptors, uint64_t sourcePhysical,
+                     void *destinationDescriptors, uint64_t destinationPhysical);
+
+// Hands one descriptor to the target. Returns false when the ring is full or the length exceeds what
+// a single descriptor can carry.
+bool wlanCeSubmit(unsigned engine, uint64_t targetAddress, const void *data, uint32_t length,
+                  uint32_t flags, void *sourceAddress);
+
+// Descriptors the target has filled since the caller last advanced its read index.
+uint32_t wlanCeCompleted(unsigned engine);

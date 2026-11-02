@@ -334,10 +334,35 @@ def build_native_pmic(record):
     subprocess.run(['xcrun', 'ar', 'rcs', str(archive)] + [str(o) for o in objects], check=True)
     print(f'NativePmic: ARM64/iOS 17 SPMI, battery and TSENS archive built ({len(objects)} objects)')
 
+def build_native_wlan(record):
+    """The WLAN module (drivers/NativeWlan): the network interface, the Apple80211 requests, the
+    WCSS block, the copy engine rings and the BMI downloader.
+
+    The board helpers and the firmware parsers are C, the rest is C++. Nothing here needs a generated
+    input, so the archive is the sources as they sit in the tree."""
+    out = ROOT / 'build/native-wlan'
+    out.mkdir(parents=True, exist_ok=True)
+    extra_flags = ['-I', str(ROOT / 'drivers/NativeWlan')]
+    objects = []
+    for name in ('WlanNet.cpp', 'WlanApple80211.cpp', 'WlanWcss.cpp', 'WlanCe.cpp', 'WlanBmi.cpp', 'WlanBoard.cpp'):
+        src = ROOT / 'drivers/NativeWlan' / name
+        dst = out / f'{src.stem}.o'
+        compile_file(src, dst, record, extra_flags, is_c=False)
+        objects.append(dst)
+    for name in ('WlanFirmware.c',):
+        src = ROOT / 'drivers/NativeWlan' / name
+        dst = out / f'{src.stem}.o'
+        compile_file(src, dst, record, extra_flags, is_c=True)
+        objects.append(dst)
+    archive = out / 'libNativeWlan.a'
+    archive.unlink(missing_ok=True)
+    subprocess.run(['xcrun', 'ar', 'rcs', str(archive)] + [str(o) for o in objects], check=True)
+    print(f'NativeWlan: ARM64/iOS 17 interface, Apple80211, WCSS, CE and BMI archive built ({len(objects)} objects)')
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('component', choices=['ArmDTPlatform', 'ArmCpu', 'NativeRamBlock', 'NativeUfs', 'NativeAdreno',
-                                              'AdrenoPicasso', 'NativeHidInput', 'NativePmic'])
+                                              'AdrenoPicasso', 'NativeHidInput', 'NativePmic', 'NativeWlan'])
     args = parser.parse_args()
 
     recipe = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
@@ -351,6 +376,9 @@ def main():
         return
     if args.component == 'NativePmic':
         build_native_pmic(record)
+        return
+    if args.component == 'NativeWlan':
+        build_native_wlan(record)
         return
 
     out_map = {
