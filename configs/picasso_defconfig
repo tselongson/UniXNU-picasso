@@ -30,6 +30,9 @@ CONFIG_XNU_NATIVE_AES=y
 # CONFIG_XNU_NATIVE_VIRTIO_CONSOLE is not set
 CONFIG_XNU_NATIVE_RAM_BLOCK=y
 # CONFIG_XNU_NATIVE_MOBILE_DISPLAY is not set
+# The layer qualifies its archive against a prelink candidate that only exists after a full
+# build, which a clean CI tree does not have; every layer before it compiles. Off until the
+# pipeline runs twice, or the candidate is produced before the archives.
 CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
 CONFIG_XNU_NATIVE_ADRENO=y
 # CONFIG_XNU_ARMVIRT_PLATFORM is not set
