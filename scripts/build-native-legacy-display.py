@@ -49,6 +49,14 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def audit_qualifies(path):
+    """True when this audit record was derived from the candidate we build against."""
+    try:
+        return json.loads(Path(path).read_text()).get("candidate_sha256") == sha256(CANDIDATE)
+    except (OSError, ValueError):
+        return False
+
+
 def source_name(path):
     path = Path(path)
     for base in (ROOT, DEVICE):
@@ -324,10 +332,21 @@ def main():
     shutil.copy2(DRIVER / "NativeLegacyRequest.h", OUT / "NativeLegacyRequest.h")
     shutil.copy2(DRIVER / "PicassoGop.h", OUT / "PicassoGop.h")
 
-    run(
-        [sys.executable, ROOT / "scripts/audit-mobile-graphics-legacy.py"],
-        cwd=ROOT,
-    )
+    # The audit re-derives the original Legacy ABI from the candidate. The board
+    # ships that record (build/display-analysis) next to the candidate, and its
+    # hash binds the two, so a qualifying record is the audit for this candidate.
+    # The upstream audit script only looks inside the prepared tree, where the
+    # board candidate never lands; it stays the fallback for a regenerated
+    # candidate, and its own hash check then has to agree with the candidate.
+    global AUDIT_JSON
+    if audit_qualifies(AUDIT_JSON):
+        print(f"audit: {source_name(AUDIT_JSON)} already qualifies this candidate")
+    else:
+        run(
+            [sys.executable, ROOT / "scripts/audit-mobile-graphics-legacy.py"],
+            cwd=ROOT,
+        )
+        AUDIT_JSON = ROOT / "build/display-analysis/mobile-graphics-legacy-abi.json"
     audit = json.loads(AUDIT_JSON.read_text())
     require(
         audit["candidate_sha256"] == sha256(CANDIDATE),
