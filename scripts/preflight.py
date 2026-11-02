@@ -41,14 +41,6 @@ LAYERS = [
         "requires_configs": ["XNU_NATIVE_UFS", "XNU_OWNER_ROOT_AUDIT", "XNU_SOURCE_CORECRYPTO14"],
         "why": "the boot progress build requires the ufs, owner-root and corecrypto layers",
     },
-    {
-        "config": "CONFIG_XNU_NATIVE_LEGACY_DISPLAY",
-        "env": "XNU_NATIVE_LEGACY_DISPLAY",
-        "script": ROOT / "scripts/build-native-legacy-display.py",
-        # The layer links a hash-qualified archive that only a previous run produced.
-        "needs": [ROOT / "build/native-legacy-display/libNativeLegacyDisplay.late.a"],
-        "why": "the legacy display layer links a qualified archive from a previous build",
-    },
 ]
 
 

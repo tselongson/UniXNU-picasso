@@ -80,6 +80,9 @@ archives = [
   # SPMI transport plus the VADC battery readings and the TSENS temperatures. It carries no
   # display or GPU dependency, so it can be linked and exercised on its own.
   "build-arm-driver.py NativePmic",
+  # The legacy display archive the kernel links with force_load; it must be built in this
+  # run, because the link step checks the hash of what it produced.
+  "build-native-legacy-display.py",
   # The WLAN module: ifnet interface, Apple80211 requests, WCSS block, copy engine rings and the
   # BMI downloader. Nothing in it needs the radio to compile.
   "build-arm-driver.py NativeWlan",
