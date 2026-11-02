@@ -23,6 +23,12 @@ jobs:
   build:
     runs-on: macos-latest
     timeout-minutes: 360
+    env:
+      # The A620 GPU firmware the probe embeds is shipped with the board under
+      # build/adreno620-firmware (extracted from the qualified kernel, which had
+      # the vendor files staged). Without it stage 3 stops at "blobs were not
+      # staged" and the accelerator is never published.
+      ADRENO620_FW_DIR: ${{ github.workspace }}/device/build/adreno620-firmware
     defaults:
       run:
         shell: bash
