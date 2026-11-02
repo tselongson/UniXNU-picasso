@@ -25,8 +25,17 @@ RECORD = ROOT / (
     "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/"
     "iokit/DEVELOPMENT/IOPlatformExpert.cpo.json"
 )
-CANDIDATE = ROOT / "build/native-prelink/native-owner-mobile-graphics-candidate.macho"
-AUDIT_JSON = ROOT / "build/display-analysis/mobile-graphics-legacy-abi.json"
+# The candidate and its ABI audit are board-provided inputs committed in the
+# device repository (build/native-prelink, build/display-analysis) and surfaced
+# through UNIXNU_DEVICE. The feeds system only injects kits/drivers/package into
+# the prepared tree, not build/, so resolve these from the board repo first and
+# fall back to the in-tree path the kit would write when it regenerates them.
+CANDIDATE = DEVICE / "build/native-prelink/native-owner-mobile-graphics-candidate.macho"
+if not CANDIDATE.is_file():
+    CANDIDATE = ROOT / "build/native-prelink/native-owner-mobile-graphics-candidate.macho"
+AUDIT_JSON = DEVICE / "build/display-analysis/mobile-graphics-legacy-abi.json"
+if not AUDIT_JSON.is_file():
+    AUDIT_JSON = ROOT / "build/display-analysis/mobile-graphics-legacy-abi.json"
 
 sys.path.insert(0, str(ROOT / "kits/NativePrelink"))
 from native_prelink import backed_offset, exports, macho  # noqa: E402
