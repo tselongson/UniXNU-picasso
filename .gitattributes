@@ -6,3 +6,8 @@
 policy/verified-root-picasso/** text eol=lf
 policy/verified-root-picasso/**/*.bin binary
 policy/verified-root-picasso/*.bin binary
+
+# bash does not accept a carriage return in `set -o pipefail`, and the Windows checkout
+# converts on add. Pin the newline for every script the pipeline runs.
+*.sh text eol=lf
+*.py text eol=lf
