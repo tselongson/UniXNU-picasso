@@ -296,6 +296,14 @@ kernel_args = [
   # RBBM probes remain separate opt-in arguments because either block may be
   # inaccessible until CX/GX power and clocks are established.
   "sheng-gpu-probe=1",
+  # Bring GX up and publish the accelerator for Metal clients. backboardd asks
+  # for IOAcceleratorES on every boot and reports match=<absent> while the
+  # default probe-only configuration is in force: stage 3 is the GX power vote
+  # plus CP hw_init, and sheng-gpu-metal publishes the AGXAccelerator service
+  # the system Metal stack opens. The userland addon bundle is still absent, so
+  # this exercises the kernel side only.
+  "sheng-gpu=3",
+  "sheng-gpu-metal=1",
   # Opt-in write limited to GPUCC_CX_GDSCR.SW_COLLAPSE; no GPU core access.
   # Official UniXNU boot-page UI trace. boot-progress=2 keeps the OS running.
   # boot-diag-resume is deliberately absent: taking the panel back after 30 s
