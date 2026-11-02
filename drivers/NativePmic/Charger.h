@@ -8,6 +8,26 @@
 
 struct SpmI;
 
+// The block runs these phases by itself, from the pack voltage and the JEITA window. Trickle is the
+// slow phase for a deeply discharged pack, pre-charge the one just above it, full-on the bulk phase
+// and taper the constant-voltage tail; the driver reports them rather than emulating them.
+enum ChargerPhase {
+	kChargerPhaseInhibit = 0,
+	kChargerPhaseTrickle,
+	kChargerPhasePreCharge,
+	kChargerPhaseFullOn,
+	kChargerPhaseTaper,
+	kChargerPhaseTerminate,
+	kChargerPhasePause,
+	kChargerPhaseDisable,
+};
+
+struct ChargerPhaseEnables {
+	bool trickle;
+	bool preCharge;
+	bool fullOn;
+};
+
 struct ChargerState {
 	bool valid;
 	bool chargingEnabled;    // CHARGING_ENABLE_CMD bit 0
@@ -30,6 +50,16 @@ bool chargerReadState(const struct SpmI *spmi, struct ChargerState *state);
 // because a wrong step shows up as a mismatch there rather than as silently wrong current.
 bool chargerSetInputCurrentLimit(const struct SpmI *spmi, uint32_t milliamps);
 bool chargerReadInputCurrentLimit(const struct SpmI *spmi, uint32_t *milliamps);
+
+// Which phase the block is in, and which of the slow phases it has enabled.
+bool chargerReadPhase(const struct SpmI *spmi, enum ChargerPhase *phase);
+const char *chargerPhaseName(enum ChargerPhase phase);
+bool chargerReadPhaseEnables(const struct SpmI *spmi, struct ChargerPhaseEnables *enables);
+
+// Bulk-phase current and the constant-voltage setpoint. The steps are the ones this block has used
+// since PM8150; the addresses come from the register map.
+bool chargerSetFastChargeCurrent(const struct SpmI *spmi, uint32_t milliamps);
+bool chargerSetFloatVoltage(const struct SpmI *spmi, uint32_t millivolts);
 
 // True when the pack is at or past the full threshold, with hysteresis so the switch does not
 // chatter at the boundary.

@@ -42,6 +42,104 @@ enum : uint32_t {
 	kInputCurrentLimitMaxMilliamps = 3000,
 };
 
+// Fast charge current and float voltage, same caveat: the addresses come from the register map, the
+// steps are the ones this block has used since PM8150.
+enum : uint32_t {
+	kFastChargeCurrentStepMilliamps = 50,
+	kFastChargeCurrentMaxMilliamps = 8000,
+	kFloatVoltageStepMillivolts = 10,
+	kFloatVoltageMinMillivolts = 3600,
+	kFloatVoltageMaxMillivolts = 4790,
+};
+
+// Trickle, pre-charge, fast charge and taper are phases the block runs by itself, driven by the pack
+// voltage and the JEITA window. The driver's job is to report which one is in force and to leave it
+// alone, not to emulate it: BATTERY_CHARGER_STATUS_1 carries the phase in its low three bits.
+enum : uint16_t {
+	kRegBatteryChargerStatus1 = 0x06,   // CHGR_BASE + 0x06
+	kRegBatteryChargerStatus5 = 0x0b,   // CHGR_BASE + 0x0b
+};
+
+enum : uint8_t {
+	kChargeStatusMask = 0x07,
+};
+
+enum : uint8_t {
+	kBitEnableTrickle = 1u << 2,
+	kBitEnablePreCharging = 1u << 1,
+	kBitEnableFullOn = 1u << 0,
+};
+
+const char *chargerPhaseName(enum ChargerPhase phase)
+{
+	switch (phase) {
+	case kChargerPhaseInhibit: return "inhibit";
+	case kChargerPhaseTrickle: return "trickle";
+	case kChargerPhasePreCharge: return "precharge";
+	case kChargerPhaseFullOn: return "fast";
+	case kChargerPhaseTaper: return "taper";
+	case kChargerPhaseTerminate: return "terminate";
+	case kChargerPhasePause: return "pause";
+	case kChargerPhaseDisable: return "disable";
+	default: return "unknown";
+	}
+}
+
+bool chargerReadPhase(const SpmI *spmi, enum ChargerPhase *phase)
+{
+	if (!spmi || !phase) {
+		return false;
+	}
+	uint8_t value = 0;
+	if (!spmiRead(spmi, kSpmISlavePm8150B, {kPeripheralChgr, kRegBatteryChargerStatus1}, &value)) {
+		return false;
+	}
+	*phase = enum ChargerPhase(value & kChargeStatusMask);
+	return true;
+}
+
+bool chargerReadPhaseEnables(const SpmI *spmi, struct ChargerPhaseEnables *enables)
+{
+	if (!spmi || !enables) {
+		return false;
+	}
+	uint8_t value = 0;
+	if (!spmiRead(spmi, kSpmISlavePm8150B, {kPeripheralChgr, kRegBatteryChargerStatus5}, &value)) {
+		return false;
+	}
+	enables->trickle = (value & kBitEnableTrickle) != 0;
+	enables->preCharge = (value & kBitEnablePreCharging) != 0;
+	enables->fullOn = (value & kBitEnableFullOn) != 0;
+	return true;
+}
+
+bool chargerSetFastChargeCurrent(const SpmI *spmi, uint32_t milliamps)
+{
+	if (!spmi) {
+		return false;
+	}
+	if (milliamps > kFastChargeCurrentMaxMilliamps) {
+		milliamps = kFastChargeCurrentMaxMilliamps;
+	}
+	const uint8_t raw = uint8_t(milliamps / kFastChargeCurrentStepMilliamps);
+	return spmiWrite(spmi, kSpmISlavePm8150B, {kPeripheralChgr, kRegFastChargeCurrent}, raw);
+}
+
+bool chargerSetFloatVoltage(const SpmI *spmi, uint32_t millivolts)
+{
+	if (!spmi) {
+		return false;
+	}
+	if (millivolts < kFloatVoltageMinMillivolts) {
+		millivolts = kFloatVoltageMinMillivolts;
+	}
+	if (millivolts > kFloatVoltageMaxMillivolts) {
+		millivolts = kFloatVoltageMaxMillivolts;
+	}
+	const uint8_t raw = uint8_t((millivolts - kFloatVoltageMinMillivolts) / kFloatVoltageStepMillivolts);
+	return spmiWrite(spmi, kSpmISlavePm8150B, {kPeripheralChgr, kRegFloatVoltage}, raw);
+}
+
 enum : uint8_t {
 	kBitChargingEnable = 1u << 0,
 	kBitUsbinSuspend = 1u << 0,
