@@ -324,7 +324,7 @@ def build_native_pmic(record):
     out.mkdir(parents=True, exist_ok=True)
     extra_flags = ['-I', str(ROOT / 'drivers/NativePmic')]
     objects = []
-    for name in ('SpmI.cpp', 'Battery.cpp', 'Charger.cpp', 'Thermal.cpp'):
+    for name in ('SpmI.cpp', 'Battery.cpp', 'Charger.cpp', 'Thermal.cpp', 'PmicService.cpp'):
         src = ROOT / 'drivers/NativePmic' / name
         dst = out / f'{src.stem}.o'
         compile_file(src, dst, record, extra_flags, is_c=False)
