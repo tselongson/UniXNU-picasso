@@ -347,6 +347,15 @@ def main():
             cwd=ROOT,
         )
         AUDIT_JSON = ROOT / "build/display-analysis/mobile-graphics-legacy-abi.json"
+    # The link-time verifier re-hashes every source of the build report relative
+    # to the prepared tree, and the feeds never link build/, so the board record
+    # is staged at the path the kit itself would have written.
+    tree_audit = ROOT / "build/display-analysis/mobile-graphics-legacy-abi.json"
+    if Path(AUDIT_JSON).resolve() != tree_audit.resolve():
+        tree_audit.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(AUDIT_JSON, tree_audit)
+        print(f"audit: staged {tree_audit.relative_to(ROOT)} for the link-time check")
+        AUDIT_JSON = tree_audit
     audit = json.loads(AUDIT_JSON.read_text())
     require(
         audit["candidate_sha256"] == sha256(CANDIDATE),
