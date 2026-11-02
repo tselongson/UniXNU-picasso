@@ -66,7 +66,9 @@ CONFIG_XNU_BOOT_PROGRESS=y
 # has a producer.
 # CONFIG_XNU_SHENG_HIDINPUT=y
 # Novatek NT36672C touch: the GENI SPI probe and its embedded firmware.
-CONFIG_XNU_NOVATEK_TOUCH=y
+# The touch probe embeds a Novatek firmware blob that lives outside the repository
+# (/tmp/picasso-vendor), so a clean run stops at the build script that needs it.
+# CONFIG_XNU_NOVATEK_TOUCH=y
 # SM7250 cpufreq-hw probe and governor (sheng-cpufreq=<1..4>, inert without it).
 CONFIG_XNU_PICASSO_CPUFREQ=y
 # A620 GPU platform/firmware/stage probe (sheng-gpu=<1..5>, inert without it).
