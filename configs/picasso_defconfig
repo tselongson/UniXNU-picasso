@@ -30,7 +30,10 @@ CONFIG_XNU_NATIVE_AES=y
 # CONFIG_XNU_NATIVE_VIRTIO_CONSOLE is not set
 CONFIG_XNU_NATIVE_RAM_BLOCK=y
 # CONFIG_XNU_NATIVE_MOBILE_DISPLAY is not set
-CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
+# The legacy display layer links a qualified archive that the build only has after a
+# run that built it, and the build stops on the hash check otherwise. Off until the
+# qualification step is part of this pipeline.
+# CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
 CONFIG_XNU_NATIVE_ADRENO=y
 # CONFIG_XNU_ARMVIRT_PLATFORM is not set
 # CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE is not set
