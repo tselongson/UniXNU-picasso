@@ -223,12 +223,13 @@ kernel_args = [
   # timebase+yield path has been exercised on hardware; scans also yield at
   # every 128 KiB batch so CDC keeps draining.
   "native-ufs-delay-yield=1",
-  # Command tracing stays off. It prints two lines per SCSI/query command
-  # (NATIVE_UFS_NOP clear=begin/end, named for the UCD clear they share), and a
-  # boot that is reading the root volume emits them continuously, which buries
-  # every other message. Set it back to 1 only when the UFS transport itself is
-  # the question.
-  "native-ufs-diagnostics=0",
+  # Command tracing stays off (the driver default). It prints two lines per
+  # SCSI/query command (NATIVE_UFS_NOP clear=begin/end, named for the UCD clear
+  # they share), and a boot that is reading the root volume emits them
+  # continuously, which buries every other message. The argument is gone:
+  # native-ufs-diagnostics=0 was 24 bytes of the 1000-byte command-line budget
+  # that the GPU arguments now need. Pass it explicitly when the transport
+  # itself is the question.
   # Use the 8 GiB packed Data seed and back changed pages with the reserved
   # NativeUfs store window at the end of userdata.
   "sheng-data-persist=2",
@@ -292,16 +293,14 @@ kernel_args = [
   "sheng-vsync=60",
   # State-only AppleKeyStore probe used by the display/keystore diagnostics.
   "picasso-aks-state=1",
-  # Read GPUCC clock and GDSC state without touching the GPU core. SMMU and
-  # RBBM probes remain separate opt-in arguments because either block may be
-  # inaccessible until CX/GX power and clocks are established.
-  "sheng-gpu-probe=1",
   # Bring GX up and publish the accelerator for Metal clients. backboardd asks
   # for IOAcceleratorES on every boot and reports match=<absent> while the
-  # default probe-only configuration is in force: stage 3 is the GX power vote
-  # plus CP hw_init, and sheng-gpu-metal publishes the AGXAccelerator service
-  # the system Metal stack opens. The userland addon bundle is still absent, so
-  # this exercises the kernel side only.
+  # probe-only configuration is in force. Stage 3 is the GX power vote plus CP
+  # hw_init, and sheng-gpu-metal publishes the AGXAccelerator service the
+  # system Metal stack opens, so sheng-gpu-probe=1 (clock/GDSC readback only)
+  # is gone: stage 3 reads the same state on its way up, and its 17 bytes of
+  # the 1000-byte command line pay for the publish. The userland addon bundle
+  # is still absent, so this exercises the kernel side only.
   "sheng-gpu=3",
   "sheng-gpu-metal=1",
   # Opt-in write limited to GPUCC_CX_GDSCR.SW_COLLAPSE; no GPU core access.
