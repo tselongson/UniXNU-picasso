@@ -38,20 +38,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The kernel step is 10 of the ~14 minutes this job takes: the bootstrap
-      # pass and the final pass compile the same tree twice from scratch. The
-      # prepared source and its objects live under .cache/ and the tree's
-      # build/, so a hit turns the second run of an unchanged board into an
-      # incremental build. The key covers everything that changes the objects;
-      # a miss is simply the old from-scratch build.
-      - name: Cache the prepared tree and kernel objects
-        uses: actions/cache@v4
-        with:
-          path: |
-            device/.cache
-            device/out/picasso/tree/build
-          key: unixnu-${{ hashFiles('device/upstream.rev', 'device/board.toml', 'device/configs/**', 'device/patches/**', 'device/scripts/**', 'device/drivers/**', 'device/kits/**') }}
-
       - name: Check generated picasso ADT timer binding
         run: python3 scripts/check-picasso-adt.py --output out/picasso/logs/adt-host-check
 
