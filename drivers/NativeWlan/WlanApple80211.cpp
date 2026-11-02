@@ -13,6 +13,8 @@
 // instead of guessed at.
 #include <IOKit/IOLib.h>
 #include <sys/types.h>
+#include <sys/errno.h>
+#include <sys/uio.h>
 #include <string.h>
 
 extern "C" {
@@ -57,7 +59,7 @@ struct StationState {
 
 StationState gStation;
 
-int copyOut(const apple80211req &request, const void *source, size_t size)
+int copyOut(apple80211req &request, const void *source, size_t size)
 {
 	if (!request.req_data || request.req_len < size) {
 		return EINVAL;

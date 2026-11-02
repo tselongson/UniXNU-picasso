@@ -91,10 +91,10 @@ bool chargerReadPhase(const SpmI *spmi, enum ChargerPhase *phase)
 		return false;
 	}
 	uint8_t value = 0;
-	if (!spmiRead(spmi, kSpmISlavePm8150B, {kPeripheralChgr, kRegBatteryChargerStatus1}, &value)) {
+	if (!spmiRead(spmi, kSpmISlavePm8150B, SpmIRegister{kPeripheralChgr, kRegBatteryChargerStatus1}, &value)) {
 		return false;
 	}
-	*phase = enum ChargerPhase(value & kChargeStatusMask);
+	*phase = static_cast<enum ChargerPhase>(value & kChargeStatusMask);
 	return true;
 }
 
@@ -104,7 +104,7 @@ bool chargerReadPhaseEnables(const SpmI *spmi, struct ChargerPhaseEnables *enabl
 		return false;
 	}
 	uint8_t value = 0;
-	if (!spmiRead(spmi, kSpmISlavePm8150B, {kPeripheralChgr, kRegBatteryChargerStatus5}, &value)) {
+	if (!spmiRead(spmi, kSpmISlavePm8150B, SpmIRegister{kPeripheralChgr, kRegBatteryChargerStatus5}, &value)) {
 		return false;
 	}
 	enables->trickle = (value & kBitEnableTrickle) != 0;
@@ -122,7 +122,7 @@ bool chargerSetFastChargeCurrent(const SpmI *spmi, uint32_t milliamps)
 		milliamps = kFastChargeCurrentMaxMilliamps;
 	}
 	const uint8_t raw = uint8_t(milliamps / kFastChargeCurrentStepMilliamps);
-	return spmiWrite(spmi, kSpmISlavePm8150B, {kPeripheralChgr, kRegFastChargeCurrent}, raw);
+	return spmiWrite(spmi, kSpmISlavePm8150B, SpmIRegister{kPeripheralChgr, kRegFastChargeCurrent}, raw);
 }
 
 bool chargerSetFloatVoltage(const SpmI *spmi, uint32_t millivolts)
@@ -137,7 +137,7 @@ bool chargerSetFloatVoltage(const SpmI *spmi, uint32_t millivolts)
 		millivolts = kFloatVoltageMaxMillivolts;
 	}
 	const uint8_t raw = uint8_t((millivolts - kFloatVoltageMinMillivolts) / kFloatVoltageStepMillivolts);
-	return spmiWrite(spmi, kSpmISlavePm8150B, {kPeripheralChgr, kRegFloatVoltage}, raw);
+	return spmiWrite(spmi, kSpmISlavePm8150B, SpmIRegister{kPeripheralChgr, kRegFloatVoltage}, raw);
 }
 
 enum : uint8_t {
@@ -163,7 +163,7 @@ bool chargerSetEnabled(const SpmI *spmi, bool enabled)
 	if (!spmi) {
 		return false;
 	}
-	return readModifyWrite(spmi, {kPeripheralChgr, kRegChargingEnableCmd}, kBitChargingEnable, enabled);
+	return readModifyWrite(spmi, SpmIRegister{kPeripheralChgr, kRegChargingEnableCmd}, kBitChargingEnable, enabled);
 }
 
 bool chargerSuspendInput(const SpmI *spmi, bool suspend)
@@ -171,7 +171,7 @@ bool chargerSuspendInput(const SpmI *spmi, bool suspend)
 	if (!spmi) {
 		return false;
 	}
-	return readModifyWrite(spmi, {kPeripheralUsbin, kRegUsbinCmdIl}, kBitUsbinSuspend, suspend);
+	return readModifyWrite(spmi, SpmIRegister{kPeripheralUsbin, kRegUsbinCmdIl}, kBitUsbinSuspend, suspend);
 }
 
 bool chargerReadState(const SpmI *spmi, struct ChargerState *state)
@@ -182,15 +182,15 @@ bool chargerReadState(const SpmI *spmi, struct ChargerState *state)
 	memset(state, 0, sizeof(*state));
 
 	uint8_t value = 0;
-	if (spmiRead(spmi, kSpmISlavePm8150B, {kPeripheralChgr, kRegChargingEnableCmd}, &value)) {
+	if (spmiRead(spmi, kSpmISlavePm8150B, SpmIRegister{kPeripheralChgr, kRegChargingEnableCmd}, &value)) {
 		state->chargingEnabled = (value & kBitChargingEnable) != 0;
 		state->valid = true;
 	}
-	if (spmiRead(spmi, kSpmISlavePm8150B, {kPeripheralUsbin, kRegUsbinCmdIl}, &value)) {
+	if (spmiRead(spmi, kSpmISlavePm8150B, SpmIRegister{kPeripheralUsbin, kRegUsbinCmdIl}, &value)) {
 		state->inputSuspended = (value & kBitUsbinSuspend) != 0;
 		state->valid = true;
 	}
-	if (spmiRead(spmi, kSpmISlavePm8150B, {kPeripheralDcdc, kRegPowerPathStatus}, &value)) {
+	if (spmiRead(spmi, kSpmISlavePm8150B, SpmIRegister{kPeripheralDcdc, kRegPowerPathStatus}, &value)) {
 		state->powerPathStatus = value;
 		state->valid = true;
 	}
@@ -209,7 +209,7 @@ bool chargerSetInputCurrentLimit(const SpmI *spmi, uint32_t milliamps)
 		milliamps = kInputCurrentLimitMaxMilliamps;
 	}
 	const uint8_t raw = uint8_t((milliamps - kInputCurrentLimitMinMilliamps) / kInputCurrentLimitStepMilliamps);
-	return spmiWrite(spmi, kSpmISlavePm8150B, {kPeripheralUsbin, kRegUsbinCurrentLimit}, raw);
+	return spmiWrite(spmi, kSpmISlavePm8150B, SpmIRegister{kPeripheralUsbin, kRegUsbinCurrentLimit}, raw);
 }
 
 bool chargerReadInputCurrentLimit(const SpmI *spmi, uint32_t *milliamps)
@@ -218,7 +218,7 @@ bool chargerReadInputCurrentLimit(const SpmI *spmi, uint32_t *milliamps)
 		return false;
 	}
 	uint8_t raw = 0;
-	if (!spmiRead(spmi, kSpmISlavePm8150B, {kPeripheralDcdc, kRegIclStatus}, &raw)) {
+	if (!spmiRead(spmi, kSpmISlavePm8150B, SpmIRegister{kPeripheralDcdc, kRegIclStatus}, &raw)) {
 		return false;
 	}
 	*milliamps = uint32_t(raw) * kInputCurrentLimitStepMilliamps + kInputCurrentLimitMinMilliamps;

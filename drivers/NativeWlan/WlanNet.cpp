@@ -15,14 +15,18 @@
 //
 // The interface is announced to the framework with an Apple vendor kernel event of class 6 (IEEE
 // 802.11), subclass 1, whose payload starts with the interface name.
+#include <libkern/c++/OSMetaClass.h>
+#include <libkern/libkern.h>
 #include <IOKit/IOLib.h>
 #include <sys/kernel_types.h>
 #include <sys/kpi_mbuf.h>
 #include <sys/kern_event.h>
+#include <sys/lock.h>
 #include <sys/socket.h>
 #include <sys/sockio.h>
 #include <net/if.h>
 #include <net/ethernet.h>
+#include <net/if_ether.h>
 #include <net/bpf.h>
 #include <net/dlil.h>
 #include <string.h>

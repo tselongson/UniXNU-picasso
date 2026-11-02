@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 #include <sys/types.h>
+#include <sys/kernel_types.h>
 
 struct mbuf;
 
@@ -17,7 +18,7 @@ struct mbuf;
 bool wlanNetAttach(const uint8_t mac[6]);
 
 // Received frame, ownership taken. Called from the WCSS receive path.
-void wlanNetInput(struct mbuf *frame);
+void wlanNetInput(mbuf_t frame);
 
 // Link state, which also posts the stack's link event.
 void wlanNetLink(bool up);
@@ -27,5 +28,5 @@ void wlanNetSetPowered(bool powered);
 
 // Implemented by the WCSS driver. The first takes ownership of the frame; the second answers one
 // Apple80211 request and returns an errno.
-void wlanTxFrame(struct mbuf *frame);
+void wlanTxFrame(mbuf_t frame);
 int wlanApple80211(bool set, void *request);
