@@ -344,7 +344,7 @@ def build_native_wlan(record):
     out.mkdir(parents=True, exist_ok=True)
     extra_flags = ['-I', str(ROOT / 'drivers/NativeWlan')]
     objects = []
-    for name in ('WlanNet.cpp', 'WlanApple80211.cpp', 'WlanWcss.cpp', 'WlanCe.cpp', 'WlanBmi.cpp', 'WlanQmi.cpp', 'WlanBoard.cpp'):
+    for name in ('WlanNet.cpp', 'WlanApple80211.cpp', 'WlanWcss.cpp', 'WlanCe.cpp', 'WlanBmi.cpp', 'WlanQmi.cpp', 'WlanService.cpp', 'WlanBoard.cpp'):
         src = ROOT / 'drivers/NativeWlan' / name
         dst = out / f'{src.stem}.o'
         compile_file(src, dst, record, extra_flags, is_c=False)
