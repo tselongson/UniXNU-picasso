@@ -21,6 +21,7 @@ extern "C" {
 #include "WlanNet.h"
 #include "WlanCe.h"
 #include "WlanBmi.h"
+#include "WlanQmi.h"
 }
 
 // Register block, from the device tree.
@@ -140,12 +141,55 @@ static int wcssLoadImage(void *, const struct wlan_mbn *image)
 	return 0;
 }
 
+// The request numbers the handshake uses map onto the WLFW message ids the target expects. Keeping
+// the mapping here rather than in the state machine means the sequence stays readable as a sequence.
+static uint16_t wlfwMessageId(unsigned request)
+{
+	switch (request) {
+	case 1: return 0x002f;   // capability
+	case 2: return 0x0031;   // config
+	case 3: return 0x0035;   // indication register
+	case 4: return 0x0039;   // ini sync
+	case 5: return 0x003b;   // MSA memory info
+	case 6: return 0x003d;   // MSA ready
+	case 7: return 0x003f;   // mode
+	default: return 0;
+	}
+}
+
+static uint16_t gTransaction;
+
 static int wcssRequest(void *, unsigned request, uint64_t arg0, uint64_t arg1)
 {
-	// A QMI request is a small message over the control path: a header, a transaction id and a
-	// payload. The framing is well defined; the transport under it is the copy engine again.
-	IOLog("PICASSO_WLAN wcss: request %u (arg %llu %llu) needs the QMI transport, not implemented\n",
-	      request, arg0, arg1);
+	const uint16_t messageId = wlfwMessageId(request);
+	if (messageId == 0) {
+		return -1;
+	}
+	// The payload of every one of these is a single TLV: the argument the caller passed, narrowed to
+	// what the message actually carries.
+	uint8_t value[8];
+	memcpy(value, &arg0, sizeof(uint32_t));
+	memcpy(value + 4, &arg1, sizeof(uint32_t));
+
+	uint8_t message[64];
+	const size_t length = wlanQmiBuildRequest(message, sizeof(message), ++gTransaction, messageId,
+	                                          0x01, value, sizeof(value));
+	if (length == 0) {
+		return -1;
+	}
+	// The control path is copy engine 1, the same one the firmware download used, which is how the
+	// target expects its control traffic after the handover.
+	if (!wlanCeSubmit(1, 0, message, uint32_t(length), 0, nullptr)) {
+		IOLog("PICASSO_WLAN wcss: request %u could not be queued\n", request);
+		return -1;
+	}
+	for (unsigned spin = 0; spin < 10000; ++spin) {
+		if (wlanCeCompleted(1) > 0) {
+			return 0;
+		}
+		IODelay(10);
+	}
+	IOLog("PICASSO_WLAN wcss: request %u timed out\n", request);
 	return -1;
 }
 
