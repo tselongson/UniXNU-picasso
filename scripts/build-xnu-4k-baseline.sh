@@ -718,7 +718,19 @@ for name,digest in report['source_sha256'].items():
 PY_LEGACY_DISPLAY
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$LEGACY_DISPLAY_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $LEGACY_DISPLAY_ARCHIVE"
-  fi
+  else
+    # Without the display layer the USB console still calls its three entry points, so a stub
+    # archive answers them. The stubs are no-ops built from source in the tree, so they exist
+    # on a clean machine where the display archive cannot, because it qualifies itself against
+    # a prelink candidate only an earlier run has.
+    DISPLAY_STUB_ARCHIVE=$ROOT/build/display-stubs/libDisplayStubs.a
+    if [ ! -f "$DISPLAY_STUB_ARCHIVE" ]; then
+      mkdir -p "$ROOT/build/display-stubs"
+      python3 scripts/build-display-stubs.py
+    fi
+    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$DISPLAY_STUB_ARCHIVE"
+    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $DISPLAY_STUB_ARCHIVE"
+  fi
   if [ "${XNU_NATIVE_AES:-0}" = 1 ]; then
     AES_ARCHIVE=${XNU_NATIVE_AES_ARCHIVE:-$ROOT/build/native-aes/libNativeAES.a}
     test -f "$AES_ARCHIVE"
