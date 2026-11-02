@@ -307,17 +307,6 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
-    # The sibling HID builder seeds its candidate from the kernel this pipeline just linked;
-    # this one only demanded the file, so a clean checkout stopped here with nothing to copy
-    # from. Same seed, same place.
-    if not CANDIDATE.is_file():
-        previous = ROOT.parent / "kernel"
-        source, plan = previous / "kernel.macho", previous / "kernel.json"
-        if not (source.is_file() and plan.is_file()):
-            raise SystemExit(f"no legacy display prelink candidate: build the kernel once first ({source})")
-        CANDIDATE.parent.mkdir(parents=True, exist_ok=True)
-        CANDIDATE.write_bytes(source.read_bytes())
-        CANDIDATE.with_suffix(".json").write_bytes(plan.read_bytes())
     require(CANDIDATE.is_file(), f"missing original candidate: {CANDIDATE}")
     # `unixnu tree` refreshes scripts/, but the remaining inputs are linked
     # sources. Copy the driver/header here so a build from the assembled tree
