@@ -25,6 +25,12 @@ bool chargerSuspendInput(const struct SpmI *spmi, bool suspend);
 
 bool chargerReadState(const struct SpmI *spmi, struct ChargerState *state);
 
+// Sets the USB input current limit, clamped to the range the block accepts. The register step is the
+// one this block has used since PM8150; read it back with chargerReadInputCurrentLimit() to confirm,
+// because a wrong step shows up as a mismatch there rather than as silently wrong current.
+bool chargerSetInputCurrentLimit(const struct SpmI *spmi, uint32_t milliamps);
+bool chargerReadInputCurrentLimit(const struct SpmI *spmi, uint32_t *milliamps);
+
 // True when the pack is at or past the full threshold, with hysteresis so the switch does not
 // chatter at the boundary.
 bool chargerShouldStopCharging(uint32_t millivolts, bool chargingEnabled);

@@ -24,8 +24,22 @@ enum : uint16_t {
 enum : uint16_t {
 	kRegChargingEnableCmd = 0x42,   // CHGR_BASE + 0x42
 	kRegPowerPathStatus = 0x0b,     // DCDC_BASE + 0x0b
+	kRegIclStatus = 0x07,           // DCDC_BASE + 0x07, reports the limit actually in force
 	kRegUsbinCmdIl = 0x40,          // USBIN_BASE + 0x40
 	kRegUsbinCurrentLimit = 0x70,   // USBIN_BASE + 0x70
+	kRegFastChargeCurrent = 0x61,   // CHGR_BASE + 0x61
+	kRegFloatVoltage = 0x70,        // CHGR_BASE + 0x70
+};
+
+// One step of the input current limit register. The parameter table that would state this
+// authoritatively lives in the downstream driver's initialisation, which is not reachable from here,
+// so the value the block has used since PM8150 is taken instead and the caller is expected to verify
+// it with chargerReadInputCurrentLimit(), which reads the limit back out of ICL_STATUS. A wrong step
+// shows up there as a mismatch rather than as silently wrong current.
+enum : uint32_t {
+	kInputCurrentLimitStepMilliamps = 100,
+	kInputCurrentLimitMinMilliamps = 100,
+	kInputCurrentLimitMaxMilliamps = 3000,
 };
 
 enum : uint8_t {
@@ -83,6 +97,34 @@ bool chargerReadState(const SpmI *spmi, struct ChargerState *state)
 		state->valid = true;
 	}
 	return state->valid;
+}
+
+bool chargerSetInputCurrentLimit(const SpmI *spmi, uint32_t milliamps)
+{
+	if (!spmi) {
+		return false;
+	}
+	if (milliamps < kInputCurrentLimitMinMilliamps) {
+		milliamps = kInputCurrentLimitMinMilliamps;
+	}
+	if (milliamps > kInputCurrentLimitMaxMilliamps) {
+		milliamps = kInputCurrentLimitMaxMilliamps;
+	}
+	const uint8_t raw = uint8_t((milliamps - kInputCurrentLimitMinMilliamps) / kInputCurrentLimitStepMilliamps);
+	return spmiWrite(spmi, kSpmISlavePm8150B, {kPeripheralUsbin, kRegUsbinCurrentLimit}, raw);
+}
+
+bool chargerReadInputCurrentLimit(const SpmI *spmi, uint32_t *milliamps)
+{
+	if (!spmi || !milliamps) {
+		return false;
+	}
+	uint8_t raw = 0;
+	if (!spmiRead(spmi, kSpmISlavePm8150B, {kPeripheralDcdc, kRegIclStatus}, &raw)) {
+		return false;
+	}
+	*milliamps = uint32_t(raw) * kInputCurrentLimitStepMilliamps + kInputCurrentLimitMinMilliamps;
+	return true;
 }
 
 // The pack is treated as full at 4.35 V and as needing charge again below 4.15 V. The gap is what
