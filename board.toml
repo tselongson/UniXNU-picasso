@@ -77,6 +77,9 @@ archives = [
   # The archive lands in build/sheng-platform-power/libShengPlatformPower.a, the path
   # build-xnu-4k-baseline.sh force-loads when CONFIG_XNU_SHENG_PMGR=1.
   "build-picasso-pmgr.py",
+  # SPMI transport plus the VADC battery readings and the TSENS temperatures. It carries no
+  # display or GPU dependency, so it can be linked and exercised on its own.
+  "build-arm-driver.py NativePmic",
   # Owned CPU/GOP framebuffer subclass over the original Legacy family.
   # It is entered only through the explicit CDC display commands.
 ]

@@ -312,10 +312,32 @@ def build_adreno_picasso(record: dict):
     print(f'AdrenoPicasso: ARM64/iOS 17 A620 probe archive built ({len(objects)} objects)')
 
 
+def build_native_pmic(record):
+    """PMIC access for the battery and thermal drivers (drivers/NativePmic).
+
+    The SPMI transport, the VADC battery readings and the TSENS temperatures are plain register work;
+    they carry no IOKit dependency beyond IOLib, so the archive is three objects and no generated
+    inputs. Wiring it here rather than in its own script keeps it on the same compile flags as every
+    other driver, which matters because a differing flag set would let a layout mismatch hide until
+    the archive is linked into the kernel."""
+    out = ROOT / 'build/native-pmic'
+    out.mkdir(parents=True, exist_ok=True)
+    extra_flags = ['-I', str(ROOT / 'drivers/NativePmic')]
+    objects = []
+    for name in ('SpmI.cpp', 'Battery.cpp', 'Thermal.cpp'):
+        src = ROOT / 'drivers/NativePmic' / name
+        dst = out / f'{src.stem}.o'
+        compile_file(src, dst, record, extra_flags, is_c=False)
+        objects.append(dst)
+    archive = out / 'libNativePmic.a'
+    archive.unlink(missing_ok=True)
+    subprocess.run(['xcrun', 'ar', 'rcs', str(archive)] + [str(o) for o in objects], check=True)
+    print(f'NativePmic: ARM64/iOS 17 SPMI, battery and TSENS archive built ({len(objects)} objects)')
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('component', choices=['ArmDTPlatform', 'ArmCpu', 'NativeRamBlock', 'NativeUfs', 'NativeAdreno',
-                                              'AdrenoPicasso', 'NativeHidInput'])
+                                              'AdrenoPicasso', 'NativeHidInput', 'NativePmic'])
     args = parser.parse_args()
 
     recipe = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
@@ -326,6 +348,9 @@ def main():
         return
     if args.component == 'AdrenoPicasso':
         build_adreno_picasso(record)
+        return
+    if args.component == 'NativePmic':
+        build_native_pmic(record)
         return
 
     out_map = {
