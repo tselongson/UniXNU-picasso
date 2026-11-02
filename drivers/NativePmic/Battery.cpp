@@ -16,6 +16,7 @@
 #include "Battery.h"
 #include "SpmI.h"
 
+#include <IOKit/IOLib.h>
 #include <string.h>
 
 // VADC block, identical layout in every PMIC on this board: peripheral 0x3100, 0x100 bytes, channel
