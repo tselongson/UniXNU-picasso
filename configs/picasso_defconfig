@@ -30,13 +30,7 @@ CONFIG_XNU_NATIVE_AES=y
 # CONFIG_XNU_NATIVE_VIRTIO_CONSOLE is not set
 CONFIG_XNU_NATIVE_RAM_BLOCK=y
 # CONFIG_XNU_NATIVE_MOBILE_DISPLAY is not set
-# The legacy display layer links a qualified archive that the build only has after a
-# run that built it, and the build stops on the hash check otherwise. Off until the
-# qualification step is part of this pipeline.
-# The legacy display build qualifies its archive against a prelink candidate that only an
-# earlier run has, so a clean machine stops there. The three entry points the USB console
-# calls are answered by the stub archive instead.
-# CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
+CONFIG_XNU_NATIVE_LEGACY_DISPLAY=y
 CONFIG_XNU_NATIVE_ADRENO=y
 # CONFIG_XNU_ARMVIRT_PLATFORM is not set
 # CONFIG_XNU_ZONE_PGZ_ALIGNMENT_PROBE is not set
@@ -67,13 +61,10 @@ CONFIG_XNU_BOOT_PROGRESS=y
 # through the original IOHIDDevice ABI. The device is built only when the probe
 # is started (offline-hid-input=1), and the Home reports come from
 # offline-hid-auto-home; without those arguments nothing is published.
-# The HID input layer seeds itself from the kernel this pipeline linked, and that seed
-# is not there when the archive runs, so it stops the build. Disabled until the seed
-# has a producer.
+# seeds its candidate from a previously linked kernel, which a clean run does not have.
 # CONFIG_XNU_SHENG_HIDINPUT=y
 # Novatek NT36672C touch: the GENI SPI probe and its embedded firmware.
-# The touch probe embeds a Novatek firmware blob that lives outside the repository
-# (/tmp/picasso-vendor), so a clean run stops at the build script that needs it.
+# embeds a firmware blob that lives outside the repository, which a clean run does not have.
 # CONFIG_XNU_NOVATEK_TOUCH=y
 # SM7250 cpufreq-hw probe and governor (sheng-cpufreq=<1..4>, inert without it).
 CONFIG_XNU_PICASSO_CPUFREQ=y
