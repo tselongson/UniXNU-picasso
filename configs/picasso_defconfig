@@ -61,7 +61,10 @@ CONFIG_XNU_BOOT_PROGRESS=y
 # through the original IOHIDDevice ABI. The device is built only when the probe
 # is started (offline-hid-input=1), and the Home reports come from
 # offline-hid-auto-home; without those arguments nothing is published.
-CONFIG_XNU_SHENG_HIDINPUT=y
+# The HID input layer seeds itself from the kernel this pipeline linked, and that seed
+# is not there when the archive runs, so it stops the build. Disabled until the seed
+# has a producer.
+# CONFIG_XNU_SHENG_HIDINPUT=y
 # Novatek NT36672C touch: the GENI SPI probe and its embedded firmware.
 CONFIG_XNU_NOVATEK_TOUCH=y
 # SM7250 cpufreq-hw probe and governor (sheng-cpufreq=<1..4>, inert without it).
