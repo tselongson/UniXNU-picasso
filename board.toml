@@ -79,7 +79,6 @@ archives = [
   "build-picasso-pmgr.py",
   # Owned CPU/GOP framebuffer subclass over the original Legacy family.
   # It is entered only through the explicit CDC display commands.
-  "build-native-legacy-display.py",
 ]
 
 [kernel.prelink]
