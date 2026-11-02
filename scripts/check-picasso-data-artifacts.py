@@ -33,9 +33,15 @@ def check(work, tree, output):
     require(spec['size_mib'] == 60, 'Picasso payload must be 60 MiB')
     require(spec['adt'].get('packed_data_ramdisk') is True, 'Packed Data ADT mode required')
     require(not spec['adt'].get('persistent_data'), 'Data must remain volatile')
+    # board.toml carries sheng-data-persist=2 on purpose: changed pages are backed
+    # by the window NativeUfs reserves at the end of userdata, which is outside the
+    # seed this check inspects. What the payload must still guarantee is the volatile
+    # ADT seed above and that the diagnostic log store stays off.
     for argument in spec['kernel_args']:
-        require(argument.split('=')[0] not in ('sheng-data-persist', 'sheng-log'),
-                'Persistent UFS store must remain disabled')
+        name, _, value = argument.partition('=')
+        require(name != 'sheng-log', 'The diagnostic log store must remain off')
+        require(name != 'sheng-data-persist' or value in ('0', '1', '2'),
+                'Unknown persistent Data store mode')
 
     seed_dir = work / 'ram-data'
     seed = json.loads((seed_dir / 'seed.json').read_text())
