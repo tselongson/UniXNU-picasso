@@ -319,10 +319,12 @@ kernel_args = [
   # this is the documented override, and the image it guards is the one the
   # qualified kernel carried.
   "sheng-gpu-allow-old-sqe=1",
-  # Load the signed A620 zap through TrustZone (PAS) before hw_init and leave
-  # secure mode with CP_SET_SECURE_MODE(0). Without it every draw to client
-  # memory is discarded; the switch is what wf102 proved is gated on the zap.
-  "sheng-gpu-zap=1",
+  # Mode 4 raises every cpufreq-hw domain to its highest non-turbo level and
+  # runs the governor. Without it the SoC stays at its boot level for the whole
+  # boot: launchd is 300 s away and the software-rendered UI takes another ten
+  # minutes. silenzio's handoff payload carries this argument; the CI payload
+  # never did.
+  "sheng-cpufreq=4",
   # Owned offline HID source (ShengHidInput). offline-hid-input=1 lets the probe
   # attach a virtual keyboard through the ORIGINAL IOHIDDevice ABI;
   # offline-hid-home=1 is the device-creation gate, and the auto-home series
