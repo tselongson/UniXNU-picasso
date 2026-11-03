@@ -271,3 +271,12 @@ extern "C" void native_wlan_probe(void) {
            native_wlan_error, wlan_transport_name(static_cast<int>(native_wlan_transport)));
     (void)rc;
 }
+
+// The integrator stages firmware through native_wlan_set_firmware(); the weak externs above bind
+// only when a blob was compiled into the image, which this tree never does. Define the absent-blob
+// objects so the final link resolves the data symbols; size 0 keeps stage3 on the honest
+// "no firmware staged" path.
+extern "C" {
+const uint8_t native_wlan_firmware[1] = {0};
+const uint32_t native_wlan_firmware_size = 0;
+}

@@ -1,3 +1,6 @@
+#ifdef __cplusplus
+extern "C" {
+#endif
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // The WCN3990 copy engine register map, which is what this board's WCSS actually is.
 //
@@ -82,3 +85,7 @@ bool wlanCeSubmit(unsigned engine, uint64_t targetAddress, const void *data, uin
 
 // Descriptors the target has filled since the caller last advanced its read index.
 uint32_t wlanCeCompleted(unsigned engine);
+
+#ifdef __cplusplus
+}
+#endif

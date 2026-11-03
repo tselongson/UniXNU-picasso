@@ -1,3 +1,6 @@
+#ifdef __cplusplus
+extern "C" {
+#endif
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // The network side of the WiFi module: an ifnet the stack routes through, plus the Apple80211
 // requests the wireless framework issues against it.
@@ -30,3 +33,7 @@ void wlanNetSetPowered(bool powered);
 // Apple80211 request and returns an errno.
 void wlanTxFrame(mbuf_t frame);
 int wlanApple80211(bool set, void *request);
+
+#ifdef __cplusplus
+}
+#endif

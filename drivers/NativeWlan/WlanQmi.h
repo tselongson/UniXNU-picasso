@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // QMI framing: the messages the WLFW handshake exchanges once the firmware is running.
 #pragma once
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 #include <stddef.h>
 #include <stdint.h>
@@ -36,3 +40,7 @@ bool wlanQmiNextTlv(const uint8_t *payload, size_t payloadLength, size_t *cursor
 // Builds a request whose payload is one TLV, which is the shape every WLFW request has.
 size_t wlanQmiBuildRequest(uint8_t *buffer, size_t capacity, uint16_t transaction, uint16_t messageId,
                            uint8_t tlvType, const void *tlvValue, size_t tlvLength);
+
+#ifdef __cplusplus
+}
+#endif
