@@ -3,16 +3,14 @@
 // drivers need: every PMIC block (VADC, temp alarm, charger) is reached through the arbiter at
 // 0x0c440000, which is described in the SoC device tree rather than in the board overlay, so the
 // board overlay alone makes it look as if the PMIC has no bus.
+//
+// The windows must be MAPPED, not merely cast: the arbiter is v5 (core 0x1100 + cnfg 0x26000 +
+// chnls 0x2000000 + obsrvr, the same map ButtonProbe already exercises on hardware). Reads go
+// through this EE's observer window and writes through the per-APID channel window, exactly like
+// drivers/NativeButtons/ButtonProbe.cpp.
 #pragma once
 
 #include <stdint.h>
-
-// Arbiter and channel windows, from /soc/qcom,spmi@c440000 in the SoC device tree:
-//   reg = <0xc440000 0x1100 0xc600000 0x2000000 ...>
-#define kSpmIArbiterBase   0x0c440000u
-#define kSpmIArbiterSize   0x1100u
-#define kSpmIChannelBase   0x0c600000u
-#define kSpmIChannelSize   0x2000000u
 
 // Slave ids on this board: pm8150 at 0, pm8150b at 2, pm8150l at 4. All three appear in the board
 // overlay; pm8150b is the one that carries the SMB5 charger and the pack sense channels.
@@ -27,14 +25,21 @@ struct SpmIRegister {
 };
 
 struct SpmI {
-	volatile uint8_t *arbiter;   // kSpmIArbiterBase
-	volatile uint8_t *channel;   // kSpmIChannelBase
-	uint32_t mappedSize;
+	void *coreMap;               // IOMemoryMap* for the arbiter core window
+	void *cnfgMap;               // IOMemoryMap* for the per-APID configuration window
+	void *chnMap;                // IOMemoryMap* for the channel window
+	void *obsMap;                // IOMemoryMap* for this EE's observer window
+	volatile uint32_t *core;     // mapped 0x0c440000
+	volatile uint32_t *cnfg;     // mapped 0x0c40a000
+	volatile uint32_t *chn;      // mapped 0x0c600000
+	volatile uint32_t *obs;      // mapped 0xe600000
+	uint32_t apids;              // APID table entries the arbiter reports
+	uint8_t ee;                  // this EE (APPS = 0)
 	bool ready;
 };
 
-// Maps the arbiter and channel windows. Returns false when the windows cannot be mapped, which is the
-// case on a tree whose device tree does not describe the SPMI controller.
+// Maps the four arbiter windows and validates the block generation (v5 only). Returns false when a
+// window cannot be mapped or the block reports an unexpected layout; spmiRead/spmiWrite then refuse.
 bool spmiInit(SpmI *spmi);
 
 // Reads one register of one PMIC. Returns false on a bus error or a command that never completes;

@@ -230,7 +230,9 @@ kernel_args = [
   "sheng-cpufreq=4",
   "sheng-cpufreq-cap=1600",
   "sheng-cpufreq-min=800",
+  "native-pmic=1",
 ]
+
 
 
 
