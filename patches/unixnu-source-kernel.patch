@@ -3799,7 +3799,7 @@ index 0000000000000000000000000000000000000000..2ed32ed0b69d47a13d6f3e1a83bb6309
 ++#if DEVELOPMENT || DEBUG
 ++	static unsigned pid1_open_count;
 ++	unsigned pid1_open_ticket = proc_getpid(p) == 1 ?
-++	    picasso_pid1_trace_ticket(&pid1_open_count, 64) : 0;
+++	    picasso_pid1_trace_ticket(&pid1_open_count, 8) : 0;
 ++	uint64_t pid1_open_thread = pid1_open_ticket ? thread_tid(vfs_context_thread(ctx)) : 0;
 ++	if (pid1_open_ticket) {
 ++		printf("PICASSO_PID1 open begin sample=%u thread=%llu flags=%x\n",
@@ -3988,7 +3988,7 @@ index 0000000000000000000000000000000000000000..2ed32ed0b69d47a13d6f3e1a83bb6309
 ++	static unsigned pid1_setup_count;
 ++	static unsigned pid1_setup_stage_count;
 ++	unsigned pid1_setup_ticket = proc_getpid(p) == 1 ?
-++	    picasso_pid1_trace_ticket(&pid1_setup_count, 16) : 0;
+++	    picasso_pid1_trace_ticket(&pid1_setup_count, 4) : 0;
 ++	uint64_t pid1_setup_thread = pid1_setup_ticket ? thread_tid(current_thread()) : 0;
 ++	unsigned pid1_setup_file = UINT32_MAX;
 ++	const char *pid1_setup_stage = "allocation";
@@ -3997,7 +3997,7 @@ index 0000000000000000000000000000000000000000..2ed32ed0b69d47a13d6f3e1a83bb6309
 ++#define PICASSO_PID1_SETUP_STAGE(value) do { \
 ++	pid1_setup_stage = (value); \
 ++	if (pid1_setup_ticket) { \
-++		unsigned stage_ticket = picasso_pid1_trace_ticket(&pid1_setup_stage_count, 64); \
+++		unsigned stage_ticket = picasso_pid1_trace_ticket(&pid1_setup_stage_count, 8); \
 ++		if (stage_ticket) printf("PICASSO_PID1 map_setup stage sample=%u thread=%llu file=%u stage=%s\n", \
 ++		    pid1_setup_ticket, (unsigned long long)pid1_setup_thread, pid1_setup_file, pid1_setup_stage); \
 ++		if (stage_ticket == 64) printf("PICASSO_PID1 map_setup stage limit=64 reached; further stage arrivals are quiet\n"); \
@@ -4137,7 +4137,7 @@ index 0000000000000000000000000000000000000000..2ed32ed0b69d47a13d6f3e1a83bb6309
 ++#if DEVELOPMENT || DEBUG
 ++	static unsigned pid1_vm_map_count;
 ++	unsigned pid1_vm_map_ticket = proc_getpid(p) == 1 ?
-++	    picasso_pid1_trace_ticket(&pid1_vm_map_count, 16) : 0;
+++	    picasso_pid1_trace_ticket(&pid1_vm_map_count, 4) : 0;
 ++	uint64_t pid1_vm_map_thread = pid1_vm_map_ticket ? thread_tid(current_thread()) : 0;
 ++#endif
 + 
@@ -4166,7 +4166,7 @@ index 0000000000000000000000000000000000000000..2ed32ed0b69d47a13d6f3e1a83bb6309
 ++#if DEVELOPMENT || DEBUG
 ++	static unsigned pid1_map_count;
 ++	unsigned pid1_map_ticket = proc_getpid(p) == 1 ?
-++	    picasso_pid1_trace_ticket(&pid1_map_count, 16) : 0;
+++	    picasso_pid1_trace_ticket(&pid1_map_count, 4) : 0;
 ++	uint64_t pid1_map_thread = pid1_map_ticket ? thread_tid(current_thread()) : 0;
 ++	if (pid1_map_ticket) printf("PICASSO_PID1 map begin sample=%u thread=%llu files=%u mappings=%u\n",
 ++	    pid1_map_ticket, (unsigned long long)pid1_map_thread, files_count, mappings_count);
@@ -4549,7 +4549,7 @@ index 0000000000000000000000000000000000000000..2ed32ed0b69d47a13d6f3e1a83bb6309
 ++/* PICASSO_PREFLIGHT_BEGIN */
 ++#if DEVELOPMENT || DEBUG
 ++	static unsigned pid1_pread_count;
-++	unsigned pid1_ticket = (proc_getpid(p) == 1) ? picasso_pid1_trace_ticket(&pid1_pread_count, 64) : 0;
+++	unsigned pid1_ticket = (proc_getpid(p) == 1) ? picasso_pid1_trace_ticket(&pid1_pread_count, 8) : 0;
 ++	uint64_t pid1_thread = pid1_ticket ? thread_tid(current_thread()) : 0;
 ++	if (pid1_ticket) printf("PICASSO_PID1 pread begin s=%u t=%llu fd=%d off=%llx req=%llu\n",
 ++	    pid1_ticket, (unsigned long long)pid1_thread, uap->fd, (unsigned long long)uap->offset, (unsigned long long)uap->nbyte);
@@ -4691,7 +4691,7 @@ index 0000000000000000000000000000000000000000..2ed32ed0b69d47a13d6f3e1a83bb6309
 ++/* PICASSO_PREFLIGHT_BEGIN */
 ++#if DEVELOPMENT || DEBUG
 ++	static unsigned pid1_fstat_count;
-++	unsigned pid1_ticket = (proc_getpid(p) == 1) ? picasso_pid1_trace_ticket(&pid1_fstat_count, 64) : 0;
+++	unsigned pid1_ticket = (proc_getpid(p) == 1) ? picasso_pid1_trace_ticket(&pid1_fstat_count, 8) : 0;
 ++	uint64_t pid1_thread = pid1_ticket ? thread_tid(current_thread()) : 0;
 ++	if (pid1_ticket) printf("PICASSO_PID1 fstat begin s=%u t=%llu fd=%d\n",
 ++	    pid1_ticket, (unsigned long long)pid1_thread, fd);
@@ -4769,7 +4769,7 @@ index 0000000000000000000000000000000000000000..2ed32ed0b69d47a13d6f3e1a83bb6309
 ++/* PICASSO_PREFLIGHT_BEGIN */
 ++#if DEVELOPMENT || DEBUG
 ++	static unsigned pid1_mmap_count;
-++	unsigned pid1_ticket = (proc_getpid(p) == 1 && fd >= 0 && !(uap->flags & MAP_ANON)) ? picasso_pid1_trace_ticket(&pid1_mmap_count, 64) : 0;
+++	unsigned pid1_ticket = (proc_getpid(p) == 1 && fd >= 0 && !(uap->flags & MAP_ANON)) ? picasso_pid1_trace_ticket(&pid1_mmap_count, 8) : 0;
 ++	uint64_t pid1_thread = pid1_ticket ? thread_tid(current_thread()) : 0;
 ++	if (pid1_ticket) printf("PICASSO_PID1 mmap begin s=%u t=%llu fd=%d off=%llx len=%llu prot=%x flags=%x\n",
 ++	    pid1_ticket, (unsigned long long)pid1_thread, fd, (unsigned long long)uap->pos, (unsigned long long)uap->len, (unsigned)uap->prot, (unsigned)uap->flags);
@@ -4985,7 +4985,7 @@ index 0000000000000000000000000000000000000000..2ed32ed0b69d47a13d6f3e1a83bb6309
 ++#if DEVELOPMENT || DEBUG
 ++	static unsigned pid1_n4k_count, pid1_n4k_progress_count;
 ++	unsigned pid1_ticket = proc_getpid(current_proc()) == 1 ?
-++	    picasso_pid1_trace_ticket(&pid1_n4k_count, 64) : 0;
+++	    picasso_pid1_trace_ticket(&pid1_n4k_count, 8) : 0;
 ++	uint64_t pid1_thread = pid1_ticket ? thread_tid(current_thread()) : 0;
 ++	uint64_t pid1_requested = 0, pid1_authenticated = 0, pid1_derived = 0;
 ++	uint64_t pid1_read_ticks = 0, pid1_hash_ticks = 0;
@@ -5003,7 +5003,7 @@ index 0000000000000000000000000000000000000000..2ed32ed0b69d47a13d6f3e1a83bb6309
 ++	return pid1_error; \
 ++} while (0)
 ++#define PICASSO_PID1_N4K_PROGRESS(label) do { \
-++	if (picasso_pid1_trace_ticket(&pid1_n4k_progress_count, 96)) \
+++	if (picasso_pid1_trace_ticket(&pid1_n4k_progress_count, 16)) \
 ++	    printf("PICASSO_PID1 n4k progress s=%u t=%llu stage=%s off=%llx limit=%llx req=%llu auth=%llu derived=%llu\n", \
 ++	    pid1_ticket, (unsigned long long)pid1_thread, (label), (unsigned long long)chunk, (unsigned long long)limit, \
 ++	    (unsigned long long)pid1_requested, (unsigned long long)pid1_authenticated, (unsigned long long)pid1_derived); \
@@ -6593,7 +6593,7 @@ index 0000000000000000000000000000000000000000..809fe44094311062557b897301a87477
 + 	unsigned ticket =
 + 	    os_atomic_inc_orig(&picasso_sync_ipc_trace_count, relaxed);
 +-	if (ticket >= 512) {
-++	if (ticket >= 4096) {
+++	if (ticket >= 256) {
 + 		return;
 + 	}
 + 	int client_pid = task_pid(client_task);
