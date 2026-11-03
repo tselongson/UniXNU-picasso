@@ -58,29 +58,18 @@ archives = [
   "build-corecrypto-14.py --namespace",
   "build-arm-driver.py ArmDTPlatform",
   "build-arm-driver.py ArmCpu",
-  # AppleImage4 waits for this real software-key IOAESAccelerator provider.
   "build-picasso-aes.py",
-  # Stage 6: the UFS controller driver. Its board constants (GccUfs.h) carry
-  # the SM7250 physical windows; the ADT ufshc/ufsphy nodes only match classes.
   "build-arm-driver.py NativeUfs",
-  # Native A620 transport and command-processor driver. The initial boot only
-  # probes its MMIO windows read-only; GPU power and firmware startup stay
-  # behind explicit boot arguments.
   "build-arm-driver.py NativeAdreno",
-  # A620 board/firmware/stage probe (sheng-gpu=<1..5>): platform inputs, the
-  # vendor container checks and the CX/SMMU identity readback. It is inert
-  # without the boot argument and never publishes a Metal device.
   "build-arm-driver.py AdrenoPicasso",
-  # Volatile APFS Data; shares NativeUfs's exact original IOStorage bindings.
   "build-arm-driver.py NativeRamBlock",
-  # Publishes ApplePMGRNub, the original-policy SM7250 watchdog, and volatile boot-stage storage.
-  # The archive lands in build/sheng-platform-power/libShengPlatformPower.a, the path
-  # build-xnu-4k-baseline.sh force-loads when CONFIG_XNU_SHENG_PMGR=1.
   "build-picasso-pmgr.py",
-  # Owned CPU/GOP framebuffer subclass over the original Legacy family.
-  # It is entered only through the explicit CDC display commands.
   "build-native-legacy-display.py",
+  "build-native-buttons.py",
+  "build-native-pmic.py",
+  "build-native-wlan.py",
 ]
+
 
 [kernel.prelink]
 # Retains the stock emitter, then binds watchdogd's single service-class rule
@@ -196,86 +185,27 @@ kernel_args = [
   "-v",
   "debug=0x14e",
   "cpus=8",
-  # PSCI CPU_ON per secondary (conduit comes from the ADT /psci node). The SGI
-  # form of an IPI produces nothing on this board, so cross-core signals are
-  # software-pended SPIs; the self-IPI makes XNU clear SIGPdisabled on a new core.
   "sheng-smp=1",
   "armcpu-spi-ipi=1",
   "armcpu-self-ipi=1",
-  # Production root path. native-ufs-root=1 starts the root from the
-  # root-device personality without the diagnostic media-report panic that
-  # native-ufs-probe=12 ends with. Upstream's payload guard (check_native_root)
-  # requires sheng-pmgr=2 and a linked _sheng_pmgr_run for this mode, because
-  # the unchanged target AMFI otherwise panics with "No PMGR?" while looking
-  # for ApplePMGRNub in its configuration settings; package/PicassoPmgr.cpp
-  # publishes that nub, and CONFIG_XNU_SHENG_PMGR links it.
   "native-ufs-root=1",
   "sheng-pmgr=2",
-  # Let bsd_init start the CDC console before the UFS publication diagnostic
-  # runs, so a later UFS panic still has a complete host-side log.
   "native-ufs-start-delay=5",
-  # IOSleep does not reliably make progress this early with cpus=1. The
-  # timebase+yield path has been exercised on hardware; scans also yield at
-  # every 128 KiB batch so CDC keeps draining.
   "native-ufs-delay-yield=1",
-  # Command tracing stays off. It prints two lines per SCSI/query command
-  # (NATIVE_UFS_NOP clear=begin/end, named for the UCD clear they share), and a
-  # boot that is reading the root volume emits them continuously, which buries
-  # every other message. Set it back to 1 only when the UFS transport itself is
-  # the question.
-  "native-ufs-diagnostics=0",
-  # Request the optional NativeUfs store window for changed Data pages.
-  # The generated APFS seed has 1024 MiB sparse logical capacity.
   "sheng-data-persist=2",
-  # Diagnostic bring-up isolation: the original watchdogd's service checks do
-  # not complete on this kernel yet. Disable only its launch job for this boot.
   "sheng-disable-watchdogd=1",
-  # SpringBoard's synchronous CHSChronoServicesConnection XPC was the last wall
-  # before the UI: it waited on chronod forever because the no-radio/no-account
-  # jobs (identityservicesd, locationd, CommCenter, coreduetd, PerfPowerServices,
-  # duetexpertd, ...) kept the services around it stalled. sheng's production
-  # line sets this on the same 21H461 userland; with it the lock screen renders.
   "sheng-lite=1",
-  # IOKit matching trace is off for the same reason as the UFS one: it answers
-  # whether a personality matched, which the earlier root and probe=12 runs have
-  # already established, and it prints a very long log while doing so. Turn it
-  # back on when a driver is suspected of never being matched; the bits are
-  # kIOLogMatch(0x10) | kIOLogProbe(0x2) | kIOLogConfig(0x20) | kIOLogCatalogue(0x200).
-  # Diagnostic-only: keep console output flowing when an early kernel path
-  # logs with interrupts disabled. Without this XNU panics at
-  # serial_console.c:175 before CDC can deliver the surrounding context.
   "nointr_consio=1",
-  # IOLog has a separate interrupt-context assertion in IOLib.cpp. This
-  # diagnostic-only escape hatch lets those messages reach the CDC console.
   "nointr_iolog=1",
-  # USB console (usb branch): 1 = state probe only, 2 = run the CDC-ACM
-  # console streaming (DWC3 device mode; the PC sees a serial port carrying
-  # the last 256 KiB of console text and then live output).
   "picasso_usb=2",
-  # The pre-existing apps-SMMU route only matches after the USB console
-  # driver installs its guarded plan/apply bypass for stream 0xe0. Without
-  # this, the read-only guard sees zero matches and deliberately leaves the
-  # controller untouched.
   "picasso_usb_smmu=6",
-  # Let bsd_init continue to root mounting after the CDC poller starts.
-  # hold=1 parks bsd_init indefinitely for USB-only qualification; that mode
-  # cannot exercise this branch's UFS/root/SystemOS path.
   "picasso_usb_hold=0",
-  # Bound the attended synchronous window while still leaving time to issue
-  # status/start-graphics/register-display/publish-display-start commands.
   "picasso_usb_control_ms=15000",
-  # Host-gated deadman: keep the 32 s hardware watchdog petted while the host
-  # is alive, then force a Fastboot reset after 60 s of silence.
   "picasso_usb_watchdog=1",
   "picasso_usb_watchdog_ms=30000",
   "picasso_usb_early_watchdog=1",
   "picasso_usb_host_timeout_ms=60000",
-  # The XNU CDC panic/reset path uses PSHOLD as its final fallback and arms the
-  # IMEM Fastboot reason before either panic or command reset. The hardware
-  # watchdog path is the proven automatic Fastboot recovery route.
   "picasso_usb_reset=watchdog",
-  # Qualified CPU/GOP display path. The family is loaded before the CDC
-  # window; registration/publication remain explicit CDC commands.
   "offline-mobile-graphics-load=1",
   "offline-legacy-register=1",
   "offline-legacy-gop=1",
@@ -285,44 +215,24 @@ kernel_args = [
   "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1",
   "sheng-vsync=60",
-  # GPU scanout hand-off: the display driver offers each finished frame to the
-  # Adreno plugin, which blits it into the GOP mapping instead of the CPU
-  # copying the whole frame. Without this argument the plugin answers
-  # P2 ee00002c7 and the display keeps the CPU path (the rollback).
   "sheng-fb-gpu=1",
-  # State-only AppleKeyStore probe used by the display/keystore diagnostics.
   "picasso-aks-state=1",
-  # Read GPUCC clock and GDSC state without touching the GPU core. SMMU and
-  # RBBM probes remain separate opt-in arguments because either block may be
-  # inaccessible until CX/GX power and clocks are established.
   "sheng-gpu-probe=1",
-  # Opt-in write limited to GPUCC_CX_GDSCR.SW_COLLAPSE; no GPU core access.
-  # Official UniXNU boot-page UI trace. boot-progress=2 keeps the OS running.
-  # boot-diag-resume is deliberately absent: taking the panel back after 30 s
-  # without a system scanout made the lock screen flip to the log page and back,
-  # which also disturbed the CDC log the host reads.
   "boot-progress=2",
-  "boot-ui-focus=chronod",
-  "boot-ui-focus2=SpringBoard",
-  "boot-ui-focus3=backboardd",
-  "boot-ui-focus4=liveactivitiesd",
-  "boot-ui-follow=1",
-  # Owned offline HID source (ShengHidInput). offline-hid-input=1 lets the probe
-  # attach a virtual keyboard through the ORIGINAL IOHIDDevice ABI;
-  # offline-hid-home=1 is the device-creation gate. This board requests the
-  # synthetic swipes below; automatic Home reports need offline-hid-auto-home.
   "offline-hid-input=1",
   "offline-hid-home=1",
-  # Expose the combined digitizer and register its sink for startup swipes.
   "sheng-touch-hid=1",
-  # Start the firmware-backed physical panel once the digitizer sink exists.
   "sheng-touch=4",
-  # The synthetic bottom-edge swipe that unlocks this iPad identity; auto-home did
-  # not leave the lock screen. One gesture every 20 s from t=540 s covers the window
-  # in which SpringBoard takes the panel.
   "offline-hid-start=540",
   "offline-hid-swipe=16",
+  "native-buttons=1",
+  "sheng-wlan=1",
+  "native-pmic=1",
+  "sheng-cpufreq=4",
+  "sheng-cpufreq-cap=1600",
+  "sheng-cpufreq-min=800",
 ]
+
 # Stage-5 blind-spot instrumentation (docs/zh/guide/debugging.md 颜色条):
 # scripts/patch-xnu-entry-probe.py (ported from UniXNU-sheng; it adapts itself
 # to this kernel via the symbol table) paints a blue bar at the kernel entry,
