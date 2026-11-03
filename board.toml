@@ -226,8 +226,9 @@ kernel_args = [
   "offline-hid-start=60",
   "offline-hid-swipe=16",
   "native-buttons=1",
-  "native-pmic=1",
+  "sheng-wlan=1",
 ]
+
 
 
 

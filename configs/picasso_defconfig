@@ -71,7 +71,7 @@ CONFIG_XNU_ADRENO620_PROBE=y
 # Power/volume keys through the SPMI arbiter and PDC (drivers/NativeButtons).
 CONFIG_XNU_NATIVE_BUTTONS=y
 # SPMI transport, VADC battery readings and the charger policy (drivers/NativePmic).
-CONFIG_XNU_NATIVE_PMIC=y
+# CONFIG_XNU_NATIVE_PMIC is not set
 # WCN WCSS block mapping and bring-up probe (drivers/NativeWlan).
 CONFIG_XNU_NATIVE_WLAN=y
 
