@@ -1149,3 +1149,328 @@ Client side (read-only reference copies):
   4. `PAS_AUTH_AND_RESET(0x0d)` (arginfo `0x01`) — TZ authenticates and runs the zap on the GPU;
   5. then `CP_SET_SECURE_MODE(0)` and, if it takes, the Turnip smoke is the decisive read.
   Metadata and image buffers must be physically contiguous, 4 KiB aligned and non-cacheable.
+- **wf104: first zap loader — device-memory stores are not ordinary stores.** The loader is in
+  `Adreno620Cp.cpp::loadZap()`, called from `hardwareInit()` right after `cpInit()` (mainline
+  `hw_init()` position) and followed by `CP_SET_SECURE_MODE(0)` only when the zap authenticated;
+  `sheng-gpu-zap=0` disables it. It follows upstream exactly: metadata = `qcom_mdt_read_metadata`
+  (`phdrs[0].p_filesz` 0x94 + hash 0x1a38 = 0x1acc = the whole `.mdt`), region =
+  `qcom_mdt_get_size` over loadable segments = `ALIGN(0x568c) - 0x5000 = 0x1000`, the single PT_LOAD
+  `a620_zap.b02` (0x68c) at region offset 0, placed in the DT's `pil_gpu_mem`
+  (`pil_gpu_region@8bc15400`, no-map, 0x2000). PAS calls are SMC64 STD (`0x42000201/02/05`,
+  arginfo 0x82/0x03/0x01, x1=arginfo, x2..=args per `qcom_scm-smc.c`). The probe accessor is
+  `native_adreno620_zap_firmware()`. First boot **panicked in `bzero(region, …)` at `dc zva`**
+  (`__bzero+68`, ESR 0x96000061, FAR inside the region mapping): XNU's `bzero` uses `DC ZVA`,
+  which is an alignment fault on the `kIOMapInhibitCache` mapping of the reserved region. Kernel
+  `3ca189d3fcb1416a613416de29125701c0988d86f507c4b5e0e1acb3fe384266`; image
+  `out/wf104/picasso/boot/wf104.img`, log `out/wf104-runs/run1.log`.
+- **wf105: memcpy into the same mapping — unaligned 16-byte stores also fault.** `bzero` was
+  removed, but `memcpy` (XNU `__memmove`) ends with `stp x12, x13, [x3, #0x20]` at a non-16-aligned
+  address inside the device mapping (`memcpy+144`, ESR 0x96000061, FAR 0xfffffff6ad974a6c; source
+  was the embedded `b02` at 0xfffffff007086234). Fix: copy and pad the region with byte stores
+  (`volatile uint8_t`), which are aligned for device memory; no cache maintenance is needed because
+  the mapping holds no cache lines (the metadata buffer is ordinary cacheable memory and is cleaned
+  with `NativeAdrenoMaintainOwnedPages`). Kernel
+  `02aac7d47298e65cfd08d63b9b4641116e81d70fc8afb54a174ae04d1a36545f`; image
+  `out/wf105/picasso/boot/wf105.img`; log `out/wf105-runs/run1.log`.
+- **wf106: byte-store copy, then the PAS sequence.** Same loader with the byte loop and a region-VA
+  print; kernel `1c7f5e07c8f3640838d908880d0d6636ff6043b7be86eb05d01531e5bad55f17`; image
+  `out/wf106/picasso/boot/wf106.img`; log `out/wf106-runs/run1.log`. Result: metadata allocated,
+  region mapped, segment 2 copied (0x68c at offset 0), region phys 0x8bc15400 span 0x1000, then
+  `calling pas init metadata=c8bfe000` and **the SMC never returns** (the rest of the system boots
+  to SpringBoard; only the GPU probe thread stays in EL3).
+- **wf107: x6/x7 zeroed (the official transport register state) + an STD is-call-avail probe.** The
+  vendor `__scm_call_armv8_64` zeroes x6 (and x7) for every call — our asm had left them
+  uninitialised. STD is-call-avail answers (`a0=0 a1=1`), so blocking SMC works; PAS init still
+  never returns. Kernel `3c7bb642bd14df1f3d04ed868042cc8a442b10de0bad207ecc6abd69f3c73f4d`;
+  log `out/wf107-runs/run1.log`.
+- **wf108: SVC_IO read probe.** `qcom_scm_io_readl` is an atomic (FAST) SVC_IO 0x05/0x01 call. It is
+  available (`a1=1`) and reading the metadata physical address returns `a0=fffffffe a1=0`
+  (INVALID_PARAMETER), not the ELF magic — so SVC_IO rejects DRAM reads by policy and cannot be
+  used to prove TZ's access to the buffer. PAS init still hangs. Kernel
+  `2f805d467e41e68e3f1b918a143102669ca2fb6fd015f6c49d6136a9c7b00121`; log
+  `out/wf108-runs/run1.log`.
+- **wf109: strongly ordered metadata.** The device's own stack (`subsys-pil-tz.c`
+  `pil_init_image_trusted()`, LA.UM.8.12.c25) allocates the metadata with `dma_alloc_attrs(...,
+  DMA_ATTR_STRONGLY_ORDERED)` right before the same PAS_INIT_IMAGE call. The metadata is now
+  written through a fresh `kIOMapInhibitCache` mapping of its pages (byte stores, DSB), so no
+  cacheable alias and no cache lines exist; the readback through that mapping is the ELF magic.
+  PAS init still hangs. Kernel `ac899c2042f6486f2fd738133374adeae0f0b33634a16e12188db6131ba0da6b`;
+  log `out/wf109-runs/run1.log`.
+- **wf110: PIL service queries.** `PAS_IS_SUPPORTED` (SVC_PIL 0x02 / cmd 0x07, ARGS(1) = pas id)
+  returns a0=0, a1=0 for the GPU (13) and for ADSP (1): on this firmware the query does not report
+  either as supported, yet the same SVC_INFO/IS_CALL_AVAIL call reports init_image/mem_setup/
+  auth_and_reset as available. It does not explain the hang but shows the PIL service answers
+  simple commands synchronously. Kernel
+  `5ef2d529106094ff4a6a57c1500c397cfc38d290bd65e02ce2358ab1cdb4eaeb`; log
+  `out/wf110-runs/run1.log`.
+- **wf111: is the metadata buffer the reason?** Diagnostic: zero the PIL-reserved 0x8bc15400 page
+  and call PAS_INIT_IMAGE(13, 0x8bc15400). Result: `a0=ffcffff6 a1=0` — the call returns at once.
+  That address is only 1 KiB aligned and 0xffcffff6 is also what a broken ELF header yields
+  (wf112), so the code means "invalid metadata", not "bad address". Kernel
+  `877ee41446967ade65863f7b9bcf0673d91b1f09a3d9cb9e39b99ffe584fe409`; log
+  `out/wf111-runs/run1.log`.
+- **wf112: the DMA buffer is readable, and the hang is the interrupted-call retry.** Two probes:
+  (a) break the metadata's ELF magic in the DMA buffer and call INIT → `a0=ffcffff6` **returns**;
+  TZ read the buffer and rejected the header, so the buffer's physical memory is fine;
+  (b) the same real metadata copied to 4K-aligned 0x8bc18000 (inside `reserved_pil`) → the call
+  **returns `a0=00000001 a1=00000082`** — `QCOM_SCM_INTERRUPTED` (1), with the secure session id
+  in x6. That is the official Qualcomm protocol (`arm_smccc_smc_quirk`, commit 82bcd087 "the
+  retry must pass back the returned session ID ... calls hang on retry without it"): the first
+  PAS call returns 1, and the retry must carry x0 = 1 and x6 = the session id. Our retry forced
+  x6 back to 0 and re-issued the original function id, which wedged the PIL session — that is
+  the hang measured in wf106-wf109, not a TZ-side stall. Kernel
+  `f0700bebee6c2fcbf91e65790544b24d4504a684c72dab4c9561e289906b226b`; log
+  `out/wf112-runs/run1.log`.
+- **wf113: official interrupted-call retry.** `scmSipCall` now takes and returns x6, and
+  `pasCall()` retries an INTERRUPTED reply with x0 = 1, the same x1..x5 and x6 = the returned
+  session id (up to 64 times), exactly `qcom_scm-smc.c`'s loop; every retry prints the session id.
+  Kernel `a80c2c10633959e7b0734b6ba50f94da1c0cefdbe8e2d3a5013dacb1d1a9b812`; image
+  `out/wf113/picasso/boot/wf113.img`; log `out/wf113-runs/run1.log`.
+- **Vendor ABI re-checked against the device tree's own stack** (CodeLinaro `clo/la/kernel/msm-4.19`
+  at LA.UM.8.12.c25): `lito-gpu.dtsi` gives `qcom,kgsl-hyp` pas-id **13**, firmware-name
+  **a620_zap** (same as our DTB); `subsys-pil-tz.c` calls `scm_call2(SCM_SIP_FNID(0x02, cmd))` with
+  arginfo 0x82/0x03/0x01 and args (pas id, phys[, size]); `scm.c` builds
+  `x0 = fnid | 0x40000000` (STD SMC64, owner bits already in FNID), x1 = arginfo, x2.. = args,
+  x6 = 0; `pil_boot()` runs init_image → mem_setup → (hyp assign when subsys_vmid) → load segments
+  → auth_and_reset. Our call is byte-for-byte this shape.
+- **wf114: the session-id retry hangs in the resumed PAS call.** With the official retry in place,
+  PAS_INIT_IMAGE at the 4K-aligned carveout metadata (`0x8bc18000`) prints
+  `interrupted session=6190001b/00000000 attempt=1` and the resumed call never returns (the rest
+  of the system keeps booting). The same outcome as the DMA buffer in wf113: the metadata's
+  location does not change the stall, so it happens inside TZ's authentication work, not in the
+  AP memory path. Kernel `2f8c41da7d12688f8e1df52c3a4be2a0d70f4f39150c6cd9f297c556473f8675`;
+  image `out/wf114/picasso/boot/wf114.img`; log `out/wf114-runs/run1.log`.
+- **wf115: the crypto engine is gated from the AP too.** A read-only probe of qcrypto@1de0000
+  (CRYPTO_VERSION/STATUS/ENGINES_AVAIL, `qcryptohw_50.h`) after the PAS queries panicked with
+  `Unhandled implementation specific error` (SError) before printing any register value. That is
+  the same block TZ drives for image authentication: the AP cannot even read its registers in
+  this boot environment. Kernel `9c06c69c…` (the source that contains the CE probe); image
+  `out/wf115/picasso/boot/wf115.img`; log `out/wf115-runs/run1.log`. The probe is removed from
+  `scmProbe()` again.
+- **Why the engineered path must vote the crypto NoC.** The device's own stack never runs
+  PAS_INIT_IMAGE/PAS_AUTH_AND_RESET without `scm_pas_enable_bw()`: `subsys-pil-tz.c` registers an
+  msm_bus client with `src = MSM_BUS_MASTER_CRYPTO_CORE_0` (DT cell-id 0x7d, `mas_qxm_crypto`),
+  `dst = MSM_BUS_SLAVE_EBI_CH0` (0x200), ib = 492*8 MB/s and calls usecase 1 around **every** PAS
+  call (`pil_init_image_trusted()`, `pil_auth_and_reset()`), and `pil_shutdown_trusted()` drops
+  it. TZ's crypto authentication moves descriptors and data through the CE's AXI master
+  (mas_qxm_crypto); its NoC port clock is a BCM vote, so without the AP's vote the engine stalls
+  inside the first SMC — exactly the wf112-wf114 signature (first call INTERRUPTED, resume never
+  returns). wf115's SError from the same block is the AP-side view of the same gating.
+- **wf116: vote the crypto path's BCMs through the apps RSC.** New `rpmhVoteCryptoPath()` in
+  `Adreno620Cp.cpp`, called at the top of `loadZap()` before the first PAS call. It maps the apps
+  RSC DRV 2 (`0x18220000`, DT `qcom,drv-id = 2`), reads `RSC_DRV_ID` (0) to pick the
+  `rpmh-rsc.c` v2.7/v3.0 register layout, masks only its two TCSs in `RSC_DRV_IRQ_ENABLE` (XNU has
+  no RSC interrupt handler), and sends one `BCM_TCS_CMD(commit=1, valid=1, …)` active request per
+  BCM in the active group (`qcom,tcs-config <2 2 …>`, TCS 0/1), polling `CMD_STATUS.COMPL` with
+  bounded waits and clearing `CMD_ENABLE`/`IRQ_CLEAR` after each. BCM addresses and aux data come
+  from the cmd-db at `0x80860000` (`cmd_db_read_addr` + `struct bcm_db {unit,width,vcd}`);
+  the resource names are the bus path of mas_qxm_crypto →
+  … → slv_ebi in this device's topology: CE0, SN6, SN0, SH0, MC0 and ACV, plus CN0 (the config
+  NoC's crypto slave port, the register window wf115 faulted on). Bandwidth votes use the
+  downstream 14-bit clamp (`0x3fff`), ACV uses the `BCM_TCS_CMD_ACV_APPS` bitmask (0x8).
+  Decisive read: after the vote, PAS_INIT's resumed call completes and mem-setup/auth print
+  `a0=0 a1=0`; then `CP_SET_SECURE_MODE(0)` runs and the Turnip smoke is the GPU proof.
+- **wf116: the crypto path's RPMh votes are real and take effect.** `rpmhVoteCryptoPath()` votes
+  CE0, SN6, SN0, SH0, MC0, ACV and CN0 through the apps RSC DRV 2 (`0x18220000`, DRV_ID
+  `0x00020005` → the v2.7 register layout, TCS block at `+0xd00`, ACTIVE TCS 0/1). Every
+  `BCM_TCS_CMD` completed (`CMD_STATUS=0x00010101`, status 0x1) and the RSC kept the system
+  alive. PAS_INIT still returned `QCOM_SCM_INTERRUPTED` (session 0x6190001d) and the resumed
+  call still hung. Kernel `b1ec93f8…`; image `out/wf116/picasso/boot/wf116.img`; log
+  `out/wf116-runs/run1.log`.
+- **wf117: with the vote in place the crypto engine is reachable from the AP.** The removed
+  wf115 probe now reads `version=05050001 status=02000006 engines=62011073`; without the vote the
+  same read had taken an SError (wf115). So the BCMs CE0/…/CN0 gate the qcrypto block itself, and
+  the AP's side of the PAS path is no longer the doubt. `daif=0x200` at the SMC boundary: IRQs
+  and FIQs are unmasked (only debug is masked). PAS still interrupted/hung. Kernel `1c15a803…`;
+  log `out/wf117-runs/run1.log`.
+- **wf118: the diagnostic itself was the fault.** Adding a GIC dump at the interrupted boundary
+  made both runs reset the board ~15 s after the PAS call, printing nothing after `calling pas
+  init`. The dump read `ICC_HPPIR0_EL1`, a Secure-group system register; from Non-secure EL1 it
+  can trap to EL3 and wedge the monitor that holds the suspended session (a hang, not a panic —
+  the APSS watchdog then resets). Kernel `febc0320…`; logs `out/wf118-runs/run1.log`,
+  `run2.log`.
+- **wf119: no Non-secure interrupt is pending at the interruption.** The NS-only dump runs and
+  the machine survives: `hppir1=0x3ff` (spurious), `rpr=0xff`, `ICC_CTLR_EL1=0x8440`,
+  `GICD_CTLR=0x12`, and the crypto BAM's SPI 272 is neither enabled nor pending. The first PAS
+  call returns INTERRUPTED after 69 085 CNTVCT ticks (19.2 MHz → 3.6 ms), so the yield is not a
+  visible NS IRQ at that instant (it is taken and handled between the SMC return and the dump).
+  The TZ-log node at `0x146ab720` turns out to be the minidump table (`DUMP` magic at +0x400,
+  `0x801fe000/0x2000` pointer), not a text log. Kernel `3c8c4641…`; log
+  `out/wf119-runs/run1.log`.
+- **wf120: masking Non-secure delivery makes PAS_INIT complete, and the region alignment is the
+  next gate.** With `ICC_PMR_EL1=0` and `DAIF.I=1` around the first attempt of each PAS call
+  (restored before any retry), PAS_INIT_IMAGE returned **a0=0, a1=0 in 12.4 ms** — no
+  interruption, no resume. The interrupted-resume path is therefore unusable in this
+  environment; a synchronous, non-interruptible call works. PAS_MEM_SETUP then returned
+  `0xffcfffba`: the zap's PT_LOAD has `p_align = 0x100000` and the vendor's `pil_alloc_region()`
+  allocates the relocatable region with that alignment, while the DT carveout we used
+  (`0x8bc15400`) is only 0x400-aligned. Kernel `e9d965ae…`; log `out/wf120-runs/run1.log`.
+- **wf121: 1 MiB-aligned region.** `loadZap()` now allocates the segment region with
+  `IOBufferMemoryDescriptor::inTaskWithPhysicalMask(..., 0xfffffffffff00000)`, stages the
+  `a620_zap.b02` segment there with byte stores, and passes that address to PAS_MEM_SETUP.
+  Kernel `0c81f913…`; image `out/wf121/picasso/boot/wf121.img`; log
+  `out/wf121-runs/run1.log`. Expected: mem-setup `a0=0`, then AUTH_AND_RESET runs the zap, then
+  `CP_SET_SECURE_MODE(0)` and the fence smoke.
+- **wf121 result: the zap loads and the CP leaves secure mode.** With the 1 MiB-aligned region
+  (`0xc8d00000`) the full PAS session completes synchronously under the NS-interrupt mask:
+  INIT `a0=0` (226 797 ticks = 11.8 ms), MEM_SETUP `a0=0` (1168 ticks), AUTH_AND_RESET `a0=0`
+  (20 216 ticks = 1.05 ms), `loaded=1`. `CP_SET_SECURE_MODE(0)` is then accepted
+  (`submitted wptr=11`, `idle rptr=11`) and `secure mode left=1`, `RBBM_SECVID_TRUST_CNTL`
+  `0x00000001 → 0x00000003`. The no-op IB fence retires (`fence=1`, `cp: ready`), cpcheck
+  reports `mode=1 result=0`, a second fence waits cleanly (`fence=2 wait returned 0`) and the
+  probe ends `stage=4 step=4 error=0 requested=4 ticks=4 done=1` — exactly the smoke that timed
+  out after a zap-less `CP_SET_SECURE_MODE(0)` in wf102. Kernel
+  `0c81f913bccb3624970193bbd17ae984ecdb92d97f9f6353cf5ccb3cdb20ebee`; image
+  `out/wf121/picasso/boot/wf121.img`; log `out/wf121-runs/run1.log`.
+- **wf122: the early reset is not the Metal publication.** A control build with
+  `sheng-gpu-metal=0 sheng-gpu-addon=0` (zap still on) also stops during PID1's dyld-cache
+  hashing, so the accelerator publication/addon is not the trigger. Every fatal boot shares one
+  component: the `sheng-gpu-tzlog=1` probe thread. It prints its first header
+  (`hyplog address=801fe000 size=00002000 magic=… 44554d50`) and then never prints again in
+  wf119/wf120/wf121/wf122 — it wedges inside `dumpTextRuns()` reading the TZ/minidump carveout
+  at `0x146ab720` from Non-secure EL1. Logs `out/wf122-runs/run1.log` (and wf119/wf120/wf121).
+- **wf124: removing the TZ-log scan fixes the early hang.** The identical wf122 kernel with
+  `sheng-gpu-tzlog=0` (payload-only rebuild, Metal still off) passes the exact line where
+  wf122/121 stopped and continues into launchd, the CPU-frequency governor and the NVT touch
+  panel (`stage4 loop irq=1`), device alive. Conclusion: reading the secure log carveout from
+  the AP is a self-inflicted hang (a fault inside the probe thread that the APSS watchdog later
+  turns into a reset); it is a diagnostic only and must stay off. Image
+  `out/wf124/picasso/boot/wf124.img`; log `out/wf124-runs/run1.log`.
+- **wf124, second finding: PID1 still blocks in a dyld-cache pread.** With the scan gone the
+  machine stays alive, but PID1 prints its last line (`n4k progress s=14 stage=read
+  off=3600000`) and never returns from that 1 MiB pread while other threads keep printing. The
+  cause is the region buffer: `PAS_MEM_SETUP` handed TZ `0xc8d00000` (1 MiB of ordinary kernel
+  pages), `loadZap()` freed it right after AUTH, the page cache reused those pages for the dyld
+  cache, and the UFS write into TZ-retained memory never completes. The vendor never frees it:
+  `pil_alloc_region()` caches `priv->region` and only `pil_release_region()`/`pil_free_memory()`
+  free it on error or shutdown.
+- **wf126: retaining the region completes the boot with the zap on.** `sheng-gpu-keep-region=1`
+  (new `PICASSO_GPU zap: region retained phys=c8c00000 span=1000`) lets PID1 hash all 64 dyld
+  caches (`n4k end s=14 … req=111722496`, through s=64), the boot reaches `launchd: Early boot
+  complete`, services link (`keybagd → launchd/notifyd/logd`), and the new print-only heartbeat
+  ticks throughout (`beat 1…10`). The GPU path itself (`zap: loaded=1`, `secure mode left=1`,
+  `cp: ready fence=1`) is unchanged from wf121. Retention is now the default
+  (`sheng-gpu-keep-region=0` restores the old behaviour); new gated diagnostics shipped in the
+  same kernel: `sheng-gpu-heartbeat` and `sheng-gpu-mask-irqs`. Kernel
+  `e84e81db27f350079c9e33077c45091942e2a001e16f1a7fd3d9dbf702dae647`; image
+  `out/wf126/picasso/boot/wf126.img`; log `out/wf126-runs/run1.log`.
+- **wf127: a Metal client submits through the authenticated GPU.** Same fixed configuration with
+  `sheng-gpu-metal=1 sheng-gpu-addon=1`: `metal stage=5 registered=1` and `metal published`,
+  then backboardd (pid 56) opens the accelerator (`open: plugin type=4147`, `mount ok opens=1`),
+  and the tunnelled ABI runs end to end — `BoAlloc`, `BoMap` (up to 128 KiB/32 pages),
+  `BoCpuMap`/`Unmap`, `DeviceInfo` and **`Submit`/`WaitFence` all status 0**. Six command buffers
+  from pid 56 reach the production ring (`wire: pid=56 … bytes=756/796/996`, first word
+  `70460001`), with no `stall:` or `hang:` lines and the heartbeat continuing. Two selectors
+  still fail: 7 `Timestamp` (`e00002c7`) and 9 `Metadata` (`e00002c2`). The display scans out
+  content throughout (`PICASSO_DISPLAY frame kind=0 nonblack=41011`). Kernel `c7df15dd…`; image
+  `out/wf127/picasso/boot/wf127.img`; log `out/wf127-runs/run1.log`.
+- **wf128: the client's submissions are a one-shot bring-up, not a render loop.** The new +180 s
+  sample reads `submits final: submissions=6 ibs=6 max=1 many=0`, `metal final: opens=3
+  foreign=1` — one board probe plus five client submissions, all in the first burst, then
+  nothing. The tunnelled ABI per connection is the plugin's device setup (Params, BoAlloc ×4,
+  BoMap ×4, BoCpuMap/Unmap ×4, DeviceInfo, one Submit and one WaitFence, both 0). No stall, so
+  the GPU retires each fence; nothing browses the accelerator afterwards. The first scanout
+  frame reports the same `nonblack=41011` as every earlier boot (wf100/wf103), i.e. that number
+  is the boot logo at handoff and the frame-report channel is capped, so it says nothing about
+  the later screen — the `sheng-display-grid` sampler added in wf129 reads the scanout surface
+  back as a 12×24 luminance grid to answer that directly.
+- **wf128 kernel panic at ~4.5 min is unrelated to the GPU.** `panic(cpu 6 …)`: thread wait info
+  count mismatch while capturing snapshots for a task, expected 4 found 3, `kern_stackshot.c:
+  3451`; the panicking task is pid 176 `osanalyticshelper`. That is XNU's stackshot racing a
+  thread exit in the sampled task. wf129 therefore adds
+  `com.apple.osanalytics.osanalyticshelper` to `sheng-disable-jobs` (the established mechanism
+  for problematic daemons here) so long-run GPU observation is not cut short by it. Log
+  `out/wf128-runs/run1.log`.
+- **wf129: the compositor takes the display but draws nothing yet.** With the analytics daemon
+  skipped the boot stays up (no panic), and the grid sampler shows the transition precisely:
+  frames 1–8 are the bootloader's sparse top-left text (row 0 `000f00000000`), and between
+  frames 8 and 9 — as backboardd opens the accelerator — the framebuffer becomes fully black
+  and stays black through frame 18. So userland now owns the scanout (it cleared the firmware
+  image) but no surface is presented; the client's submissions are still the one-shot setup
+  (`submits final: submissions=6`). Image `out/wf129/picasso/boot/wf129.img`; log
+  `out/wf129-runs/run1.log`.
+- **wf130: the missing piece for scheduling is the userspace timer.** `native_adreno_publish()`
+  was called with `timer = nullptr`, so every client's `GetTimestamp` answered Unsupported and
+  Turnip had no GPU clock. The publish path now attaches a `NativeAdrenoTimer` over
+  `CP_ALWAYS_ON_COUNTER` (dword 0x980/0x981 in the already-mapped GPU window — the register
+  mainline's `a6xx_get_timestamp` reads) and logs `gpu timer attached=<0|1> ticks=<…>`; the
+  refused `SetMetadata` record now prints its shape instead of only returning BadArgument.
+- **wf130 result: the timestamp works; the UI still has no surfaces.** `gpu timer attached=1
+  ticks=184706151`, and the client's `GetTimestamp` now answers 0 instead of
+  `kIOReturnUnsupported`. The refused metadata is explained: `metadata: unknown handle=1` — the
+  client sets metadata on a handle its connection does not own, so `SetMetadata` correctly
+  refuses it (`e00002c2`). The rest is unchanged: five client submissions at connect, no render
+  loop, and the framebuffer goes black between grid frames 8 and 9 exactly as backboardd opens
+  the accelerator (the compositor takes the scanout but presents nothing). So the GPU-side ABI
+  is complete for a client; what remains for visible rendering is the UI producing and
+  committing surfaces, which is independent of the GPU driver. Image
+  `out/wf130/picasso/boot/wf130.img`; log `out/wf130-runs/run1.log`.
+- **wf130 follow-up: SpringBoard does reach the accelerator.** The IOKit trace shows SpringBoard
+  (pid 27) matching and opening `AGXAccelerator` with `result=0 object=1` (the `foreign=1` open
+  the Metal diag counts), so the service is reachable from the UI process. It still submits
+  nothing, and backboardd's five submissions remain the whole client load. The next question is
+  therefore inside the UI stack (why the UI process opens the accelerator but commits no
+  work/surface), not in the GPU driver or the accelerator's availability.
+- **wf130 display path is alive; only the content is missing.** After the compositor takes over,
+  the display driver still runs its transfer path: `event=10 sample=1` copies the whole
+  framebuffer (`b=0x9e3400` = 1080×2400×4) and later samples copy dirty regions
+  (`b=0x1a700`), `event=6/9` report success, no `failure=1`. The scanout is black because no
+  client commits a surface, not because the display transfer or the GPU submission path is
+  broken. A next round should follow the UI process (SpringBoard): it opens `AGXAccelerator`
+  (result 0) but never issues a Submit, so look for where its render-server/display-link setup
+  stops before the first surface commit.
+- **wf130 follow-up: backboardd retries property-carrying opens and XNU refuses them.** The
+  IOKit probe's op=3 is `IOServiceOpen`; the wf130 log has ~70 of them on `AGXAccelerator` from
+  backboardd, and all but the first return `e00002c7` (`kIOReturnUnsupported`). The trace's
+  refusal site is the stock `if (properties) return kIOReturnUnsupported;` gate in
+  `is_io_service_open_extended`, i.e. the *kernel* rejects opens that carry an OSDictionary,
+  not the driver. The three property-less plugin opens (type 0x4147) succeed and are the ones
+  that submit. Next round: determine whether the Metal plugin's loader needs the
+  property-carrying open (and therefore needs this XNU's service-properties support enabled or
+  a grant for this service), since that refusal is the most concrete outstanding difference
+  between the boot's GPU setup and a RenderServer that submits frames.
+- **wf131: the compositor does present, but the vsync stand-in never arms.** The display-state
+  line (now printed with every grid frame) shows backboardd's three swaps fully processed:
+  `submit=3 accept=3 reject=0 scans=3 nonblack=3 transfer=3 retire=3 copies=3
+  copy_bytes=11250048`, the last at ~157 s, then nothing more. New prints inside
+  `kickSwapQueue()`/`armVsync()` show `kick wanted=0 armed=0` on every kick: the vsync client
+  queue at +5592 reads empty, so the timer that stands in for the absent panel subclass never
+  arms and userspace never receives a vsync. The grid also corrects an earlier reading: the
+  screen is not all black — after the compositor takes over, the bootloader text is replaced by
+  a centred logo (rows 10–12, cols 6–7 in wf131) and wf130 later shows content at rows 3–4 and
+  20–23. Image `out/wf131/picasso/boot/wf131.img`; log `out/wf131-runs/run1.log`.
+- **wf132: a swap-queue kick makes the vsync tick run.** The kick proves a display client
+  exists, and the original sender walks the client queue (a no-op when empty), so
+  `vsyncKicked` keeps the tick active from the first kick on instead of depending on the
+  guessed +5592 head. Expected signature: `vsync_ticks` grows and the compositor submits more
+  than its initial three frames.
+- **wf132: the lock screen comes up.** With the swap-queue kick driving `vsyncKicked`, the tick
+  arms on the compositor's first kick (`kicked=1 armed=1`), the display-state report starts
+  firing from the vsync path every 600 ticks, and the compositor stops idling: `submit=22
+  accept=22 reject=0 transfer=22 retire=22 copies=22` by ~1020 s, with the bootlogo replaced by
+  the lock screen on the panel. That is the first user-visible UI on this port with the
+  TZ-authenticated, non-secure GPU driver, and it is a direct consequence of the vsync
+  stand-in actually running (wf131 measured `wanted=0` on every kick and exactly three swaps).
+  The plugin's text stream confirms the renderer: `Y turnip`, `M … device: ShaderCache(…)`, and
+  the display path stays clean (no `stall:`/`hang:`, `transfer_fail=0`, `reject=0`).
+- **wf133: is the lock screen GPU work?** The +180 s counter still read `submissions=6` because
+  the UI starts minutes later, so `addonReport` now keeps printing the submit counter every
+  30 s (`PICASSO_GPU submits live <n>`). Its growth (or not) decides whether the compositor's
+  per-frame path is our GPU or a CPU/display-copy path. Image
+  `out/wf132/picasso/boot/wf132.img`; log `out/wf132-runs/run1.log`.
+- **wf133: the GPU renders (Turnip smoke passes) and the lock screen is up.** Two decodes settle
+  the goal. First, the plugin's own report lines (streamed through the driver's text channel)
+  read `T s0 r0 v1024 c1024 g512/0` — stage 0, vkResult 0, 1024 words verified, 1024 compute
+  words, exactly 512 triangle-colour pixels and 0 that are neither — and
+  `S fc0ffee42 deadbeef deadbeef k1000 1600 1bfd rffff0000 ffff000 ffff000`, the read-back
+  fill/compute/render samples. The pass condition in `NativeTurnipSmoke.h` is
+  `verified==1024 && computeWords==1024 && renderOther==0 && 480<=renderTriangle<=544`: a real
+  Vulkan compute + triangle render on this A620 through our driver, with the host reading the
+  rendered pixel colours back. Second, the lock screen stays up with the kick-driven vsync:
+  `submit=10 accept=10 transfer=10 retire=10`, `reject=0`, `transfer_fail=0`.
+- **What the lock screen's frames are not.** The GPU submit counter stays at 3 while the display
+  presents frames 4–10 (`submits live 1…6` unchanged): the per-present path is not generating
+  Adreno command streams, i.e. the UI re-presents a rendered surface instead of re-rendering
+  through the plugin each frame. The path to GPU-rendering every UI frame is in the
+  compositor/plugin (CoreAnimation render-server) side, not in the kernel GPU driver — the
+  driver, the accelerator, the timestamp and the Turnip queue all work end to end.
