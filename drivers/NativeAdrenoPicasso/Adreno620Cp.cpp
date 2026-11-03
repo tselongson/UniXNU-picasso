@@ -35,6 +35,7 @@
 #include "NativeAdrenoUserClient.h"
 #include "AdrenoPM4.h"
 #include <string.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
