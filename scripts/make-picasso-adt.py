@@ -19,6 +19,7 @@ is invented beyond these pinned sources.
 from pathlib import Path
 import argparse
 import os
+import os
 import struct
 import zlib
 
@@ -186,9 +187,20 @@ def main():
     # derives its code-signing trust policy for the platform from that status, and
     # an adhoc-signed userspace binary (launchd) is only accepted under the
     # dev-board policy that the iPad identity declares.
+    # PICASSO_ADT_IDIOM overrides --ipad-identity, so the workflow can pick the device class
+    # without a script edit: pad (the J120 tablet identity), phone (a whole iPhone identity),
+    # phone-idiom (the tablet identity with the phone idiom in /product - UIKit draws phone
+    # layout while MobileGestalt still reports the iPad product).
+    idiom = os.environ.get('PICASSO_ADT_IDIOM') or ('pad' if args.ipad_identity else 'phone')
+    if idiom not in ('pad', 'phone', 'phone-idiom'):
+        raise SystemExit(f'PICASSO_ADT_IDIOM must be pad, phone or phone-idiom, not {idiom!r}')
+    pad = idiom == 'pad'
+    # phone-idiom keeps the tablet's model/target-type on purpose: only /product changes, so the
+    # system still reports the J120 product while UIKit lays out for a phone.
+    tablet_product = idiom != 'phone'
     identity = [
-        ('model', b'iPad7,1\0' if args.ipad_identity else b'iPhone14,3\0'),
-        ('target-type', b'J120\0' if args.ipad_identity else b'D64\0'),
+        ('model', b'iPad7,1\0' if tablet_product else b'iPhone14,3\0'),
+        ('target-type', b'J120\0' if tablet_product else b'D64\0'),
     ]
     tree = node('device-tree', [
         *identity,
@@ -256,14 +268,14 @@ def main():
         # artwork fields describe the J120 panel (2732x2048 class, P3, scale 2) so
         # UIKit and the audio routing database pick iPad behaviour, and
         # compatible-device-fallback keeps a known device for lookups that use it.
-        node('product', [('product-name', b'iPad Pro (12.9-inch) (2nd generation)\0' if args.ipad_identity else b'iPhone 13 Pro Max\0'),
+        node('product', [('product-name', b'iPad Pro (12.9-inch) (2nd generation)\0' if idiom != 'phone' else b'iPhone 13 Pro Max\0'),
                          ('model', b'xiaomi,picasso\0'),
                          *([('product-description', b'iPad Pro (12.9-inch) (2nd generation)\0'),
                             ('artwork-device-idiom', b'pad\0'),
                             ('artwork-device-subtype', struct.pack('<I', 2732)),
                             ('artwork-scale-factor', struct.pack('<I', 2)),
                             ('artwork-display-gamut', b'P3\0'),
-                            ('compatible-device-fallback', b'iPad6,7\0')] if args.ipad_identity else
+                            ('compatible-device-fallback', b'iPad6,7\0')] if pad else
                            [('product-description', b'iPhone 13 Pro Max\0'),
                             # UIKit picks the phone idiom (status bar, notch insets, lock-screen
                             # clock) from here, and the Pro class is what lets it ask for more than
