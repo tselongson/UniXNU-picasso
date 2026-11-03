@@ -21,7 +21,13 @@ import sys
 import uuid
 
 
-DATA_BYTES = 256 * 1024**2
+# The volatile Data volume the userland runs on. 256 MiB filled up during the
+# first full CI boot: logd and itunesstored hit ENOSPC with 790 free blocks
+# against a 1310-block threshold, and the boot stage fell over. 1 GiB keeps the
+# same sparse packing (only written pages are stored) while leaving the system
+# room for logs and caches; MAX_LOGICAL still caps it at 2 GiB, above which the
+# pinned driver takes the persistent-store path.
+DATA_BYTES = 1024 * 1024**2
 PAGE = 4096
 MAX_PACKED = 4 * 1024**2
 MAX_LOGICAL = 2 * 1024**3  # Larger disks select the persistent-store driver path.
@@ -334,7 +340,7 @@ def prepare(tree, source, output, config):
     pack(image, packed)
     packed_info = inspect_packed(packed, raw=image)
     if packed_info['logical_bytes'] != DATA_BYTES:
-        raise ValueError('Expected exactly 256 MiB of logical volatile Data')
+        raise ValueError(f'Expected exactly {DATA_BYTES // 1024**2} MiB of logical volatile Data')
     manifest_path = output / 'source-var-manifest.json'
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n', encoding='utf-8')
     files = [entry for entry in manifest.values() if entry['type'] == 'file']

@@ -123,12 +123,12 @@ def main():
     def verify_sparse():
         result = data.inspect_packed(empty_data)
         digest = hashlib.sha256()
-        for _ in range(256):
+        for _ in range(data.DATA_BYTES // 1024**2):
             digest.update(bytes(1024**2))
         assert result['logical_bytes'] == data.DATA_BYTES
         assert result['raw_sha256'] == digest.hexdigest()
 
-    passes('256 MiB logical empty disk hashes without dense allocation', verify_sparse)
+    passes('1 GiB logical empty disk hashes without dense allocation', verify_sparse)
 
     identity = '10203040-5060-7080-9010-203040506070'
     config = ('# preserve this comment\nCONFIG_XNU_NATIVE_RAM_BLOCK=y\n'
