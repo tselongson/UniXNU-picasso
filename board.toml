@@ -228,10 +228,8 @@ kernel_args = [
   "native-buttons=1",
   "sheng-wlan=1",
   "native-pmic=1",
-  "sheng-cpufreq=3",
-  "sheng-cpufreq-cap=1600",
-  "sheng-cpufreq-min=800",
 ]
+
 
 
 # Stage-5 blind-spot instrumentation (docs/zh/guide/debugging.md 颜色条):
