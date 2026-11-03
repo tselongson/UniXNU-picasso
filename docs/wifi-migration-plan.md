@@ -46,3 +46,26 @@ WCN3980,SNOC + copy engines + QMI/WLFW(WLAN 固件服务挂在 MODEM 上),无 PC
   也要遵守"先 rails 后 MMIO"。
 - 探针从未上过硬件就随构建启用,违反了 Trogdor"pending 不进构建链,硬件验收
   分开做"的原则。后续新模块一律先 pending 后接线。
+
+## 追加参照:unixnu-wcn7860-wifidriver(u0er,小米17 Ultra/SM8850+WCN7860)
+
+已联网验证的完整实现(GPT 6.1 Sol 制作,扫描/连接/访问百度正常),8636 行,
+来源 https://github.com/u0er/unixnu-wcn7860-wifidriver 。层级图谱(我们的
+栈照此组织,把 PCIe/MHI 换成 SNOC/CE,ath12k-QMI 换成 ath10k-WLFW v1):
+
+| Peach 层 | 行数 | 对应我们的 |
+|---|---|---|
+| pandora_wifi.c(入口/生命周期) | 1618 | WlanService/WlanProbe |
+| PeachWmi.c(WMI 命令) | 1280 | 待建(第 4 阶核心) |
+| PeachWlfw.c(QMI/WLFW) | 556 | WlanQmi + 已移植的 WlanWlfwProto.h |
+| PeachNet.c(ifnet/en0) | 413 | WlanNet |
+| PeachApple80211.c(ioctl) | 330 | WlanApple80211 |
+| PeachStation/Rsn/Htc/Htt/Rx/Tx | ~1900 | 待建 |
+| PeachCe.c(copy engines) | 239 | WlanCe(直接可比对) |
+| PeachMhiHost/Firmware + PcieData | ~600 | 不适用(SNOC 替代) |
+| pandora_files.c(从磁盘卷读固件) | 381 | **照抄**:固件放数据卷,不入库 |
+| ArmSmmu4K.h(复用 picasso 的 SMMU 头!) | - | 我们自己的 |
+
+关键收获:固件供给用"数据卷文件加载"(pandora_files.c 模式),彻底绕开
+"blob 不入库"与构建内嵌的两难;固件从本机 vendor/modem 分区提取后放到
+ESP/数据卷固定路径,驱动启动时读。
