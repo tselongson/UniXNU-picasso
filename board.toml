@@ -319,6 +319,10 @@ kernel_args = [
   # this is the documented override, and the image it guards is the one the
   # qualified kernel carried.
   "sheng-gpu-allow-old-sqe=1",
+  # Load the signed A620 zap through TrustZone (PAS) before hw_init and leave
+  # secure mode with CP_SET_SECURE_MODE(0). Without it every draw to client
+  # memory is discarded; the switch is what wf102 proved is gated on the zap.
+  "sheng-gpu-zap=1",
   # Owned offline HID source (ShengHidInput). offline-hid-input=1 lets the probe
   # attach a virtual keyboard through the ORIGINAL IOHIDDevice ABI;
   # offline-hid-home=1 is the device-creation gate, and the auto-home series

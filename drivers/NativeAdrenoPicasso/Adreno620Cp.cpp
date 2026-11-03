@@ -34,6 +34,7 @@
 #include "NativeAdrenoTimer.h"
 #include "NativeAdrenoUserClient.h"
 #include "AdrenoPM4.h"
+#include <string.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
@@ -388,6 +389,158 @@ void scmProbe()
         init.a0, init.a1, init.a2, init.a3);
     printf("PICASSO_GPU scm: is-call-avail memsetup a0=%08x a1=%08x; auth %08x/%08x\n",
         setup.a0, setup.a1, reset.a0, reset.a1);
+}
+
+
+/* wf104: zap loader. The GPU powers on in secure mode, so every draw or blit to
+ * ordinary client memory is discarded until TrustZone runs the signed zap and
+ * the CP leaves secure mode (Adreno zap-shader series). The pieces below are
+ * the kernel half of mainline's adreno_zap_shader_load():
+ *
+ *   metadata  = ELF header + hash table, both packed at the start of the .mdt
+ *   region    = the relocatable PT_LOAD segments, packed at p_paddr - min_paddr
+ *   PAS       = INIT_IMAGE(metadata) -> MEM_SETUP(region) -> AUTH_AND_RESET
+ *
+ * The SCM encoding is the one qcom_scm.c uses: SIP owner, SVC_PIL 0x02, calls
+ * 0x01/0x02/0x05, arginfo 0x82 (VAL,RW), 0x03 (three values) and 0x01. */
+struct ZapSegment { uint32_t filesz, memsz, paddr; const uint8_t *data; };
+struct ZapImage { uint32_t metaBytes, minPaddr, regionBytes, entry; ZapSegment seg[4]; unsigned count; };
+
+uint32_t zapLe32(const uint8_t *p) { return uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24; }
+uint16_t zapLe16(const uint8_t *p) { return uint16_t(p[0] | p[1] << 8); }
+
+bool zapParse(const uint8_t *mdt, size_t bytes, const uint8_t *const segments[3],
+    const size_t segmentBytes[3], ZapImage *image)
+{
+    if (!mdt || bytes < 52) return false;
+    if (mdt[0] != 0x7f || mdt[1] != 'E' || mdt[2] != 'L' || mdt[3] != 'F' ||
+        mdt[4] != 1 || mdt[5] != 1) return false;
+    const uint32_t phoff = zapLe32(mdt + 0x1c);
+    const uint32_t entry = zapLe32(mdt + 0x18);
+    const uint32_t phnum = zapLe16(mdt + 0x2c);
+    const uint32_t phentsize = zapLe16(mdt + 0x2a);
+    if (phentsize != 32 || phnum < 2 || phnum > 4) return false;
+    if (phoff > bytes || uint64_t(phnum) * 32 > bytes - phoff) return false;
+
+    const uint32_t metaHead = zapLe32(mdt + phoff + 16);   /* phdrs[0].p_filesz */
+    uint32_t hashSize = 0;
+    uint32_t minPaddr = 0xffffffffu, maxPaddr = 0;
+    ZapImage parsed = {};
+    parsed.entry = entry;
+    for (uint32_t index = 1; index < phnum; ++index) {
+        const uint8_t *ph = mdt + phoff + index * 32;
+        const uint32_t type = zapLe32(ph + 0);
+        const uint32_t paddr = zapLe32(ph + 12);
+        const uint32_t filesz = zapLe32(ph + 16);
+        const uint32_t memsz = zapLe32(ph + 20);
+        const uint32_t flags = zapLe32(ph + 24);
+        if ((flags & (7u << 24)) == (2u << 24)) { hashSize = filesz; continue; }
+        if (type != 1 || !memsz || memsz < filesz) continue;
+        if (parsed.count >= 4) return false;
+        ZapSegment &seg = parsed.seg[parsed.count];
+        seg.filesz = filesz; seg.memsz = memsz; seg.paddr = paddr;
+        seg.data = (index < 3) ? segments[index] : nullptr;
+        if (filesz && (!seg.data || segmentBytes[index] < filesz)) return false;
+        ++parsed.count;
+        if (paddr < minPaddr) minPaddr = paddr;
+        const uint32_t end = (paddr + memsz + 4095u) & ~4095u;
+        if (end > maxPaddr) maxPaddr = end;
+    }
+    if (!parsed.count || !hashSize) return false;
+    if (metaHead + hashSize > bytes) return false;
+    parsed.metaBytes = metaHead + hashSize;
+    parsed.minPaddr = minPaddr;
+    parsed.regionBytes = maxPaddr - minPaddr;
+    if (!parsed.regionBytes) return false;
+    *image = parsed;
+    return true;
+}
+
+struct ZapBuffer { IOBufferMemoryDescriptor *memory; void *base; uint64_t physical; size_t bytes; };
+
+bool zapAllocate(size_t bytes, ZapBuffer *buffer)
+{
+    IOOptionBits options = static_cast<IOOptionBits>(kIODirectionInOut) |
+        static_cast<IOOptionBits>(kIOMemoryMapperNone) |
+        static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous);
+    IOBufferMemoryDescriptor *memory = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+        kernel_task, options, bytes, UINT64_C(0xffffffff));
+    if (!memory) return false;
+    if (memory->prepare() != kIOReturnSuccess) { memory->release(); return false; }
+    void *base = memory->getBytesNoCopy();
+    IOByteCount length = 0;
+    const addr64_t physical = base ? memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone) : 0;
+    if (!base || !physical || length < bytes) {
+        memory->complete();
+        memory->release();
+        return false;
+    }
+    buffer->memory = memory; buffer->base = base;
+    buffer->physical = physical; buffer->bytes = bytes;
+    return true;
+}
+
+void zapRelease(ZapBuffer *buffer)
+{
+    if (buffer->memory) {
+        buffer->memory->complete();
+        buffer->memory->release();
+        buffer->memory = nullptr;
+    }
+}
+
+bool zapLoad()
+{
+    const uint8_t *mdt = nullptr;
+    size_t mdtBytes = 0;
+    const uint8_t *segments[3] = {};
+    size_t segmentBytes[3] = {};
+    if (native_adreno620_zap_firmware(&mdt, &mdtBytes, segments, segmentBytes) != 0) {
+        printf("PICASSO_GPU zap: firmware not staged\n");
+        return false;
+    }
+    ZapImage image;
+    if (!zapParse(mdt, mdtBytes, segments, segmentBytes, &image)) {
+        printf("PICASSO_GPU zap: container refused\n");
+        return false;
+    }
+    printf("PICASSO_GPU zap: entry=%08x meta=%u region=%u paddr=%08x segments=%u\n",
+        image.entry, image.metaBytes, image.regionBytes, image.minPaddr, image.count);
+
+    ZapBuffer meta = {}, code = {};
+    if (!zapAllocate(image.metaBytes, &meta)) {
+        printf("PICASSO_GPU zap: metadata allocation failed (%u)\n", image.metaBytes);
+        return false;
+    }
+    if (!zapAllocate(image.regionBytes, &code)) {
+        printf("PICASSO_GPU zap: image allocation failed (%u)\n", image.regionBytes);
+        zapRelease(&meta);
+        return false;
+    }
+    memcpy(meta.base, mdt, image.metaBytes);
+    uint8_t *region = static_cast<uint8_t *>(code.base);
+    memset(region, 0, image.regionBytes);
+    for (unsigned index = 0; index < image.count; ++index) {
+        const ZapSegment &seg = image.seg[index];
+        const uint32_t offset = seg.paddr - image.minPaddr;
+        if (seg.filesz && offset + seg.filesz <= image.regionBytes)
+            memcpy(region + offset, seg.data, seg.filesz);
+    }
+    NativeAdrenoMaintainPhysicalPages(meta.physical, meta.bytes, NativeAdrenoClean);
+    NativeAdrenoMaintainPhysicalPages(code.physical, code.bytes, NativeAdrenoClean);
+
+    constexpr uint32_t kPasId = 0x0d;            /* qcom,kgsl-hyp pas-id */
+    constexpr uint32_t kScmPilInit = 0xC2000201u, kScmPilSetup = 0xC2000202u,
+        kScmPilAuth = 0xC2000205u;
+    const ScmReply init = scmSipCall(kScmPilInit, 0x82u, kPasId, meta.physical);
+    const ScmReply setup = scmSipCall(kScmPilSetup, 0x03u, kPasId, code.physical, image.regionBytes);
+    const ScmReply auth = scmSipCall(kScmPilAuth, 0x01u, kPasId);
+    printf("PICASSO_GPU zap: init %08x/%08x setup %08x/%08x auth %08x/%08x\n",
+        init.a0, init.a1, setup.a0, setup.a1, auth.a0, auth.a1);
+    const bool ok = !init.a0 && !init.a1 && !setup.a0 && !setup.a1 && !auth.a0 && !auth.a1;
+    zapRelease(&meta);
+    zapRelease(&code);
+    return ok;
 }
 
 void printCpStatus(const char *where)
@@ -1204,6 +1357,17 @@ extern "C" int native_adreno620_cp_start(void)
         static_cast<unsigned long long>(GpuMemptrsIova),
         static_cast<unsigned long long>(GpuScratchIova));
 
+    /* wf104: the zap has to run before hw_init, because PAS_AUTH_AND_RESET
+     * resets the GPU it authenticates for. sheng-gpu-zap=1 loads it and, once
+     * the ring is up, sends mainline's CP_SET_SECURE_MODE(0). */
+    uint32_t zapValue = 0;
+    bool zapLoaded = false;
+    if (PE_parse_boot_argn("sheng-gpu-zap", &zapValue,
+            static_cast<int>(sizeof zapValue)) && zapValue) {
+        zapLoaded = zapLoad();
+        printf("PICASSO_GPU zap: loaded=%d gx=%08x\n", int(zapLoaded), gmuRead(kGmuGxPwrStatus));
+    }
+
     /* Diagnostic bisect: sheng-gpu-cp-limit=<1..7> stops after that phase. */
     uint32_t limitValue = 0;
     const unsigned limit = (PE_parse_boot_argn("sheng-gpu-cp-limit",
@@ -1259,8 +1423,8 @@ extern "C" int native_adreno620_cp_start(void)
      * single variable it is measured against. */
     {
         uint32_t secureMode = 0;
-        if (PE_parse_boot_argn("sheng-gpu-secure-mode", &secureMode,
-                static_cast<int>(sizeof secureMode)) && secureMode) {
+        if (zapLoaded || (PE_parse_boot_argn("sheng-gpu-secure-mode", &secureMode,
+                static_cast<int>(sizeof secureMode)) && secureMode)) {
             const uint32_t trustBefore = gpuRead(A620_RBBM_SECVID_TRUST_CNTL);
             const bool left = leaveSecureMode();
             const uint32_t trustAfter = gpuRead(A620_RBBM_SECVID_TRUST_CNTL);
