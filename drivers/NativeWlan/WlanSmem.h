@@ -12,7 +12,7 @@
  */
 #ifndef NATIVE_WLAN_SMEM_H
 #define NATIVE_WLAN_SMEM_H
-#include "coachz_wifi_proto.h"
+#include "WlanWlfwProto.h"
 
 #define CW_SMEM_APPS 0u
 #define CW_SMEM_MODEM 1u
