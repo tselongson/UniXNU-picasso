@@ -12,6 +12,7 @@
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/IODeviceMemory.h>
 #include <IOKit/IODeviceTreeSupport.h>
 
 namespace {
