@@ -331,7 +331,10 @@ void governorThread(void *, wait_result_t) {
             refreshRow();
             // ps is the index the engine reads back, rd the frequency that row decodes to: a vote the OSM refused or an
             // LMh cap keeps ps/rd below the mean MHz above. cyc is the 0x9c0 cycle-counter delta over the same window,
-            // i.e. the clock the cores actually ran at.
+            // i.e. the clock the cores actually ran at. The window closes far faster than the console can afford, so
+            // report every thirtieth one: the row is a tuning aid, not a trace.
+            static unsigned govWindow;
+            if ((++govWindow % 30) == 0)
             printf("PICASSO_CPUFREQ gov d0 chg=%u mhz=%u busy=%u ps=%u rd=%u cyc=%u d1 chg=%u mhz=%u busy=%u ps=%u "
                    "rd=%u cyc=%u d2 chg=%u mhz=%u busy=%u ps=%u rd=%u cyc=%u boosts=%u\n",
                    native_cpufreq_gov[0], native_cpufreq_gov[1], native_cpufreq_gov[2],

@@ -1239,7 +1239,10 @@ static void monitor(void *arg, wait_result_t result) {
     if(boot_process_snapshot)boot_process_snapshot();
     if(boot_log_tick)boot_log_tick(now);
     if(sheng_cpufreq_poll)sheng_cpufreq_poll();
-    if(boot_ui_trace_snapshot)boot_ui_trace_snapshot(now);
+    // The stack sampler answered its question before userland took the panel (who was blocked on
+    // what during boot). Once the page yields, stop sampling: a full page of thread rows every
+    // few seconds is the largest remaining consumer of the CDC console, and nothing reads it.
+    if(boot_ui_trace_snapshot && !boot_progress_display_owned)boot_ui_trace_snapshot(now);
     // Start the owned offline HID source after userland owns the panel. The probe
     // itself gates on offline-hid-input, and offline-hid-auto-home then emits the
     // Home reports; this only decides when the kext attach is attempted.

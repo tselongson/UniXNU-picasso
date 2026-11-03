@@ -271,6 +271,13 @@ public:
         if(!source || !source->getVirtualAddress() || source->getLength()<allocation) {
             OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnNoMemory,request,0);return;
         }
+        /* Yield the diagnostic page before the panel is written, not after: preparing the scanout is what
+         * stops that page's renderer, and the copy below is the first system frame. Doing it the other way
+         * round let the page paint its last frame over this one, and it never comes back, so the panel kept
+         * the boot image for the rest of the session. */
+        if(!native_legacy_prepare_scanout()) {
+            OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnNotReady,request,0);return;
+        }
         if(!native_legacy_copy_layout(reinterpret_cast<volatile void *>(bootMapping->getVirtualAddress()),
             bootMapping->getLength(),video.v_rowBytes,reinterpret_cast<const void *>(source->getVirtualAddress()),
             source->getLength(),sourceStride,width,height)) {
@@ -284,9 +291,6 @@ public:
             uint64_t scan[5];
             if(native_legacy_frame_scan(reinterpret_cast<const void *>(source->getVirtualAddress()),source->getLength(),sourceStride,width,height,scan))
                 native_legacy_frame_observed(0,scan[0],scan[1],scan[2],scan[3],scan[4]);
-        }
-        if(!native_legacy_prepare_scanout()) {
-            OSSafeReleaseNULL(source);native_legacy_transfer_observed(kIOReturnNotReady,request,0);return;
         }
         /* offline-legacy-bench=2: on the first real frame, time reads of the swap's own source memory through the
          * swap's mapping and through a copyback mapping of the same descriptor, each twice (cold and warm), plus a
@@ -464,6 +468,37 @@ public:
         if(!count || !key || !mask)return kIOReturnBadArgument;
         *count=0;*mask=0;bzero(key,64);return kIOReturnUnsupported;
     }
+public:
+    /* The panel geometry the GOP handed over, kept for the console dump below: PE_current_console is
+     * released once userland owns the screen, so it cannot be asked again later. */
+    uint32_t panelWidth=0,panelHeight=0,panelStride=0;
+    static NativeLegacyDisplay *sPanelOwner;
+    /* A coarse ASCII view of what the panel is actually scanning out, printed on demand (CDC "wait").
+     * Reading the panel is the only way to tell a stale boot image from a live system frame over a
+     * serial console; 48x28 cells of one sampled pixel each is cheap enough to run any time. */
+    void panelAscii() {
+        if(!bootMapping || !panelWidth || !panelHeight || !panelStride) return;
+        enum {cols=48,rows=28};
+        static const char ramp[]=" .:-=+*#%@";
+        const uint8_t *base=static_cast<const uint8_t *>(bootMapping->getVirtualAddress());
+        uint32_t ink=0;
+        printf("PICASSO_PANEL begin width=%u height=%u stride=%u\n",panelWidth,panelHeight,panelStride);
+        for(unsigned row=0;row<rows;++row) {
+            char line[cols+2];line[0]='|';
+            for(unsigned col=0;col<cols;++col) {
+                const uint32_t x=(uint32_t)((uint64_t)col*panelWidth/cols);
+                const uint32_t y=(uint32_t)((uint64_t)row*panelHeight/rows);
+                const uint32_t *pixel=reinterpret_cast<const uint32_t *>(base+(uint64_t)y*panelStride+uint64_t(x)*4);
+                const uint32_t value=*pixel;
+                const uint32_t luma=((value>>16&0xff)*30+(value>>8&0xff)*59+(value&0xff)*11)/100;
+                if(luma>24)++ink;
+                line[col+1]=ramp[(luma*(sizeof(ramp)-1))/256 < sizeof(ramp)-1 ? (luma*(sizeof(ramp)-1))/256 : sizeof(ramp)-2];
+            }
+            line[cols+1]='|';line[cols+2]=0;
+            printf("PICASSO_PANEL %s\n",line);
+        }
+        printf("PICASSO_PANEL end ink=%u/%u\n",ink,cols*rows);
+    }
     IOReturn newUserClient(task_t task,void *security,UInt32 type,IOUserClient **client) override {
         native_legacy_client_enter(task,type);
         IOReturn status=IOMobileFramebufferLegacy::newUserClient(task,security,type,client);
@@ -490,6 +525,7 @@ public:
             valid=width==video.v_width && height==video.v_height;
             if(valid) {
                 OSSafeReleaseNULL(bootMapping);bootMapping=mapping;mapping=nullptr;primary=true; // Text/graphics is console policy, not display identity.
+                panelWidth=width;panelHeight=height;panelStride=(uint32_t)video.v_rowBytes;
                 valid=native_legacy_gop_mapping_observed(this,bootMapping,width,height);
                 /* offline-legacy-bench=1: measure the three sides of a frame copy once, through this exact mapping.
                  * The 10.4 MB frame copy costs ~130 ms here (PICASSO_DISPLAY event=10); these one-megabyte timings
@@ -530,5 +566,7 @@ public:
     LEAF(345)
 #undef LEAF
 };
+NativeLegacyDisplay *NativeLegacyDisplay::sPanelOwner=nullptr;
 OSDefineMetaClassAndStructors(NativeLegacyDisplay,IOMobileFramebufferLegacy)
-IOService *native_legacy_display_allocate(void) {return new NativeLegacyDisplay;}
+IOService *native_legacy_display_allocate(void) {NativeLegacyDisplay *display=new NativeLegacyDisplay;if(display)NativeLegacyDisplay::sPanelOwner=display;return display;}
+extern "C" bool native_legacy_panel_dump(void) {if(!NativeLegacyDisplay::sPanelOwner)return false;NativeLegacyDisplay::sPanelOwner->panelAscii();return true;}
