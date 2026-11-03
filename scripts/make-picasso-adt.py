@@ -187,8 +187,8 @@ def main():
     # an adhoc-signed userspace binary (launchd) is only accepted under the
     # dev-board policy that the iPad identity declares.
     identity = [
-        ('model', b'iPad7,1\0' if args.ipad_identity else b'iPhone12,5\0'),
-        ('target-type', b'J120\0' if args.ipad_identity else b'D433\0'),
+        ('model', b'iPad7,1\0' if args.ipad_identity else b'iPhone14,3\0'),
+        ('target-type', b'J120\0' if args.ipad_identity else b'D64\0'),
     ]
     tree = node('device-tree', [
         *identity,
@@ -256,7 +256,7 @@ def main():
         # artwork fields describe the J120 panel (2732x2048 class, P3, scale 2) so
         # UIKit and the audio routing database pick iPad behaviour, and
         # compatible-device-fallback keeps a known device for lookups that use it.
-        node('product', [('product-name', b'iPad Pro (12.9-inch) (2nd generation)\0' if args.ipad_identity else b'iPhone 11 Pro Max\0'),
+        node('product', [('product-name', b'iPad Pro (12.9-inch) (2nd generation)\0' if args.ipad_identity else b'iPhone 13 Pro Max\0'),
                          ('model', b'xiaomi,picasso\0'),
                          *([('product-description', b'iPad Pro (12.9-inch) (2nd generation)\0'),
                             ('artwork-device-idiom', b'pad\0'),
@@ -264,15 +264,18 @@ def main():
                             ('artwork-scale-factor', struct.pack('<I', 2)),
                             ('artwork-display-gamut', b'P3\0'),
                             ('compatible-device-fallback', b'iPad6,7\0')] if args.ipad_identity else
-                           [('product-description', b'iPhone 11 Pro Max\0'),
+                           [('product-description', b'iPhone 13 Pro Max\0'),
                             # UIKit picks the phone idiom (status bar, notch insets, lock-screen
-                            # clock) from here. The subtype and scale name the 1242x2688 @3x class
-                            # this panel belongs to; the actual bounds still come from the display.
+                            # clock) from here, and the Pro class is what lets it ask for more than
+                            # 60 Hz: a non-Pro iPhone identity caps CADisplayLink at 60 even when the
+                            # display publishes a faster tick. 13 Pro is a notch device (no Dynamic
+                            # Island), 1284x2778 @3x, and the actual bounds still come from the
+                            # display driver.
                             ('artwork-device-idiom', b'phone\0'),
-                            ('artwork-device-subtype', struct.pack('<I', 2688)),
+                            ('artwork-device-subtype', struct.pack('<I', 2778)),
                             ('artwork-scale-factor', struct.pack('<I', 3)),
                             ('artwork-display-gamut', b'P3\0'),
-                            ('compatible-device-fallback', b'iPhone11,6\0')])]),
+                            ('compatible-device-fallback', b'iPhone14,2\0')])]),
         node('pram', [('reg', struct.pack('<2Q', PANIC_LOG_PADDR, PANIC_LOG_SIZE))]),
         node('arm-io', [('device_type', b'arm-io\0'),
                         ('#address-cells', struct.pack('<I', 2)),
