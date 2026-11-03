@@ -96,10 +96,18 @@ if [ "$SHENG_HIDINPUT" = 1 ]; then
   fi
   if [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-sheng-hid-input.py; fi
 fi
+NATIVE_BUTTONS=${XNU_NATIVE_BUTTONS:-0}
 NOVATEK_TOUCH=${XNU_NOVATEK_TOUCH:-0}
 if [ "$NOVATEK_TOUCH" != 0 ] && [ "$NOVATEK_TOUCH" != 1 ]; then
   echo 'XNU_NOVATEK_TOUCH must be 0 or 1' >&2
   exit 1
+fi
+if [ "$NATIVE_BUTTONS" = 1 ]; then
+  if [ "$BOOT_PROGRESS" != 1 ] && [ "$BOOTSTRAP" != 1 ]; then
+    echo 'NativeButtons needs the boot-progress build: its probe call site lives in BootProgress.c' >&2
+    exit 1
+  fi
+  if [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-native-buttons.py; fi
 fi
 if [ "$NOVATEK_TOUCH" = 1 ]; then
   if [ "$BOOT_PROGRESS" != 1 ] && [ "$BOOTSTRAP" != 1 ]; then
@@ -843,6 +851,10 @@ PY_BINDINGS
   if [ "$SHENG_HIDINPUT" = 1 ]; then
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ROOT/build/sheng-hid-input/libShengHidInput.a"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ROOT/build/sheng-hid-input/libShengHidInput.a"
+  fi
+  if [ "$NATIVE_BUTTONS" = 1 ]; then
+    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ROOT/build/buttons/libNativeButtons.a"
+    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ROOT/build/buttons/libNativeButtons.a"
   fi
   if [ "$NOVATEK_TOUCH" = 1 ]; then
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ROOT/build/novatek-touch/libNativeNovatekTouch.a"

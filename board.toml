@@ -60,6 +60,8 @@ archives = [
   "build-arm-driver.py ArmCpu",
   # AppleImage4 waits for this real software-key IOAESAccelerator provider.
   "build-picasso-aes.py",
+  # Power and volume keys: PON kpdpwr/RESIN plus the pm8150l volume-up GPIO.
+  "build-native-buttons.py",
   # Stage 6: the UFS controller driver. Its board constants (GccUfs.h) carry
   # the SM7250 physical windows; the ADT ufshc/ufsphy nodes only match classes.
   "build-arm-driver.py NativeUfs",
@@ -308,29 +310,32 @@ kernel_args = [
   # which also disturbed the CDC log the host reads.
   "boot-progress=2",
   "sheng-build-tag=picasso-smp",
-  "boot-ui-focus=chronod",
-  "boot-ui-focus2=SpringBoard",
-  "boot-ui-focus3=backboardd",
-  # liveactivitiesd dropped from the focus trace: its 31 bytes buy the SQE
-  # override below, and the three names above already bracket the render path.
-  "boot-ui-follow=1",
+  # The focus trace is gone: the probe that consumed it stops at panel handoff,
+  # and the four arguments it needed are what pay for the key probe and the
+  # frequency cap below.
   # The vendor a630_sqe.fw on this board is version 0x188, below the mainline
   # floor (0x190) that a6xx_gpu.c applies. The probe refuses it by default;
   # this is the documented override, and the image it guards is the one the
   # qualified kernel carried.
   "sheng-gpu-allow-old-sqe=1",
-  # Mode 4 raises every cpufreq-hw domain to its highest non-turbo level and
-  # runs the governor. Without it the SoC stays at its boot level for the whole
-  # boot: launchd is 300 s away and the software-rendered UI takes another ten
-  # minutes. silenzio's handoff payload carries this argument; the CI payload
-  # never did.
+  # Mode 4 runs the governor. Without it the SoC stays at its boot level for the
+  # whole boot: launchd is 300 s away and the software-rendered UI takes another
+  # ten minutes. The cap keeps mode 4 from parking the two A76 domains at their
+  # top entry (2.2/2.4 GHz) for minutes at a time on a body with no thermal
+  # path; 1.6 GHz is still above the boot level that made the boot slow. The
+  # floor keeps the little cluster off 300 MHz while the UI is being drawn.
   "sheng-cpufreq=4",
+  "sheng-cpufreq-cap=1600",
+  "sheng-cpufreq-min=800",
   # Owned offline HID source (ShengHidInput). offline-hid-input=1 lets the probe
   # attach a virtual keyboard through the ORIGINAL IOHIDDevice ABI;
   # offline-hid-home=1 is the device-creation gate, and the auto-home series
   # posts Home reports from 120 s after the probe, every 60 s, eight times, so
   # the lock screen is unlocked whenever it appears. No touch driver is needed
   # for this path.
+  # Power and volume keys (drivers/NativeButtons): PON kpdpwr/RESIN plus the
+  # pm8150l GPIO 5 volume-up key, reported through the HID report 2 bits.
+  "native-buttons=1",
   "offline-hid-input=1",
   "offline-hid-home=1",
   # The synthetic bottom-edge swipe that unlocks this iPad identity; auto-home did

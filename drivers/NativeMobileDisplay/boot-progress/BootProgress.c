@@ -169,6 +169,7 @@ extern void native_hid_swipe_tick(unsigned) __attribute__((weak_import));
 // sheng-touch-start=<seconds> delays the start on the monitor clock, so a faulting
 // probe cannot take the display and the CDC console down with it.
 extern void native_novatek_touch_probe(void) __attribute__((weak_import));
+extern void native_buttons_probe(void) __attribute__((weak_import));
 // Prints (once, early) the IMEM step marker the probe left when it died on the previous boot.
 extern void native_novatek_touch_boot_report(unsigned) __attribute__((weak_import));
 extern volatile uint32_t native_hid_stage,native_hid_resource_found __attribute__((weak_import));
@@ -1275,6 +1276,9 @@ static void monitor(void *arg, wait_result_t result) {
           PE_parse_boot_argn("sheng-touch-start",&touch_start_at,sizeof(touch_start_at));
         }
         if(native_novatek_touch_probe && now>=touch_start_at)native_novatek_touch_probe();
+        // Power/volume keys (drivers/NativeButtons). Self-gated on native-buttons=1, and it starts
+        // its own thread, so calling it every pass costs one atomic load once it has run.
+        if(native_buttons_probe)native_buttons_probe();
       }
     }
     // Secondary-CPU progress over CDC: the panel row only exists on the screen, and

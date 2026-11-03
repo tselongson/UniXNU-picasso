@@ -296,12 +296,14 @@ static void reportDisplayState(const char *trigger) {
 }
 
 extern "C" bool native_legacy_panel_dump(void) __attribute__((weak_import));
+extern "C" void native_buttons_report(void) __attribute__((weak_import));
 
 extern "C" void native_legacy_display_state_report(void) {
     reportDisplayState("wait");
     // The counters above say how many frames were submitted; this says what the panel is
     // actually scanning out, which is what tells a stale boot image from a live system frame.
     if (native_legacy_panel_dump) native_legacy_panel_dump();
+    if (native_buttons_report) native_buttons_report();
 }
 
 extern "C" bool native_legacy_prepare_scanout(void) {
