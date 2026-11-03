@@ -666,6 +666,14 @@ void boot_progress_exit(int pid,const char *name,int status,unsigned ns,uint64_t
   }
   bp_exit_add(&exit_records,pid,name,status,ns,code);
   unsigned signal=(unsigned)status&127;
+  // The boot page paints a signalled exit as a red CRASH row, and until now nothing said which
+  // process or signal it was. Bounded, so a crash loop cannot flood the CDC console.
+  {
+    static unsigned signaled;
+    if(signal && signaled<8) {++signaled;
+      printf("PICASSO_EXIT pid=%d name=%s status=%x signal=%u code=%llx\n",
+             pid,name?name:"?",(unsigned)status,signal,(unsigned long long)code);}
+  }
   if(signal>=3 && signal<=12 && signal!=9 && boot_progress_exit_fault)
     boot_progress_exit_fault(pid,signal,exit_records.crash[(exit_records.crashes-1)%3],400);
   if(signal==6 && boot_progress_exit_reason) {

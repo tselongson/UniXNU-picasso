@@ -319,11 +319,11 @@ extern "C" void native_buttons_report(void) {
     const int ponRc = read8(gPon, kRtSts, &pon);
     const int typeRc = read8(gPon, kSetType, &type);
     const int gpioRc = read8(gVolUp, 0x08, &gpio);
-    printf("PICASSO_BUTTONS stage=%d irq=%d reports=%d mask=%x pon=%d volup=%d word=%x pdc=%x "
-           "read=%d/%d/%d pon_rt=%02x pon_type=%02x gpio=%02x\n",
-        native_buttons_stats[0], native_buttons_stats[1], native_buttons_stats[2],
-        native_buttons_stats[3], gPon, gVolUp, (unsigned)gApids, native_buttons_stats[7],
-        ponRc, typeRc, gpioRc, pon, type, gpio);
+    printf("PICASSO_BUTTONS stage=%d err=%d irq=%d reports=%d mask=%x pon=%d volup=%d word=%x "
+           "pdc=%x read=%d/%d/%d pon_rt=%02x pon_type=%02x gpio=%02x\n",
+        native_buttons_stats[0], native_buttons_stats[8], native_buttons_stats[1],
+        native_buttons_stats[2], native_buttons_stats[3], gPon, gVolUp, (unsigned)gApids,
+        native_buttons_stats[7], ponRc, typeRc, gpioRc, pon, type, gpio);
 }
 
 extern "C" void native_buttons_probe(void) {

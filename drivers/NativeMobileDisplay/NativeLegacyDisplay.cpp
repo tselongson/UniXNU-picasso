@@ -120,6 +120,15 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         if(loop->addEventSource(timer)!=kIOReturnSuccess){timer->release();return;}
         nanoseconds_to_absolutetime(1000000000ull/hz,&vsyncInterval);
         vsyncHz=hz;vsyncTimer=timer;native_legacy_vsync_observed(4,hz);
+        /* sheng-vsync-prearm=1: run the tick from the start instead of waiting for a swap-queue
+         * kick. A compositor that has not presented its first frame never kicks, and a client that
+         * waits for a vsync before presenting would then wait forever; the tick is what breaks
+         * that deadlock. Inert without the argument. */
+        unsigned prearm=0;
+        if(PE_parse_boot_argn("sheng-vsync-prearm",&prearm,sizeof(prearm)) && prearm) {
+            vsyncKicked=true;
+            printf("PICASSO_DISPLAY vsync: prearmed hz=%u\n",hz);
+        }
         // A client may already have registered: arm under the gate, like the registration does.
         loop->runAction([](OSObject *owner,void *,void *,void *,void *)->IOReturn {
             static_cast<NativeLegacyDisplay *>(owner)->armVsync();return kIOReturnSuccess;

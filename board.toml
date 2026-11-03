@@ -293,6 +293,10 @@ kernel_args = [
   "offline-legacy-transfer=1",
   "offline-legacy-cpu-present=1",
   "sheng-vsync=60",
+  # The compositor presents only after it has received a vsync, and the tick otherwise starts on
+  # the first swap-queue kick. A boot whose first frame never comes (no setup app, no window yet)
+  # has no kick, so the two wait on each other: prearm the tick.
+  "sheng-vsync-prearm=1",
   # State-only AppleKeyStore probe used by the display/keystore diagnostics.
   "picasso-aks-state=1",
   # Bring GX up and publish the accelerator for Metal clients. Stage 3 takes
