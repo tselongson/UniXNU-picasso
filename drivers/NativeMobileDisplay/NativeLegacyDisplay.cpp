@@ -43,6 +43,9 @@ extern "C" void native_legacy_vsync_notify(void *display,uint64_t timestamp,uint
 extern "C" bool native_legacy_set_refresh_properties(void *display);
 extern "C" void native_legacy_vsync_observed(unsigned event,unsigned hz);
 extern "C" uint64_t mach_continuous_time(void);
+// Set once the boot page yields the panel to a system frame (BootProgress.c).
+extern "C" unsigned boot_progress_display_owned __attribute__((weak_import));
+
 class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     OSDeclareDefaultStructors(NativeLegacyDisplay)
     IOMemoryMap *bootMapping=nullptr;
@@ -83,6 +86,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
      * display client exists, and the original sender walks the client queue (a no-op when it
      * is empty), so treat a kick as "wanted" for the rest of the boot: wf132. */
     bool vsyncKicked=false;
+    bool vsyncPrearmed=false;
     bool vsyncWanted() const {
         const void *head=nullptr;memcpy(&head,reinterpret_cast<const unsigned char *>(this)+5592,sizeof(head));return head;
     }
@@ -126,7 +130,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
          * that deadlock. Inert without the argument. */
         unsigned prearm=0;
         if(PE_parse_boot_argn("sheng-vsync-prearm",&prearm,sizeof(prearm)) && prearm) {
-            vsyncKicked=true;
+            vsyncKicked=true;vsyncPrearmed=true;
             printf("PICASSO_DISPLAY vsync: prearmed hz=%u\n",hz);
         }
         // A client may already have registered: arm under the gate, like the registration does.
@@ -495,6 +499,13 @@ public:
         *count=0;*mask=0;bzero(key,64);return kIOReturnUnsupported;
     }
 public:
+    /* Whether the vsync stand-in is running, and who owns the panel: the two facts that decide
+     * whether a missing UI is a display-driver problem or a compositor that never asked. */
+    void reportVsync() {
+        printf("PICASSO_VSYNC hz=%u armed=%d kicked=%d prearm=%d interval=%llu timer=%d page_owned=%d\n",
+            vsyncHz, int(vsyncArmed), int(vsyncKicked), int(vsyncPrearmed), vsyncInterval,
+            vsyncTimer ? 1 : 0, int(boot_progress_display_owned));
+    }
     /* The panel geometry the GOP handed over, kept for the console dump below: PE_current_console is
      * released once userland owns the screen, so it cannot be asked again later. */
     uint32_t panelWidth=0,panelHeight=0,panelStride=0;
@@ -596,4 +607,9 @@ public:
 NativeLegacyDisplay *NativeLegacyDisplay::sPanelOwner=nullptr;
 OSDefineMetaClassAndStructors(NativeLegacyDisplay,IOMobileFramebufferLegacy)
 IOService *native_legacy_display_allocate(void) {NativeLegacyDisplay *display=new NativeLegacyDisplay;if(display)NativeLegacyDisplay::sPanelOwner=display;return display;}
+extern "C" bool native_legacy_vsync_report(void) {
+    if (!NativeLegacyDisplay::sPanelOwner) return false;
+    NativeLegacyDisplay::sPanelOwner->reportVsync();
+    return true;
+}
 extern "C" bool native_legacy_panel_dump(void) {if(!NativeLegacyDisplay::sPanelOwner)return false;NativeLegacyDisplay::sPanelOwner->panelAscii();return true;}

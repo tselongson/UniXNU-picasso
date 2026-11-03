@@ -437,7 +437,12 @@ packed_data_ramdisk = true
 # code-signing trust policy, and under the production policy it rejects the
 # adhoc-signed userspace with "unsuitable CT policy 0". sheng and hummer run the
 # same values on hardware against the same 21H461 userspace.
-ipad_identity = false
+# Bisect: back to the iPad identity while the compositor presents nothing. v261
+# (iPad, before the merge) submitted 10 frames; v262/v263 (phone) submit none,
+# and the only frames this boot ever got came from Setup's crash loop, which the
+# data markers now suppress. Flip back to false for the phone identity once the
+# compositor is presenting again.
+ipad_identity = true
 # Select the authenticated OS APFS volume by its published IOMedia UUID. The
 # VerifiedRoot window identity check independently binds this UUID to the
 # owner-signed image before the block device is published.
