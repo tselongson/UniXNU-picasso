@@ -313,8 +313,14 @@ kernel_args = [
   "boot-ui-focus=chronod",
   "boot-ui-focus2=SpringBoard",
   "boot-ui-focus3=backboardd",
-  "boot-ui-focus4=liveactivitiesd",
+  # liveactivitiesd dropped from the focus trace: its 31 bytes buy the SQE
+  # override below, and the three names above already bracket the render path.
   "boot-ui-follow=1",
+  # The vendor a630_sqe.fw on this board is version 0x188, below the mainline
+  # floor (0x190) that a6xx_gpu.c applies. The probe refuses it by default;
+  # this is the documented override, and the image it guards is the one the
+  # qualified kernel carried.
+  "sheng-gpu-allow-old-sqe=1",
   # Owned offline HID source (ShengHidInput). offline-hid-input=1 lets the probe
   # attach a virtual keyboard through the ORIGINAL IOHIDDevice ABI;
   # offline-hid-home=1 is the device-creation gate, and the auto-home series
