@@ -66,6 +66,7 @@ constexpr uint32_t kGmuHost2GmuIntrRaw = 0x1F996;
 constexpr uint32_t kGmuRsccControlReq = 0x23B07;
 constexpr uint32_t kGmuRsccControlAck = 0x23B08;
 constexpr uint32_t kGmuGxPwrStatus = 0x1F8D0;   /* GMU_SPTPRAC_PWR_CLK_STATUS (sheng kGxStatus) */
+constexpr uint32_t kGmuSptpracPowerControl = 0x1A881;   /* GPU_GMU_GX_SPTPRAC_POWER_CONTROL (a6xx_gmu.xml) */
 constexpr uint32_t kGmuRpmhPowerState = 0x1F8EC; /* GPU_GMU_CX_GMU_RPMH_POWER_STATE (a6xx_gmu_check_idle_level) */
 constexpr uint32_t kGmuGeneral7 = 0x1F9CC;
 constexpr uint32_t kGmuAoHostIntrClr = 0x23B04;
@@ -1206,6 +1207,23 @@ int startCm3()
         }
         return -1;
     }
+    /* a6xx_gmu_fw_start's legacy sequence. wf99 tried mainline's a6xx_gmu_gfx_rail_on() here (BOOT_SLUMBER
+     * OOB, request bit 22 / ack bit 30): the firmware never acked it (10000 polls, GMU2HOST_INTR_INFO=0)
+     * and the SPTPRAC status stayed 0x80. That is correct for this part: downstream gates the whole legacy
+     * rail-on on ADRENO_QUIRK_HFI_USE_REG, and adreno_has_sptprac_gdsc() is true only for a630/a615 — for
+     * a620 the GMU firmware owns GX and SP/TP, and the non-a630 OOB mapping is BIT(30)/BIT(31) (the GPU_SET
+     * OOB the port already takes after HFI start). The manual SPTPRAC write below is therefore a no-op on
+     * this hardware; it is kept only as a diagnostic. */
+    coreWrite(kGmuSptpracPowerControl, 0x778000u);
+    barrier();
+    uint32_t sptprac = 0;
+    for (unsigned index = 0; index < 100; ++index) {
+        sptprac = coreRead(kGmuGxPwrStatus);
+        if ((sptprac & 0x38u) == 0x28u) break;
+        IODelay(1);
+    }
+    printf("PICASSO_GPU gmu: sptprac power (pre-HFI) status=%08x (want &38==28)\n", sptprac);
+
     coreWrite(kGmuHfiCtrlInit, 1);
     barrier();
     observed = 0;
@@ -1430,8 +1448,10 @@ int gxPowerOn(unsigned perfIndex)
 extern "C" void native_adreno620_gmu_release_gpu_set(void)
 {
     if (!gState) return;
-    /* a6xx_gmu_clear_oob(GMU_OOB_GPU_SET) for a non-legacy GMU: writing the
-     * clear_new bit (31) into HOST2GMU_INTR_SET releases the request. */
+    /* a6xx_gmu_clear_oob(GMU_OOB_GPU_SET) for a non-a630 GMU: the clear bit is 31 - req*2, i.e. BIT(31)
+     * for the GPU_SET request (downstream a6xx_gmu_oob_set/oob_clear; mainline's non-legacy table agrees).
+     * The BOOT_SLUMBER clear is deliberately not sent: for a620 the OOB mapping is
+     * BIT(30 - req*2), so bit 30 is the GPU_SET *request*, not a boot-slumber clear. */
     coreWrite(kGmuHost2GmuIntrSet, 1u << 31);
     barrier();
     printf("PICASSO_GPU gx: oob released\n");

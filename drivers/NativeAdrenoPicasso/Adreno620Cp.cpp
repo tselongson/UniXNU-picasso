@@ -52,19 +52,30 @@
  * installed, so a stall's IB dump was all 0xdeadbeef. Reads one word through a temporary kernel mapping of its page. */
 extern "C" int (*native_adreno_dram_read32)(uint64_t physical, uint32_t *value);
 extern "C" int (*native_adreno_cached_read32)(uint64_t physical, uint32_t *value);
-static int dramRead32(uint64_t physical, uint32_t *value)
+extern "C" int (*native_adreno_dram_read_words)(uint64_t physical, uint32_t *out, size_t count);
+/* One fresh mapping per page, kIOMapInhibitCache: a default-cache mapping of a physical page is cacheable, so it would both read a
+ * stale cache line and leave one behind for the next reader (the earlier form omitted the flag and could report a zero the CPU had
+ * cached, which is exactly the diagnostic this reader exists to answer). */
+static int dramReadPage(uint64_t physical, uint32_t *out, size_t count)
 {
-    if (!value) return -1;
-    IOMemoryDescriptor *page = IOMemoryDescriptor::withPhysicalAddress(physical & ~UINT64_C(0xfff), 4096, kIODirectionIn);
-    if (!page) return -1;
-    IOMemoryMap *map = page->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapReadOnly);
-    page->release();
+    if (!out || !count) return -1;
+    const uint64_t page = physical & ~UINT64_C(0xfff);
+    const size_t offset = size_t(physical & 0xfff);
+    if (offset + count * sizeof(uint32_t) > 4096) count = (4096 - offset) / sizeof(uint32_t);
+    IOMemoryDescriptor *descriptor = IOMemoryDescriptor::withPhysicalAddress(page, 4096, kIODirectionIn);
+    if (!descriptor) return -1;
+    IOMemoryMap *map = descriptor->createMappingInTask(kernel_task, 0, kIOMapAnywhere | kIOMapReadOnly | kIOMapInhibitCache);
+    descriptor->release();
     if (!map) return -1;
     const uint8_t *base = reinterpret_cast<const uint8_t *>(static_cast<uintptr_t>(map->getAddress()));
-    *value = *reinterpret_cast<volatile const uint32_t *>(base + (physical & 0xfff));
+    for (size_t i = 0; i < count; ++i) out[i] = *reinterpret_cast<volatile const uint32_t *>(base + offset + 4 * i);
     map->release();
-    return 0;
+    return int(count);
 }
+static int dramRead32(uint64_t physical, uint32_t *value)
+{return dramReadPage(physical, value, 1) == 1 ? 0 : -1;}
+static int dramReadWords(uint64_t physical, uint32_t *out, size_t count)
+{return dramReadPage(physical, out, count);}
 /* The kernel's cacheable physical aperture (the direct map), which is how the driver's line audit sees a client's dirty cache lines:
  * an IO mapping of the same page takes the page's IO attribute and would read DRAM instead. */
 extern "C" vm_offset_t phystokv(uint64_t pa);
@@ -156,6 +167,7 @@ constexpr uint32_t kGpuTpl1AddrModeCntl = 0x0B601;
 
 /* GMU-window dwords (a6xx_gmu.xml). */
 constexpr uint32_t kGmuSptpracClockControl = 0x1A880;
+constexpr uint32_t kGmuSptpracPowerControl = 0x1A881;   /* GPU_GMU_GX_SPTPRAC_POWER_CONTROL: 0x778000 powers SP/TP */
 constexpr uint32_t kGmuCgcModeCntl = 0x23B09;
 constexpr uint32_t kGmuCgcDelayCntl = 0x23B0A;
 constexpr uint32_t kGmuCgcHystCntl = 0x23B0B;
@@ -185,15 +197,17 @@ constexpr uint32_t kApriv = 0x0000006Eu;                /* BIT(6)|5|3|2|1 */
 constexpr uint32_t kCpProtectCntl = 0x0000000Bu;        /* PROT_EN|FAULT_ON_VIOL|INF_SPAN */
 
 /* UBWC 3.0, highest bank bit 14 (SM7250 GPU DT: qcom,ubwc-mode = <3>,
- * qcom,highest-bank-bit = <14>; the same values the upstream SM7250 UBWC patch
- * records). KGSL encodes mode 3 as feild 0 (not UBWC 1.0), amsbc=1 is only for
- * A640/A680, and hbb14 gives hbb_lo=1, hbb_hi=0. */
+ * qcom,highest-bank-bit = <14>). KGSL encodes mode 3 as field 0 (not UBWC 1.0);
+ * hbb14 gives hbb_lo=1, hbb_hi=0. Mainline additionally sets amsbc (bit 4) for
+ * UBWC >= 3.0; that is a separate pending change, so this boot keeps 0x2 to
+ * isolate the SQE firmware bump. */
 constexpr uint32_t kRbNcModeCntl = 0x00000002u;
 constexpr uint32_t kTpl1NcModeCntl = 0x00000002u;
 constexpr uint32_t kSpNcModeCntl = 0x00000022u;         /* uavflagprd_inv=2 for a650 family */
 constexpr uint32_t kUcheModeCntl = 0x00200000u;         /* hbb_lo << 21 */
 
 constexpr uint32_t kCpMeInitOpcode = 0x48;
+constexpr uint32_t kCpSetSecureModeOpcode = 0x66;       /* adreno_pm4.xml CP_SET_SECURE_MODE */
 constexpr uint32_t kCpNopOpcode = 0x10;
 constexpr uint32_t kCpIndirectBufferOpcode = 0x3F;
 constexpr uint32_t kCpEventWriteOpcode = 0x46;
@@ -328,6 +342,54 @@ bool packet(uint32_t *words, size_t capacity, size_t at, uint32_t opcode,
     return true;
 }
 
+/* wf103: SCM (secure channel manager) probe. The GPU boots in secure mode and, per the
+ * zap-shader documentation, "can only render to protected buffers" until a signed zap is
+ * loaded through TZ and the CP is switched out of secure mode. Loading that zap needs the
+ * Qualcomm PAS SCM calls; this helper is the conduit those calls will use. It is the same
+ * instruction the platform's PSCI driver uses (drivers/ArmCpu/ArmCpu.cpp). */
+struct ScmReply { uint32_t a0, a1, a2, a3; };
+ScmReply scmSipCall(uint32_t function, uint32_t arginfo, uint64_t arg0,
+    uint64_t arg1 = 0, uint64_t arg2 = 0, uint64_t arg3 = 0)
+{
+    register uint64_t x0 __asm__("x0") = function;
+    register uint64_t x1 __asm__("x1") = arginfo;
+    register uint64_t x2 __asm__("x2") = arg0;
+    register uint64_t x3 __asm__("x3") = arg1;
+    register uint64_t x4 __asm__("x4") = arg2;
+    register uint64_t x5 __asm__("x5") = arg3;
+    __asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
+        : "r"(x4), "r"(x5)
+        : "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16",
+          "x17", "memory");
+    return ScmReply{uint32_t(x0), uint32_t(x1), uint32_t(x2), uint32_t(x3)};
+}
+
+void scmProbe()
+{
+    constexpr uint32_t kSipOwner = 2u;              /* ARM_SMCCC_OWNER_SIP */
+    constexpr uint32_t kOwnerShift = 24;
+    constexpr uint32_t kFastCall = 1u << 31;        /* ARM_SMCCC_FAST_CALL */
+    constexpr uint32_t kSmc64 = 1u << 30;           /* ARM_SMCCC_SMC_64 */
+    constexpr uint32_t kSvcInfo = 0x06u, kIsCallAvail = 0x01u;
+    constexpr uint32_t kSvcPil = 0x02u, kPasInitImage = 0x01u;
+    constexpr uint32_t kPasMemSetup = 0x02u, kPasAuthAndReset = 0x05u;
+    const uint32_t avail = (kFastCall | kSmc64 | (kSipOwner << kOwnerShift) |
+        (kSvcInfo << 8) | kIsCallAvail);
+    const uint64_t selector = (uint64_t(kSipOwner) << kOwnerShift) |
+        uint64_t((kSvcPil << 8) | kPasInitImage);
+    const ScmReply init = scmSipCall(avail, 1, selector);
+    const uint64_t setupSelector = (uint64_t(kSipOwner) << kOwnerShift) |
+        uint64_t((kSvcPil << 8) | kPasMemSetup);
+    const ScmReply setup = scmSipCall(avail, 1, setupSelector);
+    const uint64_t resetSelector = (uint64_t(kSipOwner) << kOwnerShift) |
+        uint64_t((kSvcPil << 8) | kPasAuthAndReset);
+    const ScmReply reset = scmSipCall(avail, 1, resetSelector);
+    printf("PICASSO_GPU scm: is-call-avail init a0=%08x a1=%08x a2=%08x a3=%08x\n",
+        init.a0, init.a1, init.a2, init.a3);
+    printf("PICASSO_GPU scm: is-call-avail memsetup a0=%08x a1=%08x; auth %08x/%08x\n",
+        setup.a0, setup.a1, reset.a0, reset.a1);
+}
+
 void printCpStatus(const char *where)
 {
     /* A6XX CP/RBBM fault and progress registers: 0x210 RBBM_STATUS, 0x213
@@ -391,6 +453,29 @@ bool hardwareInit()
         return false;
     }
 
+    /* wf103: can this kernel reach the QCOM secure monitor, and does the firmware expose the
+     * PAS calls the zap needs? (No state is changed; the reply is the measurement.) */
+    scmProbe();
+
+    /* a6xx_sptprac_enable() (a6xx_gmu.c). This device is a legacy GMU (gmu_is_wrapper is not set in
+     * a6xx_catalog, and the DT property is absent), and on that path mainline powers the SP/TP rail
+     * itself: it writes GPU_GMU_GX_SPTPRAC_POWER_CONTROL = 0x778000 and polls
+     * GMU_SPTPRAC_PWR_CLK_STATUS until (status & 0x38) == 0x28. The port booted the GMU through the
+     * HFI/OOB GPU_SET handshake but never wrote this register, and the measured result was a CP that
+     * runs while no shader work happens: every draw, blit and compute left the client's memory
+     * untouched and every fence retired (wf90-wf92). */
+    {
+        const uint32_t before = gmuRead(kGmuGxPwrStatus);
+        gmuWrite(kGmuSptpracPowerControl, 0x778000u);
+        uint32_t status = before;
+        for (unsigned poll = 0; poll < 100; ++poll) {
+            status = gmuRead(kGmuGxPwrStatus);
+            if ((status & 0x38u) == 0x28u) break;
+            IODelay(1);
+        }
+        printf("PICASSO_GPU cp: sptprac power: status %08x -> %08x (want &38==28)\n", before, status);
+    }
+
     /* Clear GBIF halt in case the GX domain was not collapsed. */
     gpuWrite(A620_GBIF_HALT, 0);
     (void)gpuRead(A620_GBIF_HALT);
@@ -401,6 +486,12 @@ bool hardwareInit()
     /* Disable the trusted memory range. */
     gpuWrite64(A620_RBBM_SECVID_TSB_TRUSTED_BASE, 0);
     gpuWrite(A620_RBBM_SECVID_TSB_TRUSTED_SIZE, 0);
+
+    /* RBBM_SECVID_TRUST_CNTL is read only (wf80: reading it returns the bootloader's 1, but writing the
+     * 0 that a6xx hw_init's no-zap fallback writes hangs GPU init at the write, before the CP starts).
+     * It is TZ's register on this device; the port leaves it alone and prints the value for the record. */
+    printf("PICASSO_GPU cp: RBBM_SECVID_TRUST_CNTL=%08x (TZ-owned, not written)\n",
+        gpuRead(A620_RBBM_SECVID_TRUST_CNTL));
 
     /* Turn on 64-bit addressing for all blocks. */
     const uint32_t addrMode[] = {
@@ -459,6 +550,12 @@ bool hardwareInit()
 
     gpuWrite(A620_RBBM_INTERFACE_HANG_INT_CNTL, kRbbmHangIntCntl);
     gpuWrite(A620_UCHE_CLIENT_PF, (1u << 7) | 1u);
+
+    /* No GMEM VA range for this chip: a6xx_hw_init writes UCHE_GMEM_RANGE_MIN/MAX only outside the
+     * a650 family/a702/a730 set, and msm reports MSM_PARAM_GMEM_BASE as 0 from ADRENO_6XX_GEN3 on. The
+     * GPU decodes TILE6_2 (GMEM-tiled) addresses as offsets into its own 512 KiB tile memory; a window
+     * here would move Turnip's tile addresses out of that space (wf77 programmed 0x40000000 and only
+     * added UCHE OOB accesses). The trap/write-through window above is the only UCHE range this chip takes. */
 
     const uint32_t bicubic[5] = {0, 0x3FE05FF4u, 0x3FA0EBEEu, 0x3F5193EDu, 0x3F0243F0u};
     for (uint32_t i = 0; i < 5; ++i) gpuWrite(kGpuTpl1BicubicWeights + i, bicubic[i]);
@@ -553,6 +650,30 @@ bool cpInit()
         return false;
     }
     printf("PICASSO_GPU cp: me_init idle\n");
+    return true;
+}
+
+/* wf100: mainline a6xx_gpu_init sends CP_SET_SECURE_MODE(0) once the zap shader
+ * has loaded, then flushes and waits for the ring to idle. The GPU powers on in
+ * secure mode; this packet is what switches the CP (and through it the GPU) to
+ * non-secure operation. The port has no PIL/SCM to run the zap, never sent this
+ * packet, and measures RBBM_SECVID_TRUST_CNTL = 1 — mainline's no-zap fallback
+ * writes that register to 0 from the CPU, which this port measured as a bus hang
+ * (wf80). This is the TZ-sanctioned alternative, and it is the only GPU state
+ * known to differ from a rendering-clean target. */
+bool leaveSecureMode()
+{
+    uint32_t words[2] = {};
+    const uint32_t payload[1] = {0};
+    if (!packet(words, 2, 0, kCpSetSecureModeOpcode, payload, 1)) return false;
+    uint32_t end = 0;
+    if (!submitRing(words, 2, &end)) return false;
+    printf("PICASSO_GPU cp: CP_SET_SECURE_MODE(0) submitted wptr=%u\n", end);
+    if (!waitIdle(end, kMeInitTimeoutUs)) {
+        printCpStatus("secure-mode");
+        return false;
+    }
+    printf("PICASSO_GPU cp: CP_SET_SECURE_MODE(0) idle rptr=%u\n", gpuRead(A620_CP_RB_RPTR));
     return true;
 }
 
@@ -745,7 +866,7 @@ bool publishGpu()
     info = {};
     info.chip_id = 0x06020001u;               /* the ADT's qcom,chipid for this GPU */
     info.gmem_bytes = 512u * 1024u;
-    info.gmem_base = 0;
+    info.gmem_base = 0;                      /* msm MSM_PARAM_GMEM_BASE: 0 from ADRENO_6XX_GEN3 on (no UCHE window; TILE6_2 is an offset) */
     info.uche_trap_base = 0x1fffffffff000ull;
     info.va_start = GpuClientVaStart;
     info.va_size = (uint64_t(1) << ias) - GpuClientVaStart;
@@ -1049,6 +1170,7 @@ extern "C" int native_adreno620_cp_start(void)
     /* The driver's diagnostic reader of client BOs reads DRAM through this hook, and the cacheable alias through the other. */
     native_adreno_dram_read32 = dramRead32;
     native_adreno_cached_read32 = cachedRead32;
+    native_adreno_dram_read_words = dramReadWords;
     if (!gState) gState = new CpState;
     CpState &s = *gState;
     if (s.started) {
@@ -1129,12 +1251,29 @@ extern "C" int native_adreno620_cp_start(void)
     }
 
     if (!cpInit()) return -1;
+    /* mainline's CP_SET_SECURE_MODE(0), the zap-path counterpart of the no-zap
+     * SECVID_TRUST_CNTL write. The GPU powers on in secure mode; leaving it there
+     * is the one measured difference from a rendering-clean target. wf100 sent it
+     * unconditionally and the pinned SQE answered CP_OPCODE_ERROR; the packet is
+     * therefore gated on sheng-gpu-secure-mode=1 so the SQE image can be the
+     * single variable it is measured against. */
+    {
+        uint32_t secureMode = 0;
+        if (PE_parse_boot_argn("sheng-gpu-secure-mode", &secureMode,
+                static_cast<int>(sizeof secureMode)) && secureMode) {
+            const uint32_t trustBefore = gpuRead(A620_RBBM_SECVID_TRUST_CNTL);
+            const bool left = leaveSecureMode();
+            const uint32_t trustAfter = gpuRead(A620_RBBM_SECVID_TRUST_CNTL);
+            printf("PICASSO_GPU cp: secure mode left=%d trust %08x -> %08x\n",
+                int(left), trustBefore, trustAfter);
+        }
+    }
     uint32_t fence = 0;
     if (!submitNoop(&fence)) return -1;
     if (!waitFence(fence, kFenceTimeoutUs, true)) return -1;
 
     /* The GPU is initialized: a6xx_gmu_clear_oob(GPU_SET), the last step of
-     * mainline hw_init. (Zap is not loaded, so no CP_SET_SECURE_MODE.) */
+     * mainline hw_init. */
     native_adreno620_gmu_release_gpu_set();
     s.started = true;
     printf("PICASSO_GPU cp: ready fence=%u\n", fence);
