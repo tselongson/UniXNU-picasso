@@ -134,7 +134,7 @@ def main():
                         help='/chosen/unique-chip-id (8 bytes) and --chip-id (4 bytes) seed XNU IOPlatformUUID; software identity seeds, not Apple silicon IDs')
     parser.add_argument('--chip-id', type=lambda value: int(value, 16), default=None)
     parser.add_argument('--ipad-identity', action='store_true',
-                        help='/product and /buttons describe an iPad-class device without a Home button (MobileGestalt reads these from the tree)')
+                        help='/product and /buttons describe an iPad-class device; without it the tree describes a notch iPhone (11 Pro Max class), which is what UIKit draws phone layout from')
     parser.add_argument('--cpu-regs', default='0',
                         help='Comma-separated CPU MPIDR affinity values (the /cpus reg of each core); the first is the running boot CPU. '
                              'SM7250 numbers its cores 0x000..0x700 in Affinity1. More than one adds /psci')
@@ -187,8 +187,8 @@ def main():
     # an adhoc-signed userspace binary (launchd) is only accepted under the
     # dev-board policy that the iPad identity declares.
     identity = [
-        ('model', b'iPad7,1\0' if args.ipad_identity else b'picasso-first-boot\0'),
-        *([('target-type', b'J120\0')] if args.ipad_identity else []),
+        ('model', b'iPad7,1\0' if args.ipad_identity else b'iPhone12,5\0'),
+        ('target-type', b'J120\0' if args.ipad_identity else b'D433\0'),
     ]
     tree = node('device-tree', [
         *identity,
@@ -211,10 +211,10 @@ def main():
                         # Apple binary trusts adhoc signatures only in this dev mode:
                         # without it launchd is rejected with "unsuitable CT policy 0".
                         # Same values sheng and hummer run with on hardware.
-                        *([('certificate-production-status', struct.pack('<I', 0)),
-                           ('effective-production-status-ap', struct.pack('<I', 0)),
-                           ('certificate-security-mode', struct.pack('<I', 1)),
-                           ('effective-security-mode-sep', struct.pack('<I', 1))] if args.ipad_identity else []),
+                        ('certificate-production-status', struct.pack('<I', 0)),
+                        ('effective-production-status-ap', struct.pack('<I', 0)),
+                        ('certificate-security-mode', struct.pack('<I', 1)),
+                        ('effective-security-mode-sep', struct.pack('<I', 1)),
                         # This property describes the actual volatile Data RAM disk.
                         *([('ephemeral-storage', struct.pack('<I', 1))] if (args.data_ramdisk or args.packed_data_ramdisk) else []),
                         *( [('darwinboot-memory-size', struct.pack('<Q', args.owned_memory_size))]
@@ -248,22 +248,31 @@ def main():
         # J120 has no Home button; MobileGestalt reads that from here. Without the
         # node an iPad identity still advertises a Home button and the userspace
         # gesture model does not match the panel.
-        *([node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
-                            ('button-names', b'hold\0voldown\0volup\0'),
-                            ('home-button-type', struct.pack('<I', 2))])] if args.ipad_identity else []),
+        node('buttons', [('compatible', b'buttons\0'), ('device_type', b'buttons\0'),
+                         ('button-names', b'hold\0voldown\0volup\0'),
+                         ('home-button-type', struct.pack('<I', 2))]),
         # The original AppleImage4 panics without a product node. Under the iPad
         # identity this node is what MobileGestalt reports as the hardware: the
         # artwork fields describe the J120 panel (2732x2048 class, P3, scale 2) so
         # UIKit and the audio routing database pick iPad behaviour, and
         # compatible-device-fallback keeps a known device for lookups that use it.
-        node('product', [('product-name', b'iPad Pro (12.9-inch) (2nd generation)\0' if args.ipad_identity else b'Redmi K30 5G\0'),
+        node('product', [('product-name', b'iPad Pro (12.9-inch) (2nd generation)\0' if args.ipad_identity else b'iPhone 11 Pro Max\0'),
                          ('model', b'xiaomi,picasso\0'),
                          *([('product-description', b'iPad Pro (12.9-inch) (2nd generation)\0'),
                             ('artwork-device-idiom', b'pad\0'),
                             ('artwork-device-subtype', struct.pack('<I', 2732)),
                             ('artwork-scale-factor', struct.pack('<I', 2)),
                             ('artwork-display-gamut', b'P3\0'),
-                            ('compatible-device-fallback', b'iPad6,7\0')] if args.ipad_identity else [])]),
+                            ('compatible-device-fallback', b'iPad6,7\0')] if args.ipad_identity else
+                           [('product-description', b'iPhone 11 Pro Max\0'),
+                            # UIKit picks the phone idiom (status bar, notch insets, lock-screen
+                            # clock) from here. The subtype and scale name the 1242x2688 @3x class
+                            # this panel belongs to; the actual bounds still come from the display.
+                            ('artwork-device-idiom', b'phone\0'),
+                            ('artwork-device-subtype', struct.pack('<I', 2688)),
+                            ('artwork-scale-factor', struct.pack('<I', 3)),
+                            ('artwork-display-gamut', b'P3\0'),
+                            ('compatible-device-fallback', b'iPhone11,6\0')])]),
         node('pram', [('reg', struct.pack('<2Q', PANIC_LOG_PADDR, PANIC_LOG_SIZE))]),
         node('arm-io', [('device_type', b'arm-io\0'),
                         ('#address-cells', struct.pack('<I', 2)),

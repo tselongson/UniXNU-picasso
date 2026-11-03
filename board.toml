@@ -422,14 +422,18 @@ chip_id = "7250"
 # DarwinBoot passes only packed nonzero pages; NativeRamBlock allocates pages
 # as needed. The seed is volatile and /chosen/ephemeral-storage remains enabled.
 packed_data_ramdisk = true
-# Declare an iPad-class device: /model iPad7,1, /target-type J120, the J120 panel
-# artwork in /product, no Home button in /buttons, and the dev-board security
-# tuple in /chosen (certificate-security-mode 1). The original AMFI reads that
-# tuple to choose its code-signing trust policy for the platform; under the
-# production policy it rejects the adhoc-signed userspace with "unsuitable CT
-# policy 0", which is the stage 5 blocker. sheng and hummer run the same values
-# on hardware against the same 21H461 userspace.
-ipad_identity = true
+# The tree describes a notch iPhone (11 Pro Max class) rather than an iPad: UIKit
+# picks the phone idiom - status bar, notch insets, a lock-screen clock sized for
+# a phone - from /product artwork-device-idiom, and the iPad identity left the
+# 1080x2400 panel laid out as a 2732x2048 tablet. /model and /target-type follow
+# so MobileGestalt does not report two different products.
+#
+# The dev-board security tuple in /chosen (certificate-security-mode 1) is no
+# longer part of the identity choice: the original AMFI reads it to pick its
+# code-signing trust policy, and under the production policy it rejects the
+# adhoc-signed userspace with "unsuitable CT policy 0". sheng and hummer run the
+# same values on hardware against the same 21H461 userspace.
+ipad_identity = false
 # Select the authenticated OS APFS volume by its published IOMedia UUID. The
 # VerifiedRoot window identity check independently binds this UUID to the
 # owner-signed image before the block device is published.

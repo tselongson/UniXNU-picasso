@@ -480,11 +480,12 @@ public:
         if(!bootMapping || !panelWidth || !panelHeight || !panelStride) return;
         enum {cols=48,rows=28};
         static const char ramp[]=" .:-=+*#%@";
-        const uint8_t *base=static_cast<const uint8_t *>(bootMapping->getVirtualAddress());
+        // getVirtualAddress() is an IOVirtualAddress (an integer) in this SDK, not a pointer.
+        const uint8_t *base=reinterpret_cast<const uint8_t *>(static_cast<uintptr_t>(bootMapping->getVirtualAddress()));
         uint32_t ink=0;
         printf("PICASSO_PANEL begin width=%u height=%u stride=%u\n",panelWidth,panelHeight,panelStride);
         for(unsigned row=0;row<rows;++row) {
-            char line[cols+2];line[0]='|';
+            char line[cols+4];line[0]='|';
             for(unsigned col=0;col<cols;++col) {
                 const uint32_t x=(uint32_t)((uint64_t)col*panelWidth/cols);
                 const uint32_t y=(uint32_t)((uint64_t)row*panelHeight/rows);
