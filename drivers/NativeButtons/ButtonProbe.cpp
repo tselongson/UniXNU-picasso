@@ -315,15 +315,23 @@ extern "C" void native_buttons_set_sink(void (*sink)(void *, uint32_t), void *co
 // Read the three keys once and report them: the board file can then be checked against the
 // hardware without a HID consumer, and a press can be confirmed from the console.
 extern "C" void native_buttons_report(void) {
-    uint8_t pon = 0, gpio = 0xff, type = 0;
+    uint8_t pon = 0, gpio = 0xff, setType = 0, type = 0, subtype = 0;
+    uint8_t volType = 0, volSub = 0;
     const int ponRc = read8(gPon, kRtSts, &pon);
-    const int typeRc = read8(gPon, kSetType, &type);
+    const int typeRc = read8(gPon, kSetType, &setType);
     const int gpioRc = read8(gVolUp, 0x08, &gpio);
+    const int idRc = read8(gPon, 0x0, &type) | (read8(gPon, 0x1, &subtype) << 2);
+    const int volIdRc = read8(gVolUp, 0x0, &volType) | (read8(gVolUp, 0x1, &volSub) << 2);
+    // Peripheral TYPE/SUBTYPE (offsets 0x0/0x1) identify what an APID actually serves; the PON is
+    // type 0x08 and spmi-gpio is 0x10. If these are not what the board file says, the APID map
+    // decode is wrong and every later byte is from a stranger's peripheral.
     printf("PICASSO_BUTTONS stage=%d err=%d irq=%d reports=%d mask=%x pon=%d volup=%d word=%x "
-           "pdc=%x read=%d/%d/%d pon_rt=%02x pon_type=%02x gpio=%02x\n",
+           "pdc=%x read=%d/%d/%d id=%d/%d pon_rt=%02x set_type=%02x pon=%02x/%02x vol=%02x/%02x "
+           "gpio=%02x\n",
         native_buttons_stats[0], native_buttons_stats[8], native_buttons_stats[1],
         native_buttons_stats[2], native_buttons_stats[3], gPon, gVolUp, (unsigned)gApids,
-        native_buttons_stats[7], ponRc, typeRc, gpioRc, pon, type, gpio);
+        native_buttons_stats[7], ponRc, typeRc, gpioRc, idRc, volIdRc, pon, setType, type,
+        subtype, volType, volSub, gpio);
 }
 
 extern "C" void native_buttons_probe(void) {
