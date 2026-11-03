@@ -195,6 +195,39 @@ def add_directories(target):
     return created
 
 
+def write_first_boot_markers(target):
+    """Mark setup as done so Setup.app does not run on this Data seed.
+
+    A freshly formatted Data volume makes launchd start Setup on every boot. On
+    this tree Setup cannot get through: it dies within a second and launchd
+    reaps it as "Too many corpses being created", so the boot page shows a red
+    CRASH row, the two A76 domains stay pegged and SpringBoard never gets the
+    screen. The marker is part of the seed because Data is volatile - anything
+    the guest writes is gone next boot.
+    """
+    db = target / 'private/var/db'
+    db.mkdir(parents=True, exist_ok=True)
+    done = db / '.AppleSetupDone'
+    if not os.path.lexists(done):
+        done.write_bytes(b'')
+        os.chown(done, 0, 0)
+        os.chmod(done, 0o644)
+    # The buddy daemon reads its completion state from this preference file, which
+    # is what MobileActivation's "is setup done" query ends up consulting.
+    preferences = target / 'private/var/mobile/Library/Preferences'
+    preferences.mkdir(parents=True, exist_ok=True)
+    buddy = preferences / 'com.apple.purplebuddy.plist'
+    if not os.path.lexists(buddy):
+        buddy.write_bytes(plistlib.dumps({'SetupDone': True, 'SetupVersion': '17.7',
+                                          'SetupFinished': True}, fmt=plistlib.FMT_BINARY))
+        owner = target / 'private/var/mobile'
+        uid, gid = (owner.stat().st_uid, owner.stat().st_gid) if owner.is_dir() else (501, 501)
+        os.chown(buddy, uid, gid)
+        os.chmod(buddy, 0o644)
+    return {'AppleSetupDone': str(done.relative_to(target)),
+            'purplebuddy': str(buddy.relative_to(target))}
+
+
 def inspect_packed(path, raw=None):
     """Validate DBRDISK1 and hash its reconstruction, optionally checking raw bytes.
 
@@ -326,6 +359,7 @@ def prepare(tree, source, output, config):
             identity = canonical_uuid(info['VolumeUUID'])
             copy_var(source_var, target, manifest)
             created = add_directories(target)
+            markers = write_first_boot_markers(target)
             verify_var(target, manifest)
             if inventory(source_var) != manifest:
                 raise ValueError('Original var changed during preparation')
@@ -349,7 +383,7 @@ def prepare(tree, source, output, config):
         source_sha256=OS_SHA256, source_launchd_sha256=LAUNCHD_SHA256,
         source_regular_files=len(files), source_regular_bytes=sum(entry['bytes'] for entry in files),
         source_manifest_sha256=sha256(manifest_path), original_paths=source_paths,
-        created_directories=created, packer_sha256=sha256(packer_path),
+        created_directories=created, setup_markers=markers, packer_sha256=sha256(packer_path),
         guest_mutable=True, persistent=False, ownership_preserved=True,
         os_inputs_modified=False, hardware_tested=False,
         excluded=['private/var/staged_system_apps'],
