@@ -255,6 +255,19 @@ extern "C" void native_wlan_set_firmware(const uint8_t *data, size_t size) {
 // Callable from the boot monitor. `sheng-wlan=<n>` selects the last stage to run; without it the probe does
 // nothing. The entry point depends only on IOKit and its own pure helpers, so a boot monitor can declare it
 // weak_import and link whether or not this driver is included.
+// Stage 1 reads the WCSS block, and on this board that block hangs the bus when it is touched
+// before its rail has been voted (the v266-v272 boot stalls were exactly this access). The MMIO
+// therefore needs an explicit sheng-wlan-mmio=1 on top of sheng-wlan=<n>; without it the stage
+// reports why it was skipped and the text-only stages still run.
+static int stage1_gated(void *ctx) {
+    unsigned mmio = 0;
+    if (!PE_parse_boot_argn("sheng-wlan-mmio", &mmio, sizeof mmio) || mmio != 1) {
+        printf("PICASSO_WLAN stage1 skipped: WCSS MMIO requires sheng-wlan-mmio=1 (rail not voted)\n");
+        return 0;
+    }
+    return stage1(ctx);
+}
+
 extern "C" void native_wlan_probe(void) {
     unsigned stage = 0;
     if (!PE_parse_boot_argn("sheng-wlan", &stage, sizeof stage) || stage < 1) return;
@@ -263,7 +276,7 @@ extern "C" void native_wlan_probe(void) {
     native_wlan_stage_req = stage;
 
     Session session = {};
-    const struct wlan_probe_ops ops = {&session, stage1, stage2, stage3, stage4, stage5};
+    const struct wlan_probe_ops ops = {&session, stage1_gated, stage2, stage3, stage4, stage5};
     struct wlan_probe_state state;
     const int rc = wlan_probe_run(&ops, stage, &state);
     copyState(state);
