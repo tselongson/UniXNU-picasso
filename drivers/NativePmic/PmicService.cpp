@@ -164,10 +164,18 @@ extern "C" void native_pmic_probe(void)
 		return;
 	}
 	IOService *parent = IOService::getResourceService();
-	if (!parent || !pmic->attach(parent) || !pmic->start(parent)) {
-		if (parent && pmic->isAttached(parent)) {
-			pmic->detach(parent);
-		}
+	if (!parent) {
+		pmic->release();
+		printf("PICASSO_PMIC start failed\n");
+		return;
+	}
+	if (!pmic->attach(parent)) {
+		pmic->release();
+		printf("PICASSO_PMIC start failed\n");
+		return;
+	}
+	if (!pmic->start(parent)) {
+		pmic->detach(parent);
 		pmic->release();
 		printf("PICASSO_PMIC start failed\n");
 		return;
