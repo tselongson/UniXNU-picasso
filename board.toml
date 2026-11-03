@@ -227,7 +227,11 @@ kernel_args = [
   "offline-hid-swipe=16",
   "native-buttons=1",
   "sheng-wlan=1",
+  "sheng-cpufreq=4",
+  "sheng-cpufreq-cap=1600",
+  "sheng-cpufreq-min=800",
 ]
+
 
 
 
