@@ -20,6 +20,7 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/IOWorkLoop.h>
+#include <pexpert/pexpert.h>
 
 #define super IOService
 OSDefineMetaClassAndStructors(NativePmicService, IOService)
@@ -135,4 +136,42 @@ void NativePmicService::tick()
 extern "C" IOService *native_pmic_allocate(void)
 {
 	return new NativePmicService;
+}
+
+// Boot-monitor entry point (weak-imported by BootProgress.c): start the service once, gated on
+// native-pmic=<n>. The service attaches to the resource service, the same provider the display
+// publish path uses for a top-level IOService. Every failure path releases and returns, so a
+// missing SPMI window can never stall the boot monitor or the panel.
+extern "C" void native_pmic_probe(void)
+{
+	static int done;
+	if (done) {
+		return;
+	}
+	done = 1;
+	unsigned enable = 0;
+	if (!PE_parse_boot_argn("native-pmic", &enable, sizeof enable) || !enable) {
+		return;
+	}
+	IOService *pmic = native_pmic_allocate();
+	if (!pmic) {
+		printf("PICASSO_PMIC allocate failed\n");
+		return;
+	}
+	if (!pmic->init()) {
+		pmic->release();
+		printf("PICASSO_PMIC init failed\n");
+		return;
+	}
+	IOService *parent = IOService::getResourceService();
+	if (!parent || !pmic->attach(parent) || !pmic->start(parent)) {
+		if (parent && pmic->isAttached(parent)) {
+			pmic->detach(parent);
+		}
+		pmic->release();
+		printf("PICASSO_PMIC start failed\n");
+		return;
+	}
+	pmic->release();
+	printf("PICASSO_PMIC started\n");
 }

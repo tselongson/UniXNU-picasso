@@ -156,30 +156,10 @@ extern void native_adreno_probe(void) __attribute__((weak_import));
 extern void native_buttons_probe(void) __attribute__((weak_import));
 // WCN bring-up probe (drivers/NativeWlan): maps the WCSS block read-only and reports its
 // windows and rails; self-gated on sheng-wlan=<n>, runs once and never blocks the monitor.
-extern "C" void native_wlan_probe(void) __attribute__((weak_import));
+extern void native_wlan_probe(void) __attribute__((weak_import));
 // Battery/PMIC service (drivers/NativePmic): SPMI-mapped VADC readings and charger policy.
-// It is an IOService, instantiated below through getResourceService() like the display publish path.
-extern "C" IOService *native_pmic_allocate(void) __attribute__((weak_import));
-// Battery/PMIC service bring-up: instantiate the IOService through the resource service, the same
-// provider the display publish path uses for a top-level service. Every failure path releases and
-// returns, so a missing SPMI window can never stall boot.
-static void native_pmic_bringup(void) {
-    static int done;
-    if (done) return;
-    done = 1;
-    IOService *pmic = native_pmic_allocate();
-    if (!pmic) { printf("PICASSO_PMIC allocate failed\n"); return; }
-    if (!pmic->init()) { pmic->release(); printf("PICASSO_PMIC init failed\n"); return; }
-    IOService *parent = IOService::getResourceService();
-    if (!parent || !pmic->attach(parent) || !pmic->start(parent)) {
-        if (parent && pmic->isAttached(parent)) pmic->detach(parent);
-        pmic->release();
-        printf("PICASSO_PMIC start failed\n");
-        return;
-    }
-    pmic->release();
-    printf("PICASSO_PMIC started\n");
-}
+// The driver owns the IOService bring-up; self-gated on native-pmic=<n>, releases on any failure.
+extern void native_pmic_probe(void) __attribute__((weak_import));
 extern char boot_process_rows[10][120] __attribute__((weak_import));
 extern unsigned boot_ui_trace_role_rows(unsigned,char [][120],unsigned,unsigned) __attribute__((weak_import));
 extern char native_touch_rows[4][120] __attribute__((weak_import));
@@ -1245,13 +1225,9 @@ static void monitor(void *arg, wait_result_t result) {
   if(native_buttons_probe)native_buttons_probe();
   // WCN bring-up probe (drivers/NativeWlan). Self-gated on sheng-wlan=<n>, read-only MMIO, never blocks.
   if(native_wlan_probe)native_wlan_probe();
-  // Battery/PMIC service (drivers/NativePmic), gated on native-pmic=<n> so a fault cannot take
-  // the panel or the CDC console down with it.
-  {
-    static unsigned pmic_start_set; unsigned pmic_start_at = 0;
-    if(!pmic_start_set) { pmic_start_set = 1; PE_parse_boot_argn("native-pmic", &pmic_start_at, sizeof pmic_start_at); }
-    if(pmic_start_at)native_pmic_bringup();
-  }
+  // Battery/PMIC service (drivers/NativePmic). The driver self-gates on native-pmic=<n> and
+  // releases on every failure path, so a fault cannot take the panel down with it.
+  if(native_pmic_probe)native_pmic_probe();
   for (;;) {
     __atomic_fetch_add(&thread_count,1,__ATOMIC_RELAXED);
     boot_progress_poll();
