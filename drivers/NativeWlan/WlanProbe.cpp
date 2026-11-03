@@ -19,6 +19,7 @@ extern "C" {
 #include "WlanBoard.h"
 #include "WlanFirmware.h"
 }
+#include "WlanSmem.h"   // ported SMEM/SMP2P decoders (Trogdor, BSD-2)
 
 extern "C" {
 // Boot-monitor diagnostics. The names are the contract for the main session's boot report.
@@ -268,12 +269,54 @@ static int stage1_gated(void *ctx) {
     return stage1(ctx);
 }
 
+// SMEM inventory: safe on every boot (SMEM lives in DDR and needs no WLAN rail). This is the first
+// real bring-up rung from the migration plan - it tells us whether the modem partition, the SMP2P
+// pair and the GLINK items exist, which is what the WLFW transport will later sit on.
+static int smemRead(void *context, uint32_t offset, void *buffer, uint32_t bytes) {
+    if (offset > 0x200000u || bytes > 0x200000u - offset) return -1;
+    memcpy(buffer, (const uint8_t *)context + offset, bytes);
+    return 0;
+}
+
+static void wlanSmemInventory(void) {
+    IODeviceMemory *memory = IODeviceMemory::withRange(0x80900000, 0x200000);
+    IOMemoryMap *map = memory ? memory->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
+    if (memory) memory->release();
+    if (!map) { printf("PICASSO_WLAN smem: window could not be mapped\n"); return; }
+    struct cw_reader reader = { (void *)map->getVirtualAddress(), 0x200000u, smemRead };
+    struct cw_smem smem = {};
+    const int rc = cw_smem_layout(&reader, &smem);
+    printf("PICASSO_WLAN smem: layout rc=%d global=%d modem=%d entries=%u\n",
+           rc, smem.has_global, smem.has_modem, smem.count);
+    if (smem.has_modem) {
+        struct cw_item item = {};
+        const int irc = cw_smem_find(&reader, &smem.modem, CW_SMP2P_IN, &item);
+        printf("PICASSO_WLAN smem: smp2p item %u rc=%d off=%u bytes=%u\n",
+               CW_SMP2P_IN, irc, item.offset, item.bytes);
+        if (irc == CW_OK) {
+            struct cw_smp2p s = {};
+            const int src = cw_smp2p_read(&reader, &item, &s);
+            printf("PICASSO_WLAN smem: smp2p rc=%d version=%u state=%u valid=%u\n",
+                   src, s.version, s.state, s.valid);
+        }
+    }
+    const uint32_t items[3] = { CW_GLINK_DESC, CW_GLINK_TX, CW_GLINK_RX };
+    for (unsigned i = 0; i < 3; ++i) {
+        struct cw_item item = {};
+        const int irc = smem.has_modem ? cw_smem_find(&reader, &smem.modem, (uint16_t)items[i], &item) : CW_ABSENT;
+        printf("PICASSO_WLAN smem: glink %u rc=%d off=%u bytes=%u\n", items[i], irc, item.offset, item.bytes);
+    }
+}
+
 extern "C" void native_wlan_probe(void) {
     unsigned stage = 0;
     if (!PE_parse_boot_argn("sheng-wlan", &stage, sizeof stage) || stage < 1) return;
     if (native_wlan_stage_req) return;
     if (stage > WLAN_PROBE_STAGE_MAX) stage = WLAN_PROBE_STAGE_MAX;
     native_wlan_stage_req = stage;
+
+    // DDR-only inventory first: it cannot hang a bus and is the ground truth for the transport.
+    wlanSmemInventory();
 
     Session session = {};
     const struct wlan_probe_ops ops = {&session, stage1_gated, stage2, stage3, stage4, stage5};
