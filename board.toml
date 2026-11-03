@@ -293,15 +293,13 @@ kernel_args = [
   "sheng-vsync=60",
   # State-only AppleKeyStore probe used by the display/keystore diagnostics.
   "picasso-aks-state=1",
-  # Bring GX up and publish the accelerator for Metal clients. backboardd asks
-  # for IOAcceleratorES on every boot and reports match=<absent> while the
-  # probe-only configuration is in force. Stage 3 is the GX power vote plus CP
-  # hw_init, and sheng-gpu-metal publishes the AGXAccelerator service the
-  # system Metal stack opens, so sheng-gpu-probe=1 (clock/GDSC readback only)
-  # is gone: stage 3 reads the same state on its way up, and its 17 bytes of
-  # the 1000-byte command line pay for the publish. The userland addon bundle
-  # is still absent, so this exercises the kernel side only.
-  "sheng-gpu=3",
+  # Bring GX up and publish the accelerator for Metal clients. Stage 3 takes
+  # the GX power vote and starts the GMU/HFI core firmware; stage 4 is where
+  # a6xx hw_init runs (SQE upload, CP ring) and where the probe publishes the
+  # GPU service and the AGXAccelerator the system Metal stack opens. Stage 3
+  # alone leaves backboardd reporting IOAcceleratorES match=<absent>. The
+  # userland addon bundle is still absent, so this exercises the kernel side.
+  "sheng-gpu=4",
   "sheng-gpu-metal=1",
   # Opt-in write limited to GPUCC_CX_GDSCR.SW_COLLAPSE; no GPU core access.
   # Official UniXNU boot-page UI trace. boot-progress=2 keeps the OS running.
