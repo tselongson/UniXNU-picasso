@@ -118,128 +118,128 @@ volatile uint64_t boot_progress_observation[24];
 __attribute__((noinline)) void boot_progress_stop_checkpoint(void) { __asm__ volatile("" ::: "memory"); }
 
 extern volatile uint64_t native_ufs_block_reads, native_ufs_verified_blocks;
-extern volatile uint64_t native_ufs_verify_ticks __attribute__((weak_import)), native_ufs_read_ticks __attribute__((weak_import));
+extern volatile uint64_t native_ufs_verify_ticks __attribute__((weak)), native_ufs_read_ticks __attribute__((weak));
 extern volatile uint64_t native_ufs_block_failures;
 extern volatile uint32_t native_ufs_integrity_failures, native_ufs_blocks_published;
-extern volatile uint32_t native_ufs_probe_calls __attribute__((weak_import)), native_ufs_matched __attribute__((weak_import));
-extern volatile uint32_t native_ufs_root_step __attribute__((weak_import));
-extern const char *volatile native_ufs_root_failure __attribute__((weak_import));
+extern volatile uint32_t native_ufs_probe_calls __attribute__((weak)), native_ufs_matched __attribute__((weak));
+extern volatile uint32_t native_ufs_root_step __attribute__((weak));
+extern const char *volatile native_ufs_root_failure __attribute__((weak));
 extern volatile uint32_t native_virtio_ready, native_virtio_read_requests, native_virtio_read_failures;
 extern volatile uint64_t native_virtio_verified_blocks;
 extern void native_ufs_progress_text(char *, size_t);
 extern unsigned int vm_page_free_count;
 extern unsigned int vm_page_active_count,vm_page_inactive_count,vm_page_wire_count,vm_page_speculative_count;
 extern uint64_t max_mem;
-extern volatile uint32_t native_ram_block_sparse __attribute__((weak_import));
-extern volatile uint64_t native_ram_block_bytes,native_ram_block_resident_bytes __attribute__((weak_import));
+extern volatile uint32_t native_ram_block_sparse __attribute__((weak));
+extern volatile uint64_t native_ram_block_bytes,native_ram_block_resident_bytes __attribute__((weak));
 extern unsigned int vm_page_free_min,vm_page_free_reserved,vm_page_free_target;
-extern void boot_progress_exit_fault(int,unsigned,char *,unsigned long) __attribute__((weak_import));
-extern void boot_progress_exit_reason(int,unsigned,char *,unsigned long) __attribute__((weak_import));
-extern char boot_progress_throw_text[330] __attribute__((weak_import));
-extern void boot_ui_trace_snapshot(unsigned) __attribute__((weak_import));
-extern char boot_ui_trace_rows[14][120] __attribute__((weak_import));
-extern char boot_ui_trace_label[120] __attribute__((weak_import));
-extern unsigned boot_ui_trace_ready __attribute__((weak_import));
-extern volatile unsigned boot_ui_trace_phase __attribute__((weak_import));
-extern volatile unsigned boot_ui_trace_index __attribute__((weak_import));
-extern void boot_process_capture(void) __attribute__((weak_import));
-extern void boot_process_snapshot(void) __attribute__((weak_import));
-extern void boot_log_tick(unsigned) __attribute__((weak_import));
+extern void boot_progress_exit_fault(int,unsigned,char *,unsigned long) __attribute__((weak));
+extern void boot_progress_exit_reason(int,unsigned,char *,unsigned long) __attribute__((weak));
+extern char boot_progress_throw_text[330] __attribute__((weak));
+extern void boot_ui_trace_snapshot(unsigned) __attribute__((weak));
+extern char boot_ui_trace_rows[14][120] __attribute__((weak));
+extern char boot_ui_trace_label[120] __attribute__((weak));
+extern unsigned boot_ui_trace_ready __attribute__((weak));
+extern volatile unsigned boot_ui_trace_phase __attribute__((weak));
+extern volatile unsigned boot_ui_trace_index __attribute__((weak));
+extern void boot_process_capture(void) __attribute__((weak));
+extern void boot_process_snapshot(void) __attribute__((weak));
+extern void boot_log_tick(unsigned) __attribute__((weak));
 // SM7250 cpufreq-hw probe (sheng-cpufreq=<1..4>); maps the domains once and starts the mode 4 governor.
-extern void sheng_cpufreq_probe(void) __attribute__((weak_import));
-extern void sheng_cpufreq_poll(void) __attribute__((weak_import));
+extern void sheng_cpufreq_probe(void) __attribute__((weak));
+extern void sheng_cpufreq_poll(void) __attribute__((weak));
 // A620 GPU platform/firmware/stage probe (sheng-gpu=<1..5>); returns immediately and never publishes a Metal device.
 // The firmware setter is a strong definition from the build-time embedded arrays, or a weak no-op when no blob was staged.
-extern void native_adreno620_set_embedded_firmware(void) __attribute__((weak_import));
-extern void native_adreno_probe(void) __attribute__((weak_import));
+extern void native_adreno620_set_embedded_firmware(void) __attribute__((weak));
+extern void native_adreno_probe(void) __attribute__((weak));
 // Power/volume keys (drivers/NativeButtons): PON kpdpwr/RESIN plus the pm8150l volume-up GPIO.
-extern void native_buttons_probe(void) __attribute__((weak_import));
+extern void native_buttons_probe(void) __attribute__((weak));
 // WCN bring-up probe (drivers/NativeWlan): maps the WCSS block read-only and reports its
 // windows and rails; self-gated on sheng-wlan=<n>, runs once and never blocks the monitor.
-extern void native_wlan_probe(void) __attribute__((weak_import));
+extern void native_wlan_probe(void) __attribute__((weak));
 // Battery/PMIC service (drivers/NativePmic): SPMI-mapped VADC readings and charger policy.
 // The driver owns the IOService bring-up; self-gated on native-pmic=<n>, releases on any failure.
-extern void native_pmic_probe(void) __attribute__((weak_import));
-extern char boot_process_rows[10][120] __attribute__((weak_import));
-extern unsigned boot_ui_trace_role_rows(unsigned,char [][120],unsigned,unsigned) __attribute__((weak_import));
-extern char native_touch_rows[4][120] __attribute__((weak_import));
-extern char native_cpufreq_row[120] __attribute__((weak_import));
-extern volatile uint32_t native_hid_input_events[8] __attribute__((weak_import));
-extern volatile int native_hid_input_results[8] __attribute__((weak_import));
+extern void native_pmic_probe(void) __attribute__((weak));
+extern char boot_process_rows[10][120] __attribute__((weak));
+extern unsigned boot_ui_trace_role_rows(unsigned,char [][120],unsigned,unsigned) __attribute__((weak));
+extern char native_touch_rows[4][120] __attribute__((weak));
+extern char native_cpufreq_row[120] __attribute__((weak));
+extern volatile uint32_t native_hid_input_events[8] __attribute__((weak));
+extern volatile int native_hid_input_results[8] __attribute__((weak));
 // Owned offline HID source (ShengHidInput): the probe attaches the virtual
 // keyboard once userland owns the panel; offline-hid-auto-home then posts the
 // Home reports that unlock the lock screen. Absent when the archive is not linked.
-extern void native_hid_input_probe(void) __attribute__((weak_import));
+extern void native_hid_input_probe(void) __attribute__((weak));
 // Served once per monitor pass: the probe arms a swipe plan and this emits one gesture when it is due,
 // so the lock-screen swipe never blocks the monitor for longer than a single gesture.
-extern void native_hid_swipe_tick(unsigned) __attribute__((weak_import));
+extern void native_hid_swipe_tick(unsigned) __attribute__((weak));
 // Staged Novatek NT36672C probe (sheng-touch=<1..4>); inert without the argument.
 // sheng-touch-start=<seconds> delays the start on the monitor clock, so a faulting
 // probe cannot take the display and the CDC console down with it.
-extern void native_novatek_touch_probe(void) __attribute__((weak_import));
+extern void native_novatek_touch_probe(void) __attribute__((weak));
 // Prints (once, early) the IMEM step marker the probe left when it died on the previous boot.
-extern void native_novatek_touch_boot_report(unsigned) __attribute__((weak_import));
-extern volatile uint32_t native_hid_stage,native_hid_resource_found __attribute__((weak_import));
-extern volatile int native_hid_load_status,native_hid_input_meta_status __attribute__((weak_import));
-extern volatile uint64_t native_hid_input_object __attribute__((weak_import));
-extern volatile uint32_t native_touch_loop_step __attribute__((weak_import));
-extern volatile uint32_t native_touch_seq,native_touch_count __attribute__((weak_import));
-extern volatile int native_touch_xs[12],native_touch_ys[12],native_touch_ids[12] __attribute__((weak_import));
-extern char *debug_buf_base __attribute__((weak_import));
-extern unsigned int kernel_debugger_entry_count __attribute__((weak_import));
-extern volatile uint32_t native_cpufreq_stage __attribute__((weak_import));
-extern volatile unsigned native_touch_stage_req __attribute__((weak_import));
-extern volatile unsigned boot_process_passes,boot_process_seen __attribute__((weak_import));
-extern volatile unsigned boot_process_attempts __attribute__((weak_import));
-extern volatile unsigned boot_process_busy __attribute__((weak_import));
+extern void native_novatek_touch_boot_report(unsigned) __attribute__((weak));
+extern volatile uint32_t native_hid_stage,native_hid_resource_found __attribute__((weak));
+extern volatile int native_hid_load_status,native_hid_input_meta_status __attribute__((weak));
+extern volatile uint64_t native_hid_input_object __attribute__((weak));
+extern volatile uint32_t native_touch_loop_step __attribute__((weak));
+extern volatile uint32_t native_touch_seq,native_touch_count __attribute__((weak));
+extern volatile int native_touch_xs[12],native_touch_ys[12],native_touch_ids[12] __attribute__((weak));
+extern char *debug_buf_base __attribute__((weak));
+extern unsigned int kernel_debugger_entry_count __attribute__((weak));
+extern volatile uint32_t native_cpufreq_stage __attribute__((weak));
+extern volatile unsigned native_touch_stage_req __attribute__((weak));
+extern volatile unsigned boot_process_passes,boot_process_seen __attribute__((weak));
+extern volatile unsigned boot_process_attempts __attribute__((weak));
+extern volatile unsigned boot_process_busy __attribute__((weak));
 static unsigned process_worker_status,process_capture_age;
-extern volatile uint32_t __attribute__((weak_import)) armcpu_smp_requested,armcpu_smp_running,armcpu_smp_conduit,armcpu_boot_mpidr;
-extern volatile uint32_t __attribute__((weak_import)) armcpu_smp_step[8],armcpu_smp_seen_mpidr[8],armcpu_smp_fail[8],armcpu_smp_sys[8][5],armcpu_boot_sys[5],armcpu_gic_stride,armcpu_gic_typer_probe[2];
-extern volatile int32_t __attribute__((weak_import)) armcpu_smp_psci_rc[8];
-extern volatile uint32_t __attribute__((weak_import)) armcpu_irq_phase,armcpu_irq_id,armcpu_quiesce_calls,armcpu_halt_calls;
+extern volatile uint32_t __attribute__((weak)) armcpu_smp_requested,armcpu_smp_running,armcpu_smp_conduit,armcpu_boot_mpidr;
+extern volatile uint32_t __attribute__((weak)) armcpu_smp_step[8],armcpu_smp_seen_mpidr[8],armcpu_smp_fail[8],armcpu_smp_sys[8][5],armcpu_boot_sys[5],armcpu_gic_stride,armcpu_gic_typer_probe[2];
+extern volatile int32_t __attribute__((weak)) armcpu_smp_psci_rc[8];
+extern volatile uint32_t __attribute__((weak)) armcpu_irq_phase,armcpu_irq_id,armcpu_quiesce_calls,armcpu_halt_calls;
 extern int nprocs;
 extern volatile int native_owner_root_accepted;
 
-extern volatile uint32_t native_legacy_stage __attribute__((weak_import));
-extern volatile uint32_t native_legacy_pm_stage __attribute__((weak_import));
-extern volatile uint32_t native_legacy_pm_calls __attribute__((weak_import));
-extern volatile uint32_t native_legacy_pm_callbacks __attribute__((weak_import));
-extern volatile uint32_t native_legacy_swap_validation_calls __attribute__((weak_import));
-extern volatile uint32_t native_legacy_swap_validation_result __attribute__((weak_import));
-extern volatile uint32_t native_legacy_swap_validation_reason __attribute__((weak_import));
-extern volatile uint32_t native_legacy_swap_accepted_count __attribute__((weak_import));
-extern volatile uint32_t native_legacy_swap_rejected_count __attribute__((weak_import));
-extern volatile uint64_t native_legacy_rej_surface[7] __attribute__((weak_import));
-extern volatile uint32_t native_legacy_rej_reason __attribute__((weak_import));
-extern volatile uint64_t native_legacy_rej_surfaces[4] __attribute__((weak_import));
-extern volatile uint32_t native_legacy_rej_state[3] __attribute__((weak_import));
-extern volatile uint32_t native_legacy_rej_options[3] __attribute__((weak_import));
-extern volatile uint32_t native_legacy_rej_size[2] __attribute__((weak_import));
-extern volatile uint32_t native_legacy_rej_rects[2][4] __attribute__((weak_import));
-extern char native_legacy_rej_class[32] __attribute__((weak_import));
-extern volatile uint32_t native_legacy_frame_count __attribute__((weak_import));
-extern volatile uint32_t native_legacy_frame_kind[32] __attribute__((weak_import));
-extern volatile uint32_t native_legacy_frame_time[32] __attribute__((weak_import));
-extern volatile uint64_t native_legacy_frame_stats[32][5] __attribute__((weak_import));
-extern volatile uint32_t native_legacy_frame_colors[8][4] __attribute__((weak_import));
-extern volatile uint64_t native_legacy_frame_color_counts[8][4] __attribute__((weak_import));
-extern volatile uint64_t native_legacy_frame_color_other[8] __attribute__((weak_import));
-extern volatile uint32_t native_legacy_transfer_calls __attribute__((weak_import));
-extern volatile uint32_t native_legacy_retirement_calls __attribute__((weak_import));
-extern volatile uint32_t native_legacy_guard_slot __attribute__((weak_import));
-extern volatile uint32_t native_legacy_prepare_calls __attribute__((weak_import));
-extern volatile uint32_t native_legacy_prepare_reason __attribute__((weak_import));
-extern volatile uint32_t native_legacy_prepare_attempts __attribute__((weak_import));
-extern volatile uint32_t native_legacy_client_calls __attribute__((weak_import));
-extern volatile uint32_t native_legacy_client_type __attribute__((weak_import));
-extern volatile int native_legacy_client_pid __attribute__((weak_import));
-extern volatile int native_legacy_client_status __attribute__((weak_import));
-extern char native_legacy_client_class[64] __attribute__((weak_import));
-extern volatile uint64_t native_legacy_gop_virtual __attribute__((weak_import));
-extern volatile uint64_t native_legacy_gop_physical __attribute__((weak_import));
-extern volatile uint64_t native_legacy_gop_bytes __attribute__((weak_import));
-extern volatile int native_legacy_transfer_status __attribute__((weak_import));
-extern volatile uint64_t native_legacy_transfer_bytes __attribute__((weak_import));
+extern volatile uint32_t native_legacy_stage __attribute__((weak));
+extern volatile uint32_t native_legacy_pm_stage __attribute__((weak));
+extern volatile uint32_t native_legacy_pm_calls __attribute__((weak));
+extern volatile uint32_t native_legacy_pm_callbacks __attribute__((weak));
+extern volatile uint32_t native_legacy_swap_validation_calls __attribute__((weak));
+extern volatile uint32_t native_legacy_swap_validation_result __attribute__((weak));
+extern volatile uint32_t native_legacy_swap_validation_reason __attribute__((weak));
+extern volatile uint32_t native_legacy_swap_accepted_count __attribute__((weak));
+extern volatile uint32_t native_legacy_swap_rejected_count __attribute__((weak));
+extern volatile uint64_t native_legacy_rej_surface[7] __attribute__((weak));
+extern volatile uint32_t native_legacy_rej_reason __attribute__((weak));
+extern volatile uint64_t native_legacy_rej_surfaces[4] __attribute__((weak));
+extern volatile uint32_t native_legacy_rej_state[3] __attribute__((weak));
+extern volatile uint32_t native_legacy_rej_options[3] __attribute__((weak));
+extern volatile uint32_t native_legacy_rej_size[2] __attribute__((weak));
+extern volatile uint32_t native_legacy_rej_rects[2][4] __attribute__((weak));
+extern char native_legacy_rej_class[32] __attribute__((weak));
+extern volatile uint32_t native_legacy_frame_count __attribute__((weak));
+extern volatile uint32_t native_legacy_frame_kind[32] __attribute__((weak));
+extern volatile uint32_t native_legacy_frame_time[32] __attribute__((weak));
+extern volatile uint64_t native_legacy_frame_stats[32][5] __attribute__((weak));
+extern volatile uint32_t native_legacy_frame_colors[8][4] __attribute__((weak));
+extern volatile uint64_t native_legacy_frame_color_counts[8][4] __attribute__((weak));
+extern volatile uint64_t native_legacy_frame_color_other[8] __attribute__((weak));
+extern volatile uint32_t native_legacy_transfer_calls __attribute__((weak));
+extern volatile uint32_t native_legacy_retirement_calls __attribute__((weak));
+extern volatile uint32_t native_legacy_guard_slot __attribute__((weak));
+extern volatile uint32_t native_legacy_prepare_calls __attribute__((weak));
+extern volatile uint32_t native_legacy_prepare_reason __attribute__((weak));
+extern volatile uint32_t native_legacy_prepare_attempts __attribute__((weak));
+extern volatile uint32_t native_legacy_client_calls __attribute__((weak));
+extern volatile uint32_t native_legacy_client_type __attribute__((weak));
+extern volatile int native_legacy_client_pid __attribute__((weak));
+extern volatile int native_legacy_client_status __attribute__((weak));
+extern char native_legacy_client_class[64] __attribute__((weak));
+extern volatile uint64_t native_legacy_gop_virtual __attribute__((weak));
+extern volatile uint64_t native_legacy_gop_physical __attribute__((weak));
+extern volatile uint64_t native_legacy_gop_bytes __attribute__((weak));
+extern volatile int native_legacy_transfer_status __attribute__((weak));
+extern volatile uint64_t native_legacy_transfer_bytes __attribute__((weak));
 static volatile unsigned touch_passes,touch_dots,touch_pad_w;
 static uint64_t ticks(void) {
   uint64_t v; __asm__ volatile("isb\n\tmrs %0, cntpct_el0" : "=r"(v)); return v;
@@ -878,17 +878,17 @@ char boot_progress_ext[8][48];
 char boot_progress_ext_wide[2][112];
 // Data persistence counters (NativeRamBlock): ext slots 2-3 are formatted here from them. State: 0 off, 1 blank probe, 2 resumed,
 // 3 fresh, 4 refused/failed, 5 degraded by an I/O error, 6 resumed read-only probe.
-extern volatile uint32_t native_data_persist_state __attribute__((weak_import));
-extern volatile uint32_t native_data_persist_header __attribute__((weak_import));
-extern volatile uint32_t native_data_persist_gpt __attribute__((weak_import));
-extern volatile uint32_t native_data_persist_gpt_after __attribute__((weak_import));
-extern volatile uint64_t native_data_persist_pages __attribute__((weak_import));
-extern volatile uint64_t native_data_persist_loaded __attribute__((weak_import));
-extern volatile uint64_t native_data_persist_writes __attribute__((weak_import));
-extern volatile uint64_t native_data_persist_syncs __attribute__((weak_import));
-extern volatile uint64_t native_data_persist_errors __attribute__((weak_import));
-extern volatile uint64_t native_data_persist_first_lba __attribute__((weak_import));
-extern volatile uint64_t native_data_persist_present __attribute__((weak_import));
+extern volatile uint32_t native_data_persist_state __attribute__((weak));
+extern volatile uint32_t native_data_persist_header __attribute__((weak));
+extern volatile uint32_t native_data_persist_gpt __attribute__((weak));
+extern volatile uint32_t native_data_persist_gpt_after __attribute__((weak));
+extern volatile uint64_t native_data_persist_pages __attribute__((weak));
+extern volatile uint64_t native_data_persist_loaded __attribute__((weak));
+extern volatile uint64_t native_data_persist_writes __attribute__((weak));
+extern volatile uint64_t native_data_persist_syncs __attribute__((weak));
+extern volatile uint64_t native_data_persist_errors __attribute__((weak));
+extern volatile uint64_t native_data_persist_first_lba __attribute__((weak));
+extern volatile uint64_t native_data_persist_present __attribute__((weak));
 static void ext_data_rows(void) {
   if(!&native_data_persist_state || !native_data_persist_state)return;
   char a[48],b[48];
@@ -952,29 +952,29 @@ static void px_text(unsigned x0,unsigned top,const char *text,unsigned cols,uint
     }
   }
 }
-extern volatile uint64_t native_legacy_copy_n __attribute__((weak_import));
-extern volatile uint64_t native_gop_gpu_offers __attribute__((weak_import)),native_gop_gpu_completions __attribute__((weak_import)),
-  native_gop_gpu_failures __attribute__((weak_import)),native_gop_gpu_abandoned __attribute__((weak_import));
-extern volatile uint32_t native_legacy_gpu_fallbacks __attribute__((weak_import)),native_legacy_gpu_last_status __attribute__((weak_import));
-extern volatile uint64_t native_legacy_copy_last __attribute__((weak_import));
-extern volatile uint64_t native_legacy_early_retires __attribute__((weak_import)),native_legacy_early_failures __attribute__((weak_import));
-extern volatile uint64_t native_legacy_copy_max __attribute__((weak_import));
-extern volatile uint64_t native_legacy_copy_sum __attribute__((weak_import));
-extern volatile uint64_t native_legacy_copy_bytes_last __attribute__((weak_import));
-extern volatile uint64_t native_legacy_copy_bytes_sum __attribute__((weak_import));
-extern char native_cpufreq_row[120] __attribute__((weak_import));
-extern char native_wi_log[4][100] __attribute__((weak_import));
-extern volatile unsigned native_wi_count __attribute__((weak_import));
-extern volatile uint64_t armcpu_timer_interrupts __attribute__((weak_import));
-extern volatile uint64_t native_adreno_cache_stats[5] __attribute__((weak_import));
-extern volatile uint32_t native_adreno_coherence[8] __attribute__((weak_import));
-extern volatile uint32_t native_adreno_wc_distrusted __attribute__((weak_import));
-extern volatile uint32_t native_adreno_wc_audit[6] __attribute__((weak_import));
-extern volatile uint64_t native_adreno_reassert_ticks __attribute__((weak_import));
-extern volatile uint64_t native_adreno_audit_ticks __attribute__((weak_import));
-extern volatile uint32_t native_adreno_audit_attr __attribute__((weak_import));
+extern volatile uint64_t native_legacy_copy_n __attribute__((weak));
+extern volatile uint64_t native_gop_gpu_offers __attribute__((weak)),native_gop_gpu_completions __attribute__((weak)),
+  native_gop_gpu_failures __attribute__((weak)),native_gop_gpu_abandoned __attribute__((weak));
+extern volatile uint32_t native_legacy_gpu_fallbacks __attribute__((weak)),native_legacy_gpu_last_status __attribute__((weak));
+extern volatile uint64_t native_legacy_copy_last __attribute__((weak));
+extern volatile uint64_t native_legacy_early_retires __attribute__((weak)),native_legacy_early_failures __attribute__((weak));
+extern volatile uint64_t native_legacy_copy_max __attribute__((weak));
+extern volatile uint64_t native_legacy_copy_sum __attribute__((weak));
+extern volatile uint64_t native_legacy_copy_bytes_last __attribute__((weak));
+extern volatile uint64_t native_legacy_copy_bytes_sum __attribute__((weak));
+extern char native_cpufreq_row[120] __attribute__((weak));
+extern char native_wi_log[4][100] __attribute__((weak));
+extern volatile unsigned native_wi_count __attribute__((weak));
+extern volatile uint64_t armcpu_timer_interrupts __attribute__((weak));
+extern volatile uint64_t native_adreno_cache_stats[5] __attribute__((weak));
+extern volatile uint32_t native_adreno_coherence[8] __attribute__((weak));
+extern volatile uint32_t native_adreno_wc_distrusted __attribute__((weak));
+extern volatile uint32_t native_adreno_wc_audit[6] __attribute__((weak));
+extern volatile uint64_t native_adreno_reassert_ticks __attribute__((weak));
+extern volatile uint64_t native_adreno_audit_ticks __attribute__((weak));
+extern volatile uint32_t native_adreno_audit_attr __attribute__((weak));
 static uint64_t banner_cache_ticks,banner_cache_bytes,banner_submits;
-extern volatile uint64_t armcpu_ipi_interrupts __attribute__((weak_import));
+extern volatile uint64_t armcpu_ipi_interrupts __attribute__((weak));
 static volatile uint64_t sleep_n,sleep_over_sum,sleep_over_max,sleep_late50;
 static uint64_t banner_sleep_n,banner_sleep_sum,banner_sleep_late,banner_tint,banner_ipi;
 static unsigned banner_second,banner_top;
