@@ -1,4 +1,7 @@
 #include <stdarg.h>
+#include <IOKit/IOLib.h>
+#include <kern/thread.h>
+#include <kern/sched_prim.h>
 /*
  * hakios.picasso_wlan.cpp compatibility layer for UniXNU.
  *
