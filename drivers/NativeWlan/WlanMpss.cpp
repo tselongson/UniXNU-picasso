@@ -1,0 +1,863 @@
+// SPDX-License-Identifier: BSD-2-Clause
+//
+// Modem (MPSS) firmware access for picasso.
+//
+// The WLAN firmware on this platform is not a file the AP loads: the modem's own
+// WLAN processor image is served to MPSS, and the WLFW service that ath10k-style
+// hosts talk to only exists once MPSS is running. Everything here therefore works
+// towards one goal - making the modem firmware on the device's modem partition
+// reachable from the kernel, then handing it to the secure monitor's PIL service.
+//
+// Stage 1 (this file, safe, read-only): read the modem partition through the
+// read-only hook NativeUfs exports, parse its FAT16 directory, locate
+// modem.mdt + the segment files it names, and report the ELF program headers.
+// Nothing is written anywhere and no hardware block is touched, so it cannot
+// hang a bus the way a premature WCSS MMIO read does.
+
+#include <IOKit/IOLib.h>
+#include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IODeviceMemory.h>
+#include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/IOPlatformExpert.h>
+#include <pexpert/pexpert.h>
+#include <string.h>
+
+extern "C" {
+uint32_t native_ufs_raw_max_blocks(void);
+int native_ufs_raw_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst);
+void native_ufs_raw_diag(uint32_t *out);
+}
+
+namespace {
+
+// picasso modem partition: LUN 4, start_sector 61606 in 4096-byte units
+// (rawprogram4.xml, SECTOR_SIZE_IN_BYTES=4096, 81920 sectors).
+constexpr uint32_t kModemLun = 4;
+constexpr uint64_t kModemLba = 61606;
+constexpr uint32_t kBlockBytes = 4096;
+
+struct FatVolume {
+    uint32_t lun;
+    uint64_t partLba;
+    uint32_t bytesPerSector;
+    uint32_t sectorsPerCluster;
+    uint32_t reservedSectors;
+    uint32_t fatCount;
+    uint32_t rootEntries;
+    uint32_t sectorsPerFat;
+    uint64_t totalSectors;
+    uint64_t fatByteOffset;     // relative to partition start
+    uint64_t rootByteOffset;    // relative to partition start
+    uint64_t dataByteOffset;    // relative to partition start
+};
+
+struct FatEntry {
+    char name[64];
+    uint32_t size;
+    uint32_t firstCluster;
+    bool directory;
+    bool valid;
+};
+
+
+// The UFS host only becomes readable once the root publisher thread has finished its bring-up
+// (native-ufs-start-delay plus the LUN-ready retries). Every entry point in this file waits for
+// that flag instead of assuming a fixed delay: the boot page runs long before root is mounted.
+bool waitForUfsSeconds(unsigned seconds, const char *who)
+{
+    for (unsigned step = 0; step < seconds; ++step) {
+        uint32_t diag[5] = {0, 0, 0, 0, 0};
+        native_ufs_raw_diag(diag);
+        if (diag[0]) {
+            if (step) printf("PICASSO_WLAN ufs: ready after %us (%s)\n", step, who);
+            return true;
+        }
+        IOSleep(1000);
+    }
+    printf("PICASSO_WLAN ufs: not ready after %us (%s)\n", seconds, who);
+    return false;
+}
+
+uint8_t gBlock[kBlockBytes] __attribute__((aligned(4096)));
+
+bool readPartitionBytes(const FatVolume &volume, uint64_t offset, uint32_t bytes, void *dst)
+{
+    if (!bytes) return false;
+    uint8_t *out = static_cast<uint8_t *>(dst);
+    const uint64_t partitionBase = volume.partLba * kBlockBytes;
+    uint32_t done = 0;
+    while (done < bytes) {
+        const uint64_t at = partitionBase + offset + done;
+        const uint64_t lba = at / kBlockBytes;
+        const uint32_t skip = static_cast<uint32_t>(at % kBlockBytes);
+        if (native_ufs_raw_read(volume.lun, lba, 1, gBlock) != 0) return false;
+        uint32_t take = kBlockBytes - skip;
+        if (take > bytes - done) take = bytes - done;
+        memcpy(out + done, gBlock + skip, take);
+        done += take;
+    }
+    return true;
+}
+
+uint16_t le16(const uint8_t *p) { return static_cast<uint16_t>(p[0] | (p[1] << 8)); }
+uint32_t le32(const uint8_t *p)
+{
+    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+}
+
+bool fatOpen(FatVolume &volume, uint32_t lun, uint64_t partLba)
+{
+    uint8_t boot[kBlockBytes];
+    memset(boot, 0, sizeof boot);
+    volume.lun = lun;
+    volume.partLba = partLba;
+    if (!readPartitionBytes(volume, 0, 512, boot)) return false;
+    if (boot[510] != 0x55 || boot[511] != 0xAA) return false;
+    volume.bytesPerSector = le16(boot + 11);
+    volume.sectorsPerCluster = boot[13];
+    volume.reservedSectors = le16(boot + 14);
+    volume.fatCount = boot[16];
+    volume.rootEntries = le16(boot + 17);
+    uint32_t total16 = le16(boot + 19);
+    volume.totalSectors = total16 ? total16 : le32(boot + 32);
+    volume.sectorsPerFat = le16(boot + 22);
+    if (!volume.sectorsPerFat) volume.sectorsPerFat = le32(boot + 36);
+    if (!volume.bytesPerSector || !volume.sectorsPerCluster || !volume.fatCount ||
+        !volume.sectorsPerFat || volume.bytesPerSector > kBlockBytes)
+        return false;
+    volume.fatByteOffset = static_cast<uint64_t>(volume.reservedSectors) * volume.bytesPerSector;
+    volume.rootByteOffset = volume.fatByteOffset + static_cast<uint64_t>(volume.fatCount) * volume.sectorsPerFat * volume.bytesPerSector;
+    volume.dataByteOffset = volume.rootByteOffset + static_cast<uint64_t>(volume.rootEntries) * 32;
+    return true;
+}
+
+bool fatNextCluster(const FatVolume &volume, uint32_t cluster, uint32_t &next)
+{
+    uint8_t entry[2];
+    if (!readPartitionBytes(volume, volume.fatByteOffset + cluster * 2, 2, entry)) return false;
+    next = le16(entry);
+    return true;
+}
+
+// Reads `bytes` from a cluster chain into dst. Bounded by `limit` so a corrupt
+// chain cannot run away.
+bool fatReadChain(const FatVolume &volume, uint32_t firstCluster, uint32_t bytes, uint8_t *dst, uint32_t limit)
+{
+    const uint32_t clusterBytes = volume.sectorsPerCluster * volume.bytesPerSector;
+    uint32_t done = 0;
+    uint32_t cluster = firstCluster;
+    while (done < bytes && cluster >= 2 && cluster < 0xFFF8U) {
+        const uint64_t offset = volume.dataByteOffset + static_cast<uint64_t>(cluster - 2) * clusterBytes;
+        uint32_t chunk = clusterBytes;
+        if (chunk > bytes - done) chunk = bytes - done;
+        if (chunk > limit - done) chunk = limit - done;
+        if (!chunk) break;
+        if (!readPartitionBytes(volume, offset, chunk, dst + done)) return false;
+        done += chunk;
+        if (done >= bytes) break;
+        uint32_t next = 0;
+        if (!fatNextCluster(volume, cluster, next)) return false;
+        cluster = next;
+    }
+    return done == bytes;
+}
+
+
+// The modem volume stores its payload under long file names: the 8.3 aliases are generated
+// (WNORW3~2JSN), so matching must use the LFN entries that precede each short entry. This walker
+// assembles those names and matches case-insensitively, one directory tree at a time.
+void lfnClear(uint16_t *units, unsigned &count, unsigned &expected)
+{
+    for (unsigned index = 0; index < 260; ++index) units[index] = 0;
+    count = 0;
+    expected = 0;
+}
+
+void lfnAdd(uint16_t *units, unsigned &count, unsigned &expected, const uint8_t *entry)
+{
+    const unsigned sequence = entry[0] & 0x1f;
+    if (!sequence) return;
+    const uint16_t last = static_cast<uint16_t>(entry[0] | 0x40);
+    if (entry[0] & 0x40) expected = sequence;      // last part carries bit 6
+    if (last == sequence && !expected) expected = sequence;
+    // One LFN entry carries 13 UTF-16 units: five at 1..10, six at 14..25, two at 28..31.
+    unsigned at = (sequence - 1) * 13;
+    const unsigned offsets[3] = {1, 14, 28};
+    const unsigned counts[3] = {5, 6, 2};
+    for (unsigned group = 0; group < 3; ++group) {
+        for (unsigned index = 0; index < counts[group]; ++index) {
+            const uint32_t offset = offsets[group] + index * 2;
+            const uint16_t value = static_cast<uint16_t>(entry[offset] | (entry[offset + 1] << 8));
+            if (at < 260) units[at] = value;
+            ++at;
+        }
+    }
+    if (at > count) count = at;
+}
+
+bool lfnMatches(const uint16_t *units, unsigned count, const char *target)
+{
+    if (!count) return false;
+    unsigned index = 0;
+    for (unsigned at = 0; at < count && index < 259; ++at) {
+        const uint16_t value = units[at];
+        if (value == 0 || value == 0xFFFF) break;
+        char c = value < 0x80 ? static_cast<char>(value) : '?';
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (target[index] == 0 || target[index] != c) return false;
+        ++index;
+    }
+    return target[index] == 0;
+}
+
+bool scanDirectory(const FatVolume &volume, uint32_t firstCluster, const char *longName,
+                   const char *shortName, FatEntry &out, unsigned depth)
+{
+    const uint32_t clusterBytes = volume.sectorsPerCluster * volume.bytesPerSector;
+    if (clusterBytes < 32 || clusterBytes > 65536) return false;
+    uint8_t *buffer = static_cast<uint8_t *>(IOMalloc(clusterBytes));
+    if (!buffer) return false;
+    uint16_t units[260];
+    unsigned unitCount = 0, unitExpected = 0;
+    lfnClear(units, unitCount, unitExpected);
+    uint32_t cluster = firstCluster;
+    for (unsigned step = 0; step < 24 && cluster >= 2 && cluster < 0xFFF8U; ++step) {
+        const uint64_t offset = volume.dataByteOffset + static_cast<uint64_t>(cluster - 2) * clusterBytes;
+        if (!readPartitionBytes(volume, offset, clusterBytes, buffer)) { IOFree(buffer, clusterBytes); return false; }
+        for (uint32_t index = 0; index + 32 <= clusterBytes; index += 32) {
+            const uint8_t *entry = buffer + index;
+                        if (entry[0] == 0) { IOFree(buffer, clusterBytes); return false; }
+            if (entry[0] == 0xE5) { lfnClear(units, unitCount, unitExpected); continue; }
+            if (entry[11] == 0x0F) { lfnAdd(units, unitCount, unitExpected, entry); continue; }
+            if (entry[11] & 0x08) { lfnClear(units, unitCount, unitExpected); continue; }
+            const bool isDir = (entry[11] & 0x10) != 0;
+            const bool nameHit = longName ? lfnMatches(units, unitCount, longName)
+                                          : (memcmp(entry, shortName, 11) == 0);
+            if (isDir) {
+                lfnClear(units, unitCount, unitExpected);
+                if (entry[0] == '.') continue;
+                if (depth < 3) {
+                    const uint32_t child = static_cast<uint32_t>(le16(entry + 26));
+                    if (scanDirectory(volume, child, longName, shortName, out, depth + 1)) return true;
+                }
+                continue;
+            }
+            if (!nameHit) {
+                lfnClear(units, unitCount, unitExpected);
+                continue;
+            }
+            out.valid = true;
+            out.directory = false;
+            out.size = le32(entry + 28);
+            out.firstCluster = static_cast<uint32_t>(le16(entry + 26));
+            out.name[0] = 0;
+            if (longName) {
+                unsigned at = 0;
+                for (; at < unitCount && at < 63; ++at) {
+                    const uint16_t value = units[at];
+                    if (!value || value == 0xFFFF) break;
+                    out.name[at] = value < 0x80 ? static_cast<char>(value) : '?';
+                }
+                out.name[at] = 0;
+            }
+            lfnClear(units, unitCount, unitExpected);
+            IOFree(buffer, clusterBytes);
+            return true;
+        }
+        uint32_t next = 0;
+        if (!fatNextCluster(volume, cluster, next)) { IOFree(buffer, clusterBytes); return false; }
+        cluster = next;
+    }
+    IOFree(buffer, clusterBytes);
+    return false;
+}
+
+// Public entry: root first (fixed area), then the subdirectories it points at.
+bool fatFindFile(const FatVolume &volume, const char *longName, const char *shortName, FatEntry &out)
+{
+    out.valid = false;
+    const uint32_t entryBytes = volume.rootEntries * 32;
+    const uint32_t maxChunk = 2048;
+    uint8_t buffer[maxChunk];
+    uint16_t units[260];
+    unsigned unitCount = 0, unitExpected = 0;
+    lfnClear(units, unitCount, unitExpected);
+    for (uint32_t offset = 0; offset < entryBytes; offset += maxChunk) {
+        uint32_t chunk = entryBytes - offset;
+        if (chunk > maxChunk) chunk = maxChunk;
+        if (!readPartitionBytes(volume, volume.rootByteOffset + offset, chunk, buffer)) return false;
+        for (uint32_t index = 0; index + 32 <= chunk; index += 32) {
+            const uint8_t *entry = buffer + index;
+            if (entry[0] == 0) return true;
+            if (entry[0] == 0xE5) { lfnClear(units, unitCount, unitExpected); continue; }
+            if (entry[11] == 0x0F) { lfnAdd(units, unitCount, unitExpected, entry); continue; }
+            if (entry[11] & 0x08) { lfnClear(units, unitCount, unitExpected); continue; }
+            if (entry[11] & 0x10) {
+                lfnClear(units, unitCount, unitExpected);
+                if (entry[0] == '.') continue;
+                const uint32_t child = static_cast<uint32_t>(le16(entry + 26));
+                if (scanDirectory(volume, child, longName, shortName, out, 1)) return true;
+                continue;
+            }
+            lfnClear(units, unitCount, unitExpected);
+        }
+    }
+    return true;
+}
+
+struct ElfSummary {
+    uint32_t programHeaders;
+    uint64_t loadableBytes;
+    uint64_t minAddress;
+    uint64_t maxAddress;
+    uint32_t entrypoint;
+};
+
+bool summariseElf(const uint8_t *image, uint32_t bytes, ElfSummary &summary)
+{
+    memset(&summary, 0, sizeof summary);
+    if (bytes < 52 || memcmp(image, "\177ELF", 4) != 0) return false;
+    if (image[4] != 1) return false;                       // ELF32
+    const uint32_t phoff = le32(image + 28);
+    const uint16_t phentsize = le16(image + 42);
+    const uint16_t phnum = le16(image + 44);
+    summary.entrypoint = le32(image + 24);
+    summary.programHeaders = phnum;
+    summary.minAddress = ~0ULL;
+    for (unsigned index = 0; index < phnum; ++index) {
+        const uint64_t at = static_cast<uint64_t>(phoff) + static_cast<uint64_t>(index) * phentsize;
+        if (at + 32 > bytes) return false;
+        const uint8_t *ph = image + at;
+        const uint32_t type = le32(ph + 0);
+        const uint32_t offset = le32(ph + 4);
+        const uint32_t vaddr = le32(ph + 8);
+        const uint32_t paddr = le32(ph + 12);
+        const uint32_t filesz = le32(ph + 16);
+        const uint32_t memsz = le32(ph + 20);
+        if (type != 1) continue;                            // PT_LOAD
+        if (offset + filesz > bytes) return false;
+        summary.loadableBytes += memsz;
+        if (paddr < summary.minAddress) summary.minAddress = paddr;
+        if (paddr + memsz > summary.maxAddress) summary.maxAddress = paddr + memsz;
+    }
+    return summary.programHeaders != 0;
+}
+
+}  // namespace
+
+// Reports whether the modem partition is reachable and what its firmware
+// directory looks like. Gated by sheng-wlan-mpss=1 at the call site.
+extern "C" void native_wlan_modem_inventory(void)
+{
+    FatVolume volume;
+    if (!fatOpen(volume, kModemLun, kModemLba)) {
+        printf("PICASSO_WLAN mpss: modem FAT unreadable lun=%u lba=%llu\n", kModemLun,
+               static_cast<unsigned long long>(kModemLba));
+        return;
+    }
+    printf("PICASSO_WLAN mpss: fat bps=%u spc=%u rsv=%u fats=%u root=%u spf=%u total=%llu dataOff=%llu\n",
+           volume.bytesPerSector, volume.sectorsPerCluster, volume.reservedSectors, volume.fatCount,
+           volume.rootEntries, volume.sectorsPerFat, static_cast<unsigned long long>(volume.totalSectors),
+           static_cast<unsigned long long>(volume.dataByteOffset));
+
+    FatEntry mdt;
+    if (!fatFindFile(volume, "modem.mdt", "MODEM   MDT", mdt) || !mdt.valid) {
+        printf("PICASSO_WLAN mpss: modem.mdt not found\n");
+        return;
+    }
+    printf("PICASSO_WLAN mpss: modem.mdt cluster=%u size=%u\n", mdt.firstCluster, mdt.size);
+
+    uint8_t *image = static_cast<uint8_t *>(IOMalloc(mdt.size ? mdt.size : 1));
+    if (!image) return;
+    if (!fatReadChain(volume, mdt.firstCluster, mdt.size, image, mdt.size)) {
+        printf("PICASSO_WLAN mpss: modem.mdt read failed\n");
+        IOFree(image, mdt.size);
+        return;
+    }
+    ElfSummary summary;
+    const bool elf = summariseElf(image, mdt.size, summary);
+    printf("PICASSO_WLAN mpss: mdt elf=%u phdrs=%u load=%llu range=%llx-%llx entry=%x magic=%02x%02x%02x%02x\n",
+           elf ? 1U : 0U, summary.programHeaders, static_cast<unsigned long long>(summary.loadableBytes),
+           static_cast<unsigned long long>(summary.minAddress),
+           static_cast<unsigned long long>(summary.maxAddress), summary.entrypoint,
+           image[0], image[1], image[2], image[3]);
+    IOFree(image, mdt.size);
+
+    // Count the segment files the directory carries so a later loader can plan
+    // its buffer sizes without another pass.
+    unsigned segments = 0;
+    uint64_t segmentBytes = 0;
+    for (unsigned index = 0; index < 64; ++index) {
+        char shortName[12];
+        char longName[16];
+        static const char hex[] = "0123456789ABCDEF";
+        memcpy(longName, "modem.b", 7);
+        longName[7] = static_cast<char>('0' + (index / 10) % 10);
+        longName[8] = static_cast<char>('0' + index % 10);
+        longName[9] = 0;
+        shortName[0] = 'M';
+        shortName[1] = 'O';
+        shortName[2] = 'D';
+        shortName[3] = 'E';
+        shortName[4] = 'M';
+        shortName[5] = ' ';
+        shortName[6] = ' ';
+        shortName[7] = ' ';
+        shortName[8] = 'B';
+        shortName[9] = longName[7];
+        shortName[10] = longName[8];
+        FatEntry entry;
+        if (!fatFindFile(volume, longName, shortName, entry) || !entry.valid) {
+            if (index == 0) continue;
+            break;
+        }
+        segments++;
+        segmentBytes += entry.size;
+    }
+    printf("PICASSO_WLAN mpss: segments=%u bytes=%llu\n", segments,
+           static_cast<unsigned long long>(segmentBytes));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stage 2: hand the modem image to the secure monitor's PIL service.
+//
+// The recipe is the one this tree already proved on the GPU zap (wf120/wf121/wf126 in
+// docs/handoff-20261102-gpu-first-submit-stall.md): every PAS call runs as a synchronous SMC with
+// Non-secure interrupt delivery masked (ICC_PMR_EL1=0, DAIF.I=1) and unmasked for the retry. The
+// metadata buffer must stay resident afterwards - the vendor never frees its PIL region either.
+//
+// The modem image is fixed-address (p_paddr 0x8c000000..0x9b800000), so unlike the relocatable zap
+// there is no allocation: the segments are staged into the carveout the image itself names.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+struct ScmReply { uint32_t a0, a1, a2, a3; uint64_t a6; };
+
+ScmReply scmSipCall(uint32_t function, uint32_t arginfo, uint64_t arg0,
+                    uint64_t arg1 = 0, uint64_t arg2 = 0, uint64_t arg3 = 0,
+                    uint64_t arg6 = 0)
+{
+    register uint64_t x0 __asm__("x0") = function;
+    register uint64_t x1 __asm__("x1") = arginfo;
+    register uint64_t x2 __asm__("x2") = arg0;
+    register uint64_t x3 __asm__("x3") = arg1;
+    register uint64_t x4 __asm__("x4") = arg2;
+    register uint64_t x5 __asm__("x5") = arg3;
+    register uint64_t x6 __asm__("x6") = arg6;
+    register uint64_t x7 __asm__("x7") = 0;
+    __asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x6), "+r"(x7)
+                     : "r"(x4), "r"(x5)
+                     : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+    return ScmReply{uint32_t(x0), uint32_t(x1), uint32_t(x2), uint32_t(x3), x6};
+}
+
+// Results of the last load attempt, so the console can be told about them long after the
+// bring-up prints scrolled away: the CDC link only comes up tens of seconds into boot.
+struct MpssReport {
+    bool attempted;
+    bool staged;
+    bool started;
+    uint32_t initReply, setupReply, authReply;
+    uint32_t readbackWrote, readbackRead;
+    unsigned segments;
+    uint64_t bytes;
+};
+MpssReport gReport = {};
+
+constexpr uint32_t kPasSvc = 0x02;
+constexpr uint32_t kPasInitImage = 0x01;
+constexpr uint32_t kPasMemSetup = 0x02;
+constexpr uint32_t kPasAuthAndReset = 0x05;
+constexpr uint32_t kPasShutdown = 0x06;   /* measured: never returns with the modem off */
+constexpr uint32_t kPasMssReset = 0x0a;
+bool gAllowReset = false;
+constexpr uint32_t kArgInfoInitImage = 0x82;
+constexpr uint32_t kArgInfoMemSetup = 0x03;
+constexpr uint32_t kArgInfoAuth = 0x01;
+constexpr uint32_t kScmSipStd = 0x42000000u;
+constexpr uint32_t kModemPasId = 1;
+
+struct PasResult { ScmReply reply; uint64_t ticks; };
+
+PasResult pasCall(uint32_t command, uint32_t arginfo, uint64_t arg0, uint64_t arg1 = 0)
+{
+    uint64_t pmr = 0, daif = 0, begin = 0, end = 0;
+    __asm__ volatile("mrs %0, icc_pmr_el1" : "=r"(pmr));
+    __asm__ volatile("mrs %0, daif" : "=r"(daif));
+    __asm__ volatile("msr daifset, #2" ::: "memory");
+    __asm__ volatile("msr icc_pmr_el1, %0" :: "r"(UINT64_C(0)) : "memory");
+    __asm__ volatile("isb" ::: "memory");
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(begin));
+    const ScmReply reply = scmSipCall(kScmSipStd | (kPasSvc << 8) | command, arginfo, kModemPasId, arg0, arg1);
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(end));
+    __asm__ volatile("msr icc_pmr_el1, %0" :: "r"(pmr) : "memory");
+    __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
+    __asm__ volatile("isb" ::: "memory");
+    return PasResult{reply, end - begin};
+}
+
+// Device-memory stores: byte stores fault nowhere but are slow, so the bulk runs as aligned
+// 8-byte stores with byte heads and tails. No bzero/memcpy here - both end in DC ZVA or unaligned
+// 16-byte stores, which fault on a kIOMapInhibitCache mapping (wf104/wf105).
+void copyToDevice(volatile uint8_t *dst, const uint8_t *src, uint64_t bytes)
+{
+    uint64_t index = 0;
+    while (index < bytes && (reinterpret_cast<uintptr_t>(dst + index) & 7ULL)) {
+        dst[index] = src[index];
+        ++index;
+    }
+    volatile uint64_t *wide = reinterpret_cast<volatile uint64_t *>(const_cast<uint8_t *>(dst + index));
+    const uint64_t *source = reinterpret_cast<const uint64_t *>(src + index);
+    while (index + 8 <= bytes) {
+        *wide++ = *source++;
+        index += 8;
+    }
+    while (index < bytes) {
+        dst[index] = src[index];
+        ++index;
+    }
+}
+
+void zeroDevice(volatile uint8_t *dst, uint64_t bytes)
+{
+    uint64_t index = 0;
+    while (index < bytes && (reinterpret_cast<uintptr_t>(dst + index) & 7ULL)) dst[index++] = 0;
+    volatile uint64_t *wide = reinterpret_cast<volatile uint64_t *>(const_cast<uint8_t *>(dst + index));
+    while (index + 8 <= bytes) {
+        *wide++ = 0;
+        index += 8;
+    }
+    while (index < bytes) dst[index++] = 0;
+}
+
+}  // namespace
+
+// Stages the modem image into its fixed carveout and runs the PAS session.
+// Gated by sheng-wlan-ufs=2 at the call site; returns true when AUTH_AND_RESET accepted it.
+extern "C" bool native_wlan_mpss_start(void)
+{
+    if (!waitForUfsSeconds(150, "mpss")) return false;
+    FatVolume volume;
+    if (!fatOpen(volume, kModemLun, kModemLba)) {
+        printf("PICASSO_WLAN mpss: start skipped, modem FAT unreadable\n");
+        return false;
+    }
+    FatEntry mdt;
+    if (!fatFindFile(volume, "modem.mdt", "MODEM   MDT", mdt) || !mdt.valid) {
+        printf("PICASSO_WLAN mpss: modem.mdt missing\n");
+        return false;
+    }
+    uint8_t *meta = static_cast<uint8_t *>(IOMalloc(mdt.size ? mdt.size : 1));
+    if (!meta) return false;
+    if (!fatReadChain(volume, mdt.firstCluster, mdt.size, meta, mdt.size)) {
+        printf("PICASSO_WLAN mpss: modem.mdt read failed\n");
+        IOFree(meta, mdt.size);
+        return false;
+    }
+    if (memcmp(meta, "\177ELF", 4) != 0 || meta[4] != 1) {
+        printf("PICASSO_WLAN mpss: modem.mdt is not ELF32\n");
+        IOFree(meta, mdt.size);
+        return false;
+    }
+    const uint32_t phoff = le32(meta + 28);
+    const uint16_t phentsize = le16(meta + 42);
+    const uint16_t phnum = le16(meta + 44);
+
+    // First pass: physical span of the image.
+    uint64_t minAddress = ~0ULL, maxAddress = 0, imageBytes = 0;
+    for (unsigned index = 0; index < phnum; ++index) {
+        const uint64_t at = static_cast<uint64_t>(phoff) + static_cast<uint64_t>(index) * phentsize;
+        if (at + 32 > mdt.size) { IOFree(meta, mdt.size); return false; }
+        const uint8_t *ph = meta + at;
+        const uint32_t type = le32(ph + 0);
+        const uint32_t paddr = le32(ph + 12);
+        const uint32_t filesz = le32(ph + 16);
+        const uint32_t memsz = le32(ph + 20);
+        // PT_LOAD segments make up the image; a non-PT_LOAD header with a plausible address is the
+        // hash table, which the secure monitor reads from the region it names (0x9b800000 here).
+        const bool loadable = type == 1 || (paddr >= 0x80000000U && filesz);
+        if (!loadable) continue;
+        if (paddr < minAddress) minAddress = paddr;
+        const uint64_t end = static_cast<uint64_t>(paddr) + (memsz > filesz ? memsz : filesz);
+        if (end > maxAddress) maxAddress = end;
+        imageBytes += memsz;
+    }
+    const uint64_t span = (maxAddress - minAddress + 0xfffffULL) & ~0xfffffULL;
+    printf("PICASSO_WLAN mpss: image base=%llx span=%llx memsz=%llu phdrs=%u\n",
+           static_cast<unsigned long long>(minAddress), static_cast<unsigned long long>(span),
+           static_cast<unsigned long long>(imageBytes), phnum);
+
+    // The carveout is fixed by the image; map it device-uncached and stage every segment.
+    IODeviceMemory *carveout = IODeviceMemory::withRange(minAddress, span);
+    if (!carveout) {
+        printf("PICASSO_WLAN mpss: carveout descriptor failed\n");
+        IOFree(meta, mdt.size);
+        return false;
+    }
+    IOMemoryMap *carveoutMap = carveout->map(kIOMapAnywhere | kIOMapInhibitCache);
+    carveout->release();
+    if (!carveoutMap) {
+        printf("PICASSO_WLAN mpss: carveout map failed\n");
+        IOFree(meta, mdt.size);
+        return false;
+    }
+    volatile uint8_t *region = reinterpret_cast<volatile uint8_t *>(
+        static_cast<uintptr_t>(carveoutMap->getAddress()));
+    printf("PICASSO_WLAN mpss: carveout va=%llx\n",
+           static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(region)));
+
+    unsigned staged = 0;
+    uint64_t stagedBytes = 0;
+    bool ok = true;
+    uint64_t firstOffset = 0;
+    uint32_t firstWord = 0;
+    bool haveFirst = false;
+    for (unsigned index = 0; index < phnum && ok; ++index) {
+        const uint64_t at = static_cast<uint64_t>(phoff) + static_cast<uint64_t>(index) * phentsize;
+        const uint8_t *ph = meta + at;
+        const uint32_t type = le32(ph + 0);
+        const uint32_t paddr = le32(ph + 12);
+        const uint32_t filesz = le32(ph + 16);
+        const uint32_t memsz = le32(ph + 20);
+        if (!(type == 1 || (paddr >= 0x80000000U && filesz))) continue;
+        const uint64_t offset = paddr - minAddress;
+        if (offset + memsz > span) { ok = false; break; }
+        if (!filesz) {
+            zeroDevice(region + offset, memsz);
+            continue;
+        }
+        // Segment files are named in decimal (modem.b00..modem.b33) and correspond one-to-one
+        // with program-header indices; a header with p_filesz 0 has no file.
+        char longName[16];
+        char shortName[12];
+        memcpy(longName, "modem.b", 7);
+        longName[7] = static_cast<char>('0' + (index / 10) % 10);
+        longName[8] = static_cast<char>('0' + index % 10);
+        longName[9] = 0;
+        memcpy(shortName, "MODEM   B", 9);
+        shortName[9] = longName[7];
+        shortName[10] = longName[8];
+        shortName[11] = 0;
+        FatEntry segment;
+        if (!fatFindFile(volume, longName, shortName, segment) || !segment.valid) {
+            printf("PICASSO_WLAN mpss: segment %u file %s missing\n", index, longName);
+            ok = false;
+            break;
+        }
+        uint8_t *data = static_cast<uint8_t *>(IOMalloc(segment.size ? segment.size : 1));
+        if (!data) { ok = false; break; }
+        if (!fatReadChain(volume, segment.firstCluster, segment.size, data, segment.size)) {
+            printf("PICASSO_WLAN mpss: segment %u read failed\n", index);
+            IOFree(data, segment.size);
+            ok = false;
+            break;
+        }
+        uint32_t copyBytes = segment.size;
+        if (copyBytes > filesz) copyBytes = filesz;
+        if (!haveFirst && copyBytes >= 4) {
+            firstOffset = offset;
+            firstWord = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
+                        (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
+            haveFirst = true;
+        }
+        copyToDevice(region + offset, data, copyBytes);
+        if (memsz > copyBytes) zeroDevice(region + offset + copyBytes, memsz - copyBytes);
+        IOFree(data, segment.size);
+        staged++;
+        stagedBytes += copyBytes;
+        if ((index & 7) == 0 || index + 1 == phnum) {
+            printf("PICASSO_WLAN mpss: seg %u paddr=%x filesz=%x memsz=%x\n", index, paddr, filesz, memsz);
+        }
+    }
+    __asm__ volatile("dsb sy" ::: "memory");
+    // Read the first staged word back: a mismatch means the carveout is not writable from the AP
+    // (XPU), which is worth knowing before any PAS call runs.
+    if (haveFirst) {
+        const volatile uint8_t *probe = region + firstOffset;
+        const uint32_t back = static_cast<uint32_t>(probe[0]) | (static_cast<uint32_t>(probe[1]) << 8) |
+                              (static_cast<uint32_t>(probe[2]) << 16) | (static_cast<uint32_t>(probe[3]) << 24);
+        gReport.readbackWrote = firstWord;
+        gReport.readbackRead = back;
+        printf("PICASSO_WLAN mpss: readback wrote=%08x read=%08x %s\n", firstWord, back,
+               back == firstWord ? "ok" : "MISMATCH");
+    }
+    gReport.attempted = true;
+    gReport.staged = ok;
+    gReport.segments = staged;
+    gReport.bytes = stagedBytes;
+    printf("PICASSO_WLAN mpss: staged=%u bytes=%llu ok=%u\n", staged,
+           static_cast<unsigned long long>(stagedBytes), ok ? 1U : 0U);
+    if (!ok) {
+        carveoutMap->release();
+        IOFree(meta, mdt.size);
+        return false;
+    }
+
+    // Metadata must be physically contiguous and stay resident (wf126).
+    const IOOptionBits metaOptions = static_cast<IOOptionBits>(kIODirectionInOut) |
+                                     static_cast<IOOptionBits>(kIOMemoryMapperNone) |
+                                     static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous);
+    IOBufferMemoryDescriptor *metaBuffer = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+        kernel_task, metaOptions, (mdt.size + 0xfffU) & ~0xfffU, UINT64_C(0xfffff000));
+    bool started = false;
+    if (!metaBuffer || metaBuffer->prepare() != kIOReturnSuccess) {
+        printf("PICASSO_WLAN mpss: metadata allocation failed\n");
+        if (metaBuffer) metaBuffer->release();
+    } else {
+        IOByteCount metaLength = 0;
+        const uint64_t metaPhys = metaBuffer->getPhysicalSegment(0, &metaLength, kIOMemoryMapperNone);
+        IOMemoryMap *metaMap = metaBuffer->map(kIOMapAnywhere | kIOMapInhibitCache);
+        if (!metaMap || !metaPhys) {
+            printf("PICASSO_WLAN mpss: metadata mapping failed\n");
+            if (metaMap) metaMap->release();
+        } else {
+            copyToDevice(reinterpret_cast<volatile uint8_t *>(static_cast<uintptr_t>(metaMap->getAddress())),
+                         meta, mdt.size);
+            __asm__ volatile("dsb sy" ::: "memory");
+            printf("PICASSO_WLAN mpss: metadata phys=%llx bytes=%u\n",
+                   static_cast<unsigned long long>(metaPhys), mdt.size);
+
+            // PAS_SHUTDOWN was measured on device and never returns while the modem is already
+            // off: the loader thread wedged inside the SMC and only finished when the call was
+            // removed. The reset pair stays out of the default path for the same reason.
+            if (gAllowReset) {
+                const PasResult mssReset = pasCall(kPasMssReset, 0x01, 0);
+                printf("PICASSO_WLAN mpss: mss_reset a0=%08x a1=%08x\n", mssReset.reply.a0, mssReset.reply.a1);
+            }
+            // Vendor PIL for fixed images is sometimes driven region-first; try that order once
+            // before the metadata-first order Linux uses.
+            const PasResult setupFirst = pasCall(kPasMemSetup, kArgInfoMemSetup, minAddress, span);
+            printf("PICASSO_WLAN mpss: memsetup-first a0=%08x a1=%08x\n", setupFirst.reply.a0, setupFirst.reply.a1);
+            const bool haveRegion = setupFirst.reply.a0 == 0;
+            PasResult init = pasCall(kPasInitImage, kArgInfoInitImage, metaPhys);
+            printf("PICASSO_WLAN mpss: init meta a0=%08x a1=%08x ticks=%llu\n", init.reply.a0, init.reply.a1,
+                   static_cast<unsigned long long>(init.ticks));
+            if (init.reply.a0 != 0) {
+                // Some PIL implementations expect the metadata to live inside the image region at
+                // its lowest address, which is where a fixed-address MBN places its header.
+                const PasResult second = pasCall(kPasInitImage, kArgInfoInitImage, minAddress);
+                printf("PICASSO_WLAN mpss: init base a0=%08x a1=%08x ticks=%llu\n", second.reply.a0,
+                       second.reply.a1, static_cast<unsigned long long>(second.ticks));
+                if (second.reply.a0 == 0) init = second;
+            }
+            if (init.reply.a0 == 0) {
+                PasResult setup = setupFirst;
+                if (!haveRegion) {
+                    setup = pasCall(kPasMemSetup, kArgInfoMemSetup, minAddress, span);
+                    printf("PICASSO_WLAN mpss: memsetup a0=%08x a1=%08x\n", setup.reply.a0, setup.reply.a1);
+                }
+                gReport.setupReply = setup.reply.a0;
+                printf("PICASSO_WLAN mpss: memsetup a0=%08x a1=%08x ticks=%llu\n", setup.reply.a0, setup.reply.a1,
+                       static_cast<unsigned long long>(setup.ticks));
+                if (setup.reply.a0 == 0) {
+                    const PasResult auth = pasCall(kPasAuthAndReset, kArgInfoAuth, 0);
+                    gReport.authReply = auth.reply.a0;
+                    printf("PICASSO_WLAN mpss: auth a0=%08x a1=%08x ticks=%llu\n", auth.reply.a0, auth.reply.a1,
+                           static_cast<unsigned long long>(auth.ticks));
+                    started = auth.reply.a0 == 0;
+                }
+            }
+            // Retain both mappings and buffers: TZ keeps using the region after AUTH (wf126).
+            gReport.initReply = init.reply.a0;
+    gReport.setupReply = gReport.initReply == 0 ? 0 : 0xffffffffU;
+    gReport.authReply = 0xffffffffU;
+    gReport.started = started;
+    printf("PICASSO_WLAN mpss: started=%u\n", started ? 1U : 0U);
+        }
+    }
+    return started;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stage 0: where is the WLAN firmware?
+//
+// The ROM's NON-HLOS.bin holds the modem FAT but no WLAN image, and neither vendor.img nor
+// system.img carry one. The device's modem partition is larger than the image the ROM writes, so
+// anything the factory left past that image is still on the medium. This scan walks the whole
+// partition in 64 KiB reads and reports any offset that spells one of the WLAN image names, plus
+// the FAT geometry of every plausible boot sector it passes. Read-only, no writes anywhere.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+struct Needle {
+    const char *text;
+    uint32_t length;
+};
+
+constexpr uint32_t kScanChunkBlocks = 16;      // 64 KiB per UFS command
+constexpr uint64_t kScanLimitBytes = 0x14000000ULL;  // 320 MiB, the modem partition's size
+
+void scanForNeedles(const uint8_t *buffer, uint32_t bytes, uint64_t base, unsigned &hits)
+{
+    static const char *const needles[] = {"athwlan", "wlanmdsp", "bdwlan", "WCNSS", "regdb"};
+    for (unsigned n = 0; n < sizeof(needles) / sizeof(needles[0]); ++n) {
+        const char *needle = needles[n];
+        const uint32_t length = static_cast<uint32_t>(strlen(needle));
+        if (bytes < length) continue;
+        for (uint32_t index = 0; index + length <= bytes; ++index) {
+            bool match = true;
+            for (uint32_t c = 0; c < length; ++c) {
+                if (buffer[index + c] != static_cast<uint8_t>(needle[c])) { match = false; break; }
+            }
+            if (match) {
+                printf("PICASSO_WLAN scan: %s at modem+%llx\n", needle,
+                       static_cast<unsigned long long>(base + index));
+                if (++hits >= 24) return;
+            }
+        }
+    }
+}
+
+}  // namespace
+
+extern "C" void native_wlan_modem_scan(void)
+{
+    if (!waitForUfsSeconds(150, "scan")) return;
+    uint8_t *buffer = static_cast<uint8_t *>(IOMalloc(kScanChunkBlocks * 4096));
+    if (!buffer) return;
+    unsigned hits = 0;
+    unsigned fatSeen = 0;
+    const uint64_t chunkBytes = static_cast<uint64_t>(kScanChunkBlocks) * 4096;
+    uint64_t lba = kModemLba;
+    const uint64_t firstLba = kModemLba;
+    const uint64_t limitLba = kModemLba + kScanLimitBytes / 4096;
+    printf("PICASSO_WLAN scan: modem lun=%u lba=%llu..%llu\n", kModemLun,
+           static_cast<unsigned long long>(firstLba), static_cast<unsigned long long>(limitLba));
+    while (lba < limitLba && hits < 24) {
+        if (native_ufs_raw_read(kModemLun, lba, kScanChunkBlocks, buffer) != 0) {
+            printf("PICASSO_WLAN scan: read failed at lba=%llu\n", static_cast<unsigned long long>(lba));
+            break;
+        }
+        const uint64_t base = (lba - firstLba) * 4096;
+        // A FAT boot sector announces itself with 0x55AA at 510 and a sane bytes-per-sector at 11.
+        if (buffer[510] == 0x55 && buffer[511] == 0xAA) {
+            const unsigned bps = buffer[11] | (buffer[12] << 8);
+            if (bps == 512 || bps == 1024 || bps == 2048 || bps == 4096) {
+                printf("PICASSO_WLAN scan: FAT candidate at modem+%llx bps=%u spc=%u\n",
+                       static_cast<unsigned long long>(base), bps, buffer[13]);
+                if (++fatSeen >= 6) fatSeen = 6;
+            }
+        }
+        scanForNeedles(buffer, static_cast<uint32_t>(chunkBytes), base, hits);
+        lba += kScanChunkBlocks;
+    }
+    printf("PICASSO_WLAN scan: done hits=%u fat=%u\n", hits, fatSeen);
+    IOFree(buffer, kScanChunkBlocks * 4096);
+}
+
+// One-line status, repeated by the caller so a late-attaching console still sees the outcome.
+extern "C" void native_wlan_mpss_report(void)
+{
+    if (!gReport.attempted) {
+        printf("PICASSO_WLAN mpss: report not attempted\n");
+        return;
+    }
+    printf("PICASSO_WLAN mpss: report staged=%u segs=%u bytes=%llu rb=%08x/%08x init=%08x setup=%08x auth=%08x started=%u\n",
+           gReport.staged ? 1U : 0U, gReport.segments,
+           static_cast<unsigned long long>(gReport.bytes),
+           gReport.readbackWrote, gReport.readbackRead,
+           gReport.initReply, gReport.setupReply, gReport.authReply, gReport.started ? 1U : 0U);
+}

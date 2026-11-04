@@ -152,6 +152,14 @@ extern void sheng_cpufreq_poll(void) __attribute__((weak_import));
 // The firmware setter is a strong definition from the build-time embedded arrays, or a weak no-op when no blob was staged.
 extern void native_adreno620_set_embedded_firmware(void) __attribute__((weak_import));
 extern void native_adreno_probe(void) __attribute__((weak_import));
+// Power/volume keys (drivers/NativeButtons): PON kpdpwr/RESIN plus the pm8150l volume-up GPIO.
+extern void native_buttons_probe(void) __attribute__((weak_import));
+// WCN bring-up probe (drivers/NativeWlan): maps the WCSS block read-only and reports its
+// windows and rails; self-gated on sheng-wlan=<n>, runs once and never blocks the monitor.
+extern void native_wlan_probe(void) __attribute__((weak_import));
+// Battery/PMIC service (drivers/NativePmic): SPMI-mapped VADC readings and charger policy.
+// The driver owns the IOService bring-up; self-gated on native-pmic=<n>, releases on any failure.
+extern void native_pmic_probe(void) __attribute__((weak_import));
 extern char boot_process_rows[10][120] __attribute__((weak_import));
 extern unsigned boot_ui_trace_role_rows(unsigned,char [][120],unsigned,unsigned) __attribute__((weak_import));
 extern char native_touch_rows[4][120] __attribute__((weak_import));
@@ -1212,6 +1220,14 @@ static void monitor(void *arg, wait_result_t result) {
   // yet, so this cannot start the GPU or change what userland sees.
   if(native_adreno620_set_embedded_firmware)native_adreno620_set_embedded_firmware();
   if(native_adreno_probe)native_adreno_probe();
+  // Power/volume keys (drivers/NativeButtons). Starts its own thread; calling it every
+  // pass costs one atomic load once it has run.
+  if(native_buttons_probe)native_buttons_probe();
+  // WCN bring-up probe (drivers/NativeWlan). Self-gated on sheng-wlan=<n>, read-only MMIO, never blocks.
+  if(native_wlan_probe)native_wlan_probe();
+  // Battery/PMIC service (drivers/NativePmic). The driver self-gates on native-pmic=<n> and
+  // releases on every failure path, so a fault cannot take the panel down with it.
+  if(native_pmic_probe)native_pmic_probe();
   for (;;) {
     __atomic_fetch_add(&thread_count,1,__ATOMIC_RELAXED);
     boot_progress_poll();
