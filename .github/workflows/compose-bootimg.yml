@@ -129,17 +129,19 @@ jobs:
 
       - name: Publish build log on failure
         if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -e
+          set -x
           mkdir -p ci-logs
           cp out/picasso/logs/actions-build.log ci-logs/build.log 2>/dev/null || true
           cp out/picasso/logs/bootimg.log ci-logs/bootimg.log 2>/dev/null || true
+          ls -la ci-logs
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git checkout -B "ci-log-${GITHUB_RUN_ID}"
           git add -f ci-logs
           git commit -m "ci: build log for run ${GITHUB_RUN_ID}" || true
-          git push -f origin "HEAD:ci-log-${GITHUB_RUN_ID}"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/ci-log-${GITHUB_RUN_ID}"
 
       - name: Verify Data seed, compiled UUID and payload handoff
         run: |
