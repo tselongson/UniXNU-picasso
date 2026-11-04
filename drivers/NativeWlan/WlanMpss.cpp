@@ -561,3 +561,80 @@ extern "C" bool native_wlan_mpss_start(void)
     }
     return started;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Stage 0: where is the WLAN firmware?
+//
+// The ROM's NON-HLOS.bin holds the modem FAT but no WLAN image, and neither vendor.img nor
+// system.img carry one. The device's modem partition is larger than the image the ROM writes, so
+// anything the factory left past that image is still on the medium. This scan walks the whole
+// partition in 64 KiB reads and reports any offset that spells one of the WLAN image names, plus
+// the FAT geometry of every plausible boot sector it passes. Read-only, no writes anywhere.
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+struct Needle {
+    const char *text;
+    uint32_t length;
+};
+
+constexpr uint32_t kScanChunkBlocks = 16;      // 64 KiB per UFS command
+constexpr uint64_t kScanLimitBytes = 0x14000000ULL;  // 320 MiB, the modem partition's size
+
+void scanForNeedles(const uint8_t *buffer, uint32_t bytes, uint64_t base, unsigned &hits)
+{
+    static const char *const needles[] = {"athwlan", "wlanmdsp", "bdwlan", "WCNSS", "regdb"};
+    for (unsigned n = 0; n < sizeof(needles) / sizeof(needles[0]); ++n) {
+        const char *needle = needles[n];
+        const uint32_t length = static_cast<uint32_t>(strlen(needle));
+        if (bytes < length) continue;
+        for (uint32_t index = 0; index + length <= bytes; ++index) {
+            bool match = true;
+            for (uint32_t c = 0; c < length; ++c) {
+                if (buffer[index + c] != static_cast<uint8_t>(needle[c])) { match = false; break; }
+            }
+            if (match) {
+                printf("PICASSO_WLAN scan: %s at modem+%llx\n", needle,
+                       static_cast<unsigned long long>(base + index));
+                if (++hits >= 24) return;
+            }
+        }
+    }
+}
+
+}  // namespace
+
+extern "C" void native_wlan_modem_scan(void)
+{
+    uint8_t *buffer = static_cast<uint8_t *>(IOMalloc(kScanChunkBlocks * 4096));
+    if (!buffer) return;
+    unsigned hits = 0;
+    unsigned fatSeen = 0;
+    const uint64_t chunkBytes = static_cast<uint64_t>(kScanChunkBlocks) * 4096;
+    uint64_t lba = kModemLba;
+    const uint64_t firstLba = kModemLba;
+    const uint64_t limitLba = kModemLba + kScanLimitBytes / 4096;
+    printf("PICASSO_WLAN scan: modem lun=%u lba=%llu..%llu\n", kModemLun,
+           static_cast<unsigned long long>(firstLba), static_cast<unsigned long long>(limitLba));
+    while (lba < limitLba && hits < 24) {
+        if (native_ufs_raw_read(kModemLun, lba, kScanChunkBlocks, buffer) != 0) {
+            printf("PICASSO_WLAN scan: read failed at lba=%llu\n", static_cast<unsigned long long>(lba));
+            break;
+        }
+        const uint64_t base = (lba - firstLba) * 4096;
+        // A FAT boot sector announces itself with 0x55AA at 510 and a sane bytes-per-sector at 11.
+        if (buffer[510] == 0x55 && buffer[511] == 0xAA) {
+            const unsigned bps = buffer[11] | (buffer[12] << 8);
+            if (bps == 512 || bps == 1024 || bps == 2048 || bps == 4096) {
+                printf("PICASSO_WLAN scan: FAT candidate at modem+%llx bps=%u spc=%u\n",
+                       static_cast<unsigned long long>(base), bps, buffer[13]);
+                if (++fatSeen >= 6) fatSeen = 6;
+            }
+        }
+        scanForNeedles(buffer, static_cast<uint32_t>(chunkBytes), base, hits);
+        lba += kScanChunkBlocks;
+    }
+    printf("PICASSO_WLAN scan: done hits=%u fat=%u\n", hits, fatSeen);
+    IOFree(buffer, kScanChunkBlocks * 4096);
+}

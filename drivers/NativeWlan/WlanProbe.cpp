@@ -338,6 +338,7 @@ extern "C" int native_ufs_raw_read(uint32_t lun, uint64_t lba, uint32_t blocks, 
 extern "C" void native_wlan_modem_inventory(void);
 extern "C" bool native_wlan_mpss_start(void);
 extern "C" void native_wlan_glink_probe(void);
+extern "C" void native_wlan_modem_scan(void);
 extern "C" kern_return_t kernel_thread_start(void (*)(void *, wait_result_t), void *, thread_t *);
 extern "C" void thread_deallocate(thread_t);
 static void wlanMpssLoaderStart(void);
@@ -396,6 +397,7 @@ static void wlanMpssLoader(void *, wait_result_t) {
     printf("PICASSO_WLAN mpss: loader thread begin mode=%u\n", mode);
     // Baseline: whether the modem endpoint is already up before we load anything.
     if (mode >= 3) native_wlan_glink_probe();
+    if (mode >= 4) native_wlan_modem_scan();
     const bool started = native_wlan_mpss_start();
     if (mode >= 3) {
         IOSleep(8000);
