@@ -69,3 +69,23 @@ WCN3980,SNOC + copy engines + QMI/WLFW(WLAN 固件服务挂在 MODEM 上),无 PC
 关键收获:固件供给用"数据卷文件加载"(pandora_files.c 模式),彻底绕开
 "blob 不入库"与构建内嵌的两难;固件从本机 vendor/modem 分区提取后放到
 ESP/数据卷固定路径,驱动启动时读。
+
+## 阶段 B 详细计划:MODEM(MPSS)冷启动(2026-11-04 补充)
+
+真机已验证:SMEM v12 表可解析(14 条目),SMP2P 435 / GLINK 478-480 因 MPSS 未启动而缺失。
+WLFW/GLINK 的宿主是 MODEM,不启它没有对象可谈。三条并行的子任务:
+
+### B1. 固件读取通道
+- modem 分区(mba.mbn + modem.mdt + 分段)在 UFS 上;先查 NativeUfs 是否已把 modem 分区
+  作为块设备发布(看 DT 的 partitions 节点与 UfsService 的 publish 列表)。
+- 读取器:按块读 + MBN 解析(复用 WlanFirmware.c 的 ELF/MBN 解析)。固件不入库,运行时读分区。
+
+### B2. PIL/SMC 路径探查
+- 查本机 bootloader(Xiaomi XBL/ABL)暴露的 SCM 接口:PAS_AUTH_AND_RESET / PAS_SHUTDOWN / mem_setup。
+  参考 Trogdor 的 TF-A SMC64 经验(他们机器 PAS 未实现,走 MBA 自认证;我们要先探本机能力)。
+- 若 SMC PAS 不可用:评估"由 UEFI 侧启动 MPSS"的可行性(UEFI 有自己的 SMC/SCM 通道)。
+
+### B3. 启动后验证
+- SMP2P 435 出现(slave state)+ GLINK 478/479/480 出现 → stage2 的 SMMU 读应该也能看到
+  SID 0xc0 的 SMR/S2CR 变化(当前 matches=0,说明 WLFW 的流映射由固件侧建立)。
+- 之后进阶段 C:WLFW QMI 握手(传输层已就绪:WlanSmem.h/WlanWlfwProto.h)。
