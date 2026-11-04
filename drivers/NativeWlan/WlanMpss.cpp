@@ -25,6 +25,7 @@
 extern "C" {
 uint32_t native_ufs_raw_max_blocks(void);
 int native_ufs_raw_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst);
+void native_ufs_raw_diag(uint32_t *out);
 }
 
 namespace {
@@ -57,6 +58,25 @@ struct FatEntry {
     bool directory;
     bool valid;
 };
+
+
+// The UFS host only becomes readable once the root publisher thread has finished its bring-up
+// (native-ufs-start-delay plus the LUN-ready retries). Every entry point in this file waits for
+// that flag instead of assuming a fixed delay: the boot page runs long before root is mounted.
+bool waitForUfsSeconds(unsigned seconds, const char *who)
+{
+    for (unsigned step = 0; step < seconds; ++step) {
+        uint32_t diag[5] = {0, 0, 0, 0, 0};
+        native_ufs_raw_diag(diag);
+        if (diag[0]) {
+            if (step) printf("PICASSO_WLAN ufs: ready after %us (%s)\n", step, who);
+            return true;
+        }
+        IOSleep(1000);
+    }
+    printf("PICASSO_WLAN ufs: not ready after %us (%s)\n", seconds, who);
+    return false;
+}
 
 uint8_t gBlock[kBlockBytes] __attribute__((aligned(4096)));
 
@@ -398,6 +418,7 @@ void zeroDevice(volatile uint8_t *dst, uint64_t bytes)
 // Gated by sheng-wlan-ufs=2 at the call site; returns true when AUTH_AND_RESET accepted it.
 extern "C" bool native_wlan_mpss_start(void)
 {
+    if (!waitForUfsSeconds(150, "mpss")) return false;
     FatVolume volume;
     if (!fatOpen(volume, kModemLun, kModemLba)) {
         printf("PICASSO_WLAN mpss: start skipped, modem FAT unreadable\n");
@@ -607,6 +628,7 @@ void scanForNeedles(const uint8_t *buffer, uint32_t bytes, uint64_t base, unsign
 
 extern "C" void native_wlan_modem_scan(void)
 {
+    if (!waitForUfsSeconds(150, "scan")) return;
     uint8_t *buffer = static_cast<uint8_t *>(IOMalloc(kScanChunkBlocks * 4096));
     if (!buffer) return;
     unsigned hits = 0;
