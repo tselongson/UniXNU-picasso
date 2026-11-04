@@ -308,6 +308,40 @@ static void wlanSmemInventory(void) {
     }
 }
 
+// PAS availability scan, probe only: SVC_PIL/PAS_IS_SUPPORTED (cmd 0x07) for every pas id.
+// It reads no memory and touches no subsystem state (Adreno620Cp.cpp uses the same query as a
+// control probe). The SMC convention is that file's: STD_CALL|SMC_64|OWNER_SIP, x6 carries the
+// session id of an interrupted secure call (x0==1 = INTERRUPTED; a retry without x6 wedges PIL).
+struct ScmReply { uint32_t a0, a1, a2, a3; uint64_t a6; };
+
+static ScmReply wlanScmCall(uint32_t function, uint32_t arginfo, uint64_t arg0) {
+    register uint64_t x0 __asm__("x0") = function;
+    register uint64_t x1 __asm__("x1") = arginfo;
+    register uint64_t x2 __asm__("x2") = arg0;
+    register uint64_t x3 __asm__("x3") = 0;
+    register uint64_t x4 __asm__("x4") = 0;
+    register uint64_t x5 __asm__("x5") = 0;
+    register uint64_t x6 __asm__("x6") = 0;
+    register uint64_t x7 __asm__("x7") = 0;
+    __asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3),
+        "+r"(x6), "+r"(x7)
+        : "r"(x4), "r"(x5)
+        : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16",
+          "x17", "memory");
+    return ScmReply{uint32_t(x0), uint32_t(x1), uint32_t(x2), uint32_t(x3), x6};
+}
+
+static void wlanPasScan(void) {
+    unsigned enabled = 0;
+    if (!PE_parse_boot_argn("sheng-wlan-pas", &enabled, sizeof enabled) || enabled != 1) return;
+    constexpr uint32_t kStdSipSmc64 = 0x42000000u;   // STD_CALL | SMC_64 | OWNER_SIP
+    constexpr uint32_t kSvcPil = 0x02u, kPasIsSupported = 0x07u;
+    for (uint32_t id = 0; id <= 20; ++id) {
+        const ScmReply r = wlanScmCall(kStdSipSmc64 | (kSvcPil << 8) | kPasIsSupported, 0x01u, id);
+        printf("PICASSO_WLAN pas: id=%u a0=%08x a1=%08x\n", id, r.a0, r.a1);
+    }
+}
+
 extern "C" void native_wlan_probe(void) {
     unsigned stage = 0;
     if (!PE_parse_boot_argn("sheng-wlan", &stage, sizeof stage) || stage < 1) return;
@@ -317,6 +351,8 @@ extern "C" void native_wlan_probe(void) {
 
     // DDR-only inventory first: it cannot hang a bus and is the ground truth for the transport.
     wlanSmemInventory();
+    // PAS scan (opt-in): tells us which subsystem ids the secure monitor can boot.
+    wlanPasScan();
 
     Session session = {};
     const struct wlan_probe_ops ops = {&session, stage1_gated, stage2, stage3, stage4, stage5};
