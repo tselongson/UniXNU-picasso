@@ -113,3 +113,26 @@ WLFW/GLINK 的宿主是 MODEM,不启它没有对象可谈。三条并行的子�
 - SM7250 的 WLAN 固件到底跑在 MPSS 还是独立 WCSS 处理器?(本板 DT 有 WCSS 0x18800000 节点;
   WCN3980 可能是独立 WPSS 类子系统,pas-id 待查)。先做 PAS_IS_SUPPORTED 全 pas-id 扫描(现成 SMC 代码可复用),
   再决定加载目标。
+
+## 阶段 B3 实现路线(2026-11-04 最终确定,纯软件,无需人工按键)
+
+前提:fastboot fetch/oem dump 均不支持;UEFI Mass Storage 需要按按钮(不可用)。
+modem 分区(FAT16,含 modem.mdt + b00..b33)就在设备 UFS 上,**内核自己读**是最短路径,
+且 PAS 加载本来就在内核完成,固件无需出机器。
+
+### B3.1 NativeUfs 分区读取(需改 silenzio 的文件,新增只读 API)
+- GPT: 读 LBA1 头 + 分区项数组,按 label 找 "modem"。
+- 新增 `native_ufs_partition_find(name)` / `native_ufs_partition_read(name, off, buf, len)`,
+  SCSI READ(10) 复用现有 command() 通路;限长(≤2MB/次),只读,配 boot arg 门控。
+
+### B3.2 WlanMpss 加载器(我们的新文件)
+1) 用 B3.1 读 modem 分区 → FAT16 解析(参考已写的 Python 版:FAT 偏移表、LFN、簇链)。
+2) 取 modem.mdt(ELF32 hash 表)+ 需要的 bXX 段(按 ELF phdr 的 p_paddr 落位)。
+3) MPSS 目标内存:DT 的 mpss 区域(需从 ADT/picasso.dts 取 base/size;staged 的 modem.mdt 与
+   "modem_wlan_mem" 提示该板已预留)。
+4) PAS 序列(照 Adreno620Cp): 先 rpmhVoteCryptoPath → INIT_IMAGE(pas=1, mdt_paddr)
+   → MEM_SETUP(pas=1, mba_addr, mba_size) → AUTH_AND_RESET(pas=1);x0==1 带 x6 重试。
+5) 成功后轮询 SMEM SMP2P item 435(slave state)确认 MPSS 起来。
+
+### B3.3 之后
+- stage2 应能看到 SID 0xc0 的 SMR/S2CR 变化;接着 WLFW QMI(传输层已就绪)。
