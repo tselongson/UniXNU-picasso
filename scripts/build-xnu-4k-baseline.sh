@@ -127,6 +127,11 @@ ADRENO620_PROBE=${XNU_ADRENO620_PROBE:-0}
 NATIVE_BUTTONS=${XNU_NATIVE_BUTTONS:-0}
 NATIVE_PMIC=${XNU_NATIVE_PMIC:-0}
 NATIVE_WLAN=${XNU_NATIVE_WLAN:-0}
+# This tree's archive phase enumerates its own drivers; ours are built here so the link inputs
+# exist before that phase runs and the test -f guards below can find them.
+if [ "$NATIVE_BUTTONS" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-native-buttons.py; fi
+if [ "$NATIVE_PMIC" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-native-pmic.py; fi
+if [ "$NATIVE_WLAN" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-native-wlan.py; fi
 if [ "$ADRENO620_PROBE" != 0 ] && [ "$ADRENO620_PROBE" != 1 ]; then
   echo 'XNU_ADRENO620_PROBE must be 0 or 1' >&2
   exit 1
