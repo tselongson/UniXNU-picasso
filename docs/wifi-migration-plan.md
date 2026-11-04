@@ -89,3 +89,27 @@ WLFW/GLINK 的宿主是 MODEM,不启它没有对象可谈。三条并行的子�
 - SMP2P 435 出现(slave state)+ GLINK 478/479/480 出现 → stage2 的 SMMU 读应该也能看到
   SID 0xc0 的 SMR/S2CR 变化(当前 matches=0,说明 WLFW 的流映射由固件侧建立)。
 - 之后进阶段 C:WLFW QMI 握手(传输层已就绪:WlanSmem.h/WlanWlfwProto.h)。
+
+## 阶段 B2 设计(2026-11-04): MPSS/WCSS 的 PIL 启动
+
+### 已确认的现成设施(树内,已在硬件跑通)
+- `drivers/NativeAdrenoPicasso/Adreno620Cp.cpp` 有完整的 SMC/PAS 实现:
+  - SMC 约定: `kScmSipStd = 0x42000000` (STD_CALL|SMC_64|OWNER_SIP),x0..x3 参数、x6 会话 id;
+    x0==1 = QCOM_SCM_INTERRUPTED(必须带 x6 重试,否则 PIL 会话卡死——wf106-109 的教训)。
+  - PAS 命令: INIT_IMAGE(ARGS(2,VAL,RW)=0x82) / MEM_SETUP(ARGS(3)=0x03) / AUTH_AND_RESET(ARGS(1)=0x01)。
+  - **必须先 rpmhVoteCryptoPath()**(wf115:crypto 引擎 NoC 无投票时,读寄存器 SError 死机)。
+  - **本平台 modem PAS ID = 1**(代码里 `pas-supported(1)` 作对照探针)。
+  - metadata 格式: ELF 头+phdrs+hash 段无 padding;region 只算 PT_LOAD 段。
+
+### 固件传输的硬约束
+- modem 固件 82MB(modem.mdt+33 段),boot.img 已 62MB(分区~64MB)→ **不能内嵌**。
+- 固件本来就在设备的 modem 分区(NON-HLOS.bin 那个 FAT 镜像),**缺的是运行时 UFS 分区读取**。
+- 两条路:
+  a. 扩展 NativeUfs 加 GPT 枚举+分区读取(silenzio 的文件,需批准);
+  b. UEFI 侧(uefi_picasso 仓库)预读 modem 分区到内存,经 boot_args/ADT 传给 XNU
+     (UEFI 有完整的 SMC/文件读取能力,且不碰 silenzio 的内核代码)。
+
+### 待定问题
+- SM7250 的 WLAN 固件到底跑在 MPSS 还是独立 WCSS 处理器?(本板 DT 有 WCSS 0x18800000 节点;
+  WCN3980 可能是独立 WPSS 类子系统,pas-id 待查)。先做 PAS_IS_SUPPORTED 全 pas-id 扫描(现成 SMC 代码可复用),
+  再决定加载目标。
