@@ -331,6 +331,39 @@ static ScmReply wlanScmCall(uint32_t function, uint32_t arginfo, uint64_t arg0) 
     return ScmReply{uint32_t(x0), uint32_t(x1), uint32_t(x2), uint32_t(x3), x6};
 }
 
+// Read-only raw block access exported by NativeUfs (additive integration hook).
+extern "C" uint32_t native_ufs_raw_max_blocks(void);
+extern "C" int native_ufs_raw_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst);
+
+// Modem partition identity probe. picasso stores the modem FAT on LUN 4 starting at LBA 61606
+// (rawprogram4.xml: physical_partition_number=4, start_sector=61606, SECTOR_SIZE_IN_BYTES=4096).
+// Reading one block tells us whether the kernel can reach partitions outside the root window -
+// the prerequisite for loading MPSS firmware at runtime without touching silenzio's root path.
+static constexpr uint32_t kModemLun = 4;
+static constexpr uint64_t kModemLba = 61606;
+
+static void wlanModemPartitionProbe(void) {
+    unsigned enabled = 0;
+    if (!PE_parse_boot_argn("sheng-wlan-ufs", &enabled, sizeof enabled) || enabled != 1) return;
+    const uint32_t maxBlocks = native_ufs_raw_max_blocks();
+    uint8_t *sector = static_cast<uint8_t *>(IOMalloc(4096));
+    if (!sector) return;
+    memset(sector, 0, 4096);
+    const int rc = native_ufs_raw_read(kModemLun, kModemLba, 1, sector);
+    const unsigned bps = sector[11] | (sector[12] << 8);
+    const unsigned spc = sector[13];
+    const unsigned rsv = sector[14] | (sector[15] << 8);
+    const unsigned nfat = sector[16];
+    const unsigned rootEnt = sector[17] | (sector[18] << 8);
+    unsigned total16 = sector[19] | (sector[20] << 8);
+    const unsigned total32 = sector[32] | (sector[33] << 8) | (sector[34] << 16) | (static_cast<unsigned>(sector[35]) << 24);
+    if (!total16) total16 = total32;
+    printf("PICASSO_WLAN ufs modem lun=%u lba=%llu rc=%d maxblk=%u oem=%.5s bps=%u spc=%u rsv=%u nfat=%u root=%u total=%u\n",
+           kModemLun, static_cast<unsigned long long>(kModemLba), rc, maxBlocks,
+           reinterpret_cast<const char *>(sector + 3), bps, spc, rsv, nfat, rootEnt, total16);
+    IOFree(sector, 4096);
+}
+
 static void wlanPasScan(void) {
     unsigned enabled = 0;
     if (!PE_parse_boot_argn("sheng-wlan-pas", &enabled, sizeof enabled) || enabled != 1) return;
@@ -353,6 +386,8 @@ extern "C" void native_wlan_probe(void) {
     wlanSmemInventory();
     // PAS scan (opt-in): tells us which subsystem ids the secure monitor can boot.
     wlanPasScan();
+    // Modem partition reachability (opt-in): proves LUN 4 is readable from the kernel.
+    wlanModemPartitionProbe();
 
     Session session = {};
     const struct wlan_probe_ops ops = {&session, stage1_gated, stage2, stage3, stage4, stage5};

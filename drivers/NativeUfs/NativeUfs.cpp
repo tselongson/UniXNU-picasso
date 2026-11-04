@@ -2652,3 +2652,19 @@ void NativeUfs::stop (IOService *provider)
   fMap.reset ();
   IOService::stop (provider);
 }
+
+// ---- Integration hook: read-only raw block access for platform firmware loaders -------------
+// Additive only: no existing path calls this and no existing behaviour changes. hostRead4k already
+// serialises against the root I/O path under gHost.lock and bounds each request to kDataMax bytes,
+// so a firmware loader can read a partition the root window does not cover (the modem LUN) without
+// owning the controller.
+extern "C" uint32_t native_ufs_raw_max_blocks (void)
+{
+  return kDataMax / 4096U;
+}
+
+extern "C" int native_ufs_raw_read (uint32_t lun, uint64_t lba, uint32_t blocks, void *dst)
+{
+  if (lun > 0xffU) return -1;
+  return hostRead4k (static_cast<uint8_t> (lun), lba, blocks, dst) == kIOReturnSuccess ? 0 : -1;
+}

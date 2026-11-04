@@ -231,8 +231,10 @@ kernel_args = [
   "sheng-cpufreq-min=800",
   "native-pmic=1",
   "sheng-wlan=3",
-  "sheng-wlan-pas=1",
+  "sheng-wlan-ufs=1",
 ]
+
+
 
 
 
