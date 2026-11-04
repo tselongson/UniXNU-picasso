@@ -1,3 +1,4 @@
+#include <stdarg.h>
 /*
  * hakios.picasso_wlan.cpp compatibility layer for UniXNU.
  *
@@ -248,4 +249,21 @@ picasso_usb_console_drive_poll(void)
 extern "C" __attribute__((weak)) void
 picasso_usb_reboot_fastboot(void)
 {
+}
+
+/* hakios.net.c initialises the virtio link it knows; this tree has its own. */
+extern "C" void
+hakios_virtio_net_init(void)
+{
+}
+
+/* hakios.sta.c's "say it even with wifi=1" channel. */
+extern "C" int
+hakios_wifi_tell(const char *format, ...)
+{
+	va_list ap;
+	va_start(ap, format);
+	vprintf(format, ap);
+	va_end(ap);
+	return 0;
 }
