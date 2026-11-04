@@ -393,8 +393,8 @@ extern "C" void native_wlan_modem_inventory(void)
         char longName[16];
         static const char hex[] = "0123456789ABCDEF";
         memcpy(longName, "modem.b", 7);
-        longName[7] = hex[(index >> 4) & 0xF];
-        longName[8] = hex[index & 0xF];
+        longName[7] = static_cast<char>('0' + (index / 10) % 10);
+        longName[8] = static_cast<char>('0' + index % 10);
         longName[9] = 0;
         shortName[0] = 'M';
         shortName[1] = 'O';
@@ -405,8 +405,8 @@ extern "C" void native_wlan_modem_inventory(void)
         shortName[6] = ' ';
         shortName[7] = ' ';
         shortName[8] = 'B';
-        shortName[9] = hex[(index >> 4) & 0xF];
-        shortName[10] = hex[index & 0xF];
+        shortName[9] = longName[7];
+        shortName[10] = longName[8];
         FatEntry entry;
         if (!fatFindFile(volume, longName, shortName, entry) || !entry.valid) {
             if (index == 0) continue;
@@ -605,16 +605,17 @@ extern "C" bool native_wlan_mpss_start(void)
             zeroDevice(region + offset, memsz);
             continue;
         }
+        // Segment files are named in decimal (modem.b00..modem.b33) and correspond one-to-one
+        // with program-header indices; a header with p_filesz 0 has no file.
         char longName[16];
         char shortName[12];
-        static const char hex[] = "0123456789ABCDEF";
         memcpy(longName, "modem.b", 7);
-        longName[7] = hex[(index >> 4) & 0xF];
-        longName[8] = hex[index & 0xF];
+        longName[7] = static_cast<char>('0' + (index / 10) % 10);
+        longName[8] = static_cast<char>('0' + index % 10);
         longName[9] = 0;
         memcpy(shortName, "MODEM   B", 9);
-        shortName[9] = hex[(index >> 4) & 0xF];
-        shortName[10] = hex[index & 0xF];
+        shortName[9] = longName[7];
+        shortName[10] = longName[8];
         shortName[11] = 0;
         FatEntry segment;
         if (!fatFindFile(volume, longName, shortName, segment) || !segment.valid) {
