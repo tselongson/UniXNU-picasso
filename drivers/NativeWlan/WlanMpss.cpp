@@ -470,6 +470,8 @@ constexpr uint32_t kPasSvc = 0x02;
 constexpr uint32_t kPasInitImage = 0x01;
 constexpr uint32_t kPasMemSetup = 0x02;
 constexpr uint32_t kPasAuthAndReset = 0x05;
+constexpr uint32_t kPasShutdown = 0x06;
+constexpr uint32_t kPasMssReset = 0x0a;
 constexpr uint32_t kArgInfoInitImage = 0x82;
 constexpr uint32_t kArgInfoMemSetup = 0x03;
 constexpr uint32_t kArgInfoAuth = 0x01;
@@ -716,6 +718,14 @@ extern "C" bool native_wlan_mpss_start(void)
             printf("PICASSO_WLAN mpss: metadata phys=%llx bytes=%u\n",
                    static_cast<unsigned long long>(metaPhys), mdt.size);
 
+            // The modem path in every vendor kernel asserts the MSS reset line before handing the
+            // image over (qcom_q6v5_mss.c: qcom_scm_pas_mss_reset(scm, false)), and shuts a
+            // running subsystem down first. A PIL that still thinks the modem is up refuses
+            // INIT_IMAGE, which is one reading of the 0xffcfffbb we measured.
+            const PasResult shutdown = pasCall(kPasShutdown, kArgInfoAuth, 0);
+            printf("PICASSO_WLAN mpss: shutdown a0=%08x a1=%08x\n", shutdown.reply.a0, shutdown.reply.a1);
+            const PasResult mssReset = pasCall(kPasMssReset, 0x01, 0);
+            printf("PICASSO_WLAN mpss: mss_reset(0) a0=%08x a1=%08x\n", mssReset.reply.a0, mssReset.reply.a1);
             PasResult init = pasCall(kPasInitImage, kArgInfoInitImage, metaPhys);
             printf("PICASSO_WLAN mpss: init meta a0=%08x a1=%08x ticks=%llu\n", init.reply.a0, init.reply.a1,
                    static_cast<unsigned long long>(init.ticks));
