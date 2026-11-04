@@ -18,7 +18,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = Path(os.environ.get('ADRENO620_FW_OUT') or
                (ROOT / 'build/adreno-picasso'))
-FW_DIR = Path(os.environ.get('ADRENO620_FW_DIR') or '/tmp/picasso-gpu-fw')
+# Staged in-tree so a clean checkout (and CI) can build the same image; the
+# files are the pins Adreno620Board.cpp validates by size and CRC32.
+FW_DIR = Path(os.environ.get('ADRENO620_FW_DIR') or (ROOT / 'firmware/adreno620'))
 
 FILES = {
     'gmu': 'a650_gmu.bin',

@@ -224,19 +224,8 @@ hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint6
 	return hakios_ufs_read_part(idx, offset, dst, len);
 }
 
-extern "C" bool
-hakios_mpss_rails(uint32_t level)
-{
-	(void)level;
-	return true;
-}
-
-extern "C" bool
-hakios_aop_mailbox_send(const char *text)
-{
-	(void)text;
-	return true;
-}
+/* hakios_mpss_rails() and hakios_aop_mailbox_send() live in HakiosQmp.cpp:
+ * the real RPMh votes and the AOP QMP mailbox. */
 
 /*
  * picasso_usb.c (the XNU console patch) keeps its poller static, but the WLAN

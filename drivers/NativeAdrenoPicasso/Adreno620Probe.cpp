@@ -66,6 +66,10 @@ int native_adreno620_cp_start(void) __attribute__((weak_import));
 int native_adreno620_cp_submit(uint32_t *fence) __attribute__((weak_import));
 int native_adreno620_cp_wait(uint32_t fence) __attribute__((weak_import));
 int native_adreno620_draw(void) __attribute__((weak_import));
+/* Defined by the generated build/adreno-picasso/adreno620_embedded_firmware.c
+ * when firmware/adreno620/ is staged. Nothing else calls it, so the probe has
+ * to hand the embedded blobs to native_adreno_set_firmware() itself. */
+void native_adreno620_set_embedded_firmware(void) __attribute__((weak_import));
 }
 
 namespace {
@@ -302,6 +306,14 @@ int opSmmu(void *, const ProbeSmmuPlan &plan)
 int opGmuFirmware(void *, uint32_t *crc32, uint32_t *bytes)
 {
     if (!gIo || !crc32 || !bytes) return -1;
+    /* Publish the embedded A620 GMU/SQE/ZAP images before the first check. */
+    static bool firmwarePublished = false;
+    if (!firmwarePublished) {
+        firmwarePublished = true;
+        if (native_adreno620_set_embedded_firmware) {
+            native_adreno620_set_embedded_firmware();
+        }
+    }
     if (!gFirmwareGmu || !gFirmwareGmuBytes || !gFirmwareSqe ||
         !gFirmwareSqeBytes) {
         printf("PICASSO_GPU firmware: GMU/SQE blobs were not staged\n");
