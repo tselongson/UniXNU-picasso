@@ -14,11 +14,13 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSSharedPtr.h>
 #include <pexpert/pexpert.h>
+#include <kern/thread.h>
 #include <string.h>
 extern "C" {
 #include "WlanBoard.h"
 #include "WlanFirmware.h"
 }
+#include "WlanSmem.h"   // ported SMEM/SMP2P decoders (Trogdor, BSD-2)
 
 extern "C" {
 // Boot-monitor diagnostics. The names are the contract for the main session's boot report.
@@ -255,6 +257,184 @@ extern "C" void native_wlan_set_firmware(const uint8_t *data, size_t size) {
 // Callable from the boot monitor. `sheng-wlan=<n>` selects the last stage to run; without it the probe does
 // nothing. The entry point depends only on IOKit and its own pure helpers, so a boot monitor can declare it
 // weak_import and link whether or not this driver is included.
+// Stage 1 reads the WCSS block, and on this board that block hangs the bus when it is touched
+// before its rail has been voted (the v266-v272 boot stalls were exactly this access). The MMIO
+// therefore needs an explicit sheng-wlan-mmio=1 on top of sheng-wlan=<n>; without it the stage
+// reports why it was skipped and the text-only stages still run.
+static int stage1_gated(void *ctx) {
+    unsigned mmio = 0;
+    if (!PE_parse_boot_argn("sheng-wlan-mmio", &mmio, sizeof mmio) || mmio != 1) {
+        printf("PICASSO_WLAN stage1 skipped: WCSS MMIO requires sheng-wlan-mmio=1 (rail not voted)\n");
+        return 0;
+    }
+    return stage1(ctx);
+}
+
+// SMEM inventory: safe on every boot (SMEM lives in DDR and needs no WLAN rail). This is the first
+// real bring-up rung from the migration plan - it tells us whether the modem partition, the SMP2P
+// pair and the GLINK items exist, which is what the WLFW transport will later sit on.
+static int smemRead(void *context, uint32_t offset, void *buffer, uint32_t bytes) {
+    if (offset > 0x200000u || bytes > 0x200000u - offset) return -1;
+    memcpy(buffer, (const uint8_t *)context + offset, bytes);
+    return 0;
+}
+
+static void wlanSmemInventory(void) {
+    IODeviceMemory *memory = IODeviceMemory::withRange(0x80900000, 0x200000);
+    IOMemoryMap *map = memory ? memory->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
+    if (memory) memory->release();
+    if (!map) { printf("PICASSO_WLAN smem: window could not be mapped\n"); return; }
+    struct cw_reader reader = { (void *)map->getVirtualAddress(), 0x200000u, smemRead };
+    struct cw_smem smem = {};
+    const int rc = cw_smem_layout(&reader, &smem);
+    printf("PICASSO_WLAN smem: layout rc=%d global=%d modem=%d entries=%u\n",
+           rc, smem.has_global, smem.has_modem, smem.count);
+    if (smem.has_modem) {
+        struct cw_item item = {};
+        const int irc = cw_smem_find(&reader, &smem.modem, CW_SMP2P_IN, &item);
+        printf("PICASSO_WLAN smem: smp2p item %u rc=%d off=%u bytes=%u\n",
+               CW_SMP2P_IN, irc, item.offset, item.bytes);
+        if (irc == CW_OK) {
+            struct cw_smp2p s = {};
+            const int src = cw_smp2p_read(&reader, &item, &s);
+            printf("PICASSO_WLAN smem: smp2p rc=%d version=%u state=%u valid=%u\n",
+                   src, s.version, s.state, s.valid);
+        }
+    }
+    const uint32_t items[3] = { CW_GLINK_DESC, CW_GLINK_TX, CW_GLINK_RX };
+    for (unsigned i = 0; i < 3; ++i) {
+        struct cw_item item = {};
+        const int irc = smem.has_modem ? cw_smem_find(&reader, &smem.modem, (uint16_t)items[i], &item) : CW_ABSENT;
+        printf("PICASSO_WLAN smem: glink %u rc=%d off=%u bytes=%u\n", items[i], irc, item.offset, item.bytes);
+    }
+}
+
+// PAS availability scan, probe only: SVC_PIL/PAS_IS_SUPPORTED (cmd 0x07) for every pas id.
+// It reads no memory and touches no subsystem state (Adreno620Cp.cpp uses the same query as a
+// control probe). The SMC convention is that file's: STD_CALL|SMC_64|OWNER_SIP, x6 carries the
+// session id of an interrupted secure call (x0==1 = INTERRUPTED; a retry without x6 wedges PIL).
+struct ScmReply { uint32_t a0, a1, a2, a3; uint64_t a6; };
+
+static ScmReply wlanScmCall(uint32_t function, uint32_t arginfo, uint64_t arg0) {
+    register uint64_t x0 __asm__("x0") = function;
+    register uint64_t x1 __asm__("x1") = arginfo;
+    register uint64_t x2 __asm__("x2") = arg0;
+    register uint64_t x3 __asm__("x3") = 0;
+    register uint64_t x4 __asm__("x4") = 0;
+    register uint64_t x5 __asm__("x5") = 0;
+    register uint64_t x6 __asm__("x6") = 0;
+    register uint64_t x7 __asm__("x7") = 0;
+    __asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3),
+        "+r"(x6), "+r"(x7)
+        : "r"(x4), "r"(x5)
+        : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16",
+          "x17", "memory");
+    return ScmReply{uint32_t(x0), uint32_t(x1), uint32_t(x2), uint32_t(x3), x6};
+}
+
+// Read-only raw block access exported by NativeUfs (additive integration hook).
+extern "C" uint32_t native_ufs_raw_max_blocks(void);
+extern "C" int native_ufs_raw_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst);
+extern "C" void native_ufs_raw_diag(uint32_t *out);
+extern "C" void native_wlan_modem_inventory(void);
+extern "C" bool native_wlan_mpss_start(void);
+extern "C" void native_wlan_glink_probe(void);
+extern "C" bool native_wlan_glink_attach(void);
+extern "C" void native_wlan_modem_scan(void);
+extern "C" void native_wlan_smp2p_poll(unsigned seconds);
+extern "C" void native_wlan_mpss_report(void);
+extern "C" kern_return_t kernel_thread_start(void (*)(void *, wait_result_t), void *, thread_t *);
+extern "C" void thread_deallocate(thread_t);
+static void wlanMpssLoaderStart(void);
+
+// Modem partition identity probe. picasso stores the modem FAT on LUN 4 starting at LBA 61606
+// (rawprogram4.xml: physical_partition_number=4, start_sector=61606, SECTOR_SIZE_IN_BYTES=4096).
+// Reading one block tells us whether the kernel can reach partitions outside the root window -
+// the prerequisite for loading MPSS firmware at runtime without touching silenzio's root path.
+static constexpr uint32_t kModemLun = 4;
+static constexpr uint64_t kModemLba = 61606;
+
+static void wlanModemPartitionProbe(void) {
+    unsigned enabled = 0;
+    if (!PE_parse_boot_argn("sheng-wlan-ufs", &enabled, sizeof enabled) || enabled < 1) return;
+    const uint32_t maxBlocks = native_ufs_raw_max_blocks();
+    uint8_t *sector = static_cast<uint8_t *>(IOMalloc(4096));
+    if (!sector) return;
+    memset(sector, 0, 4096);
+    // Control 1: LUN 0 LBA 0 is the GPT/MBR the root path already reads. If this fails too, the
+    // host is not ready rather than the LUN being wrong.
+    const int rcControl = native_ufs_raw_read(0, 0, 1, sector);
+    printf("PICASSO_WLAN ufs control lun=0 lba=0 rc=%d sig=%02x%02x\n", rcControl, sector[510], sector[511]);
+    uint32_t diag[5] = {0, 0, 0, 0, 0};
+    native_ufs_raw_diag(diag);
+    printf("PICASSO_WLAN ufs diag ready=%u scsi=%04x proto=%u ocs=%x cmd=%u\n",
+           diag[0], diag[1], diag[2], diag[3], diag[4]);
+    const int rc = native_ufs_raw_read(kModemLun, kModemLba, 1, sector);
+    const unsigned bps = sector[11] | (sector[12] << 8);
+    const unsigned spc = sector[13];
+    const unsigned rsv = sector[14] | (sector[15] << 8);
+    const unsigned nfat = sector[16];
+    const unsigned rootEnt = sector[17] | (sector[18] << 8);
+    unsigned total16 = sector[19] | (sector[20] << 8);
+    const unsigned total32 = sector[32] | (sector[33] << 8) | (sector[34] << 16) | (static_cast<unsigned>(sector[35]) << 24);
+    if (!total16) total16 = total32;
+    printf("PICASSO_WLAN ufs modem lun=%u lba=%llu rc=%d maxblk=%u oem=%.5s bps=%u spc=%u rsv=%u nfat=%u root=%u total=%u\n",
+           kModemLun, static_cast<unsigned long long>(kModemLba), rc, maxBlocks,
+           reinterpret_cast<const char *>(sector + 3), bps, spc, rsv, nfat, rootEnt, total16);
+    IOFree(sector, 4096);
+    // Same switch also walks the modem FAT and reports its firmware directory.
+    native_wlan_modem_inventory();
+    if (enabled >= 2) wlanMpssLoaderStart();
+}
+
+static void wlanPasScan(void) {
+    unsigned enabled = 0;
+    if (!PE_parse_boot_argn("sheng-wlan-pas", &enabled, sizeof enabled) || enabled != 1) return;
+    constexpr uint32_t kStdSipSmc64 = 0x42000000u;   // STD_CALL | SMC_64 | OWNER_SIP
+    constexpr uint32_t kSvcPil = 0x02u, kPasIsSupported = 0x07u;
+    for (uint32_t id = 0; id <= 20; ++id) {
+        const ScmReply r = wlanScmCall(kStdSipSmc64 | (kSvcPil << 8) | kPasIsSupported, 0x01u, id);
+        printf("PICASSO_WLAN pas: id=%u a0=%08x a1=%08x\n", id, r.a0, r.a1);
+    }
+}
+
+
+static volatile bool gMpssLoaderStarted = false;
+
+static void wlanMpssLoader(void *, wait_result_t) {
+    // Let the boot page and the root mount settle before touching 250 MB of carveout.
+    IOSleep(8000);
+    unsigned mode = 0;
+    PE_parse_boot_argn("sheng-wlan-ufs", &mode, sizeof mode);
+    printf("PICASSO_WLAN mpss: loader thread begin mode=%u\n", mode);
+    // Baseline: whether the modem endpoint is already up before we load anything.
+    if (mode >= 3) native_wlan_glink_probe();
+    if (mode >= 4) native_wlan_modem_scan();
+    const bool started = native_wlan_mpss_start();
+    if (mode >= 3) {
+        // SMP2P first: it is the cheapest evidence that MPSS came up, before any GLINK traffic.
+        native_wlan_glink_attach();
+        native_wlan_smp2p_poll(started ? 60 : 10);
+        IOSleep(2000);
+        native_wlan_glink_probe();
+    }
+    printf("PICASSO_WLAN mpss: loader thread end started=%u\n", started ? 1U : 0U);
+    // The CDC link comes up long after these prints, so repeat the outcome for a while.
+    for (unsigned step = 0; step < 16; ++step) {
+        IOSleep(15000);
+        native_wlan_mpss_report();
+    }
+}
+
+static void wlanMpssLoaderStart(void) {
+    if (gMpssLoaderStarted) return;
+    thread_t thread = nullptr;
+    if (kernel_thread_start(wlanMpssLoader, nullptr, &thread) == KERN_SUCCESS) {
+        thread_deallocate(thread);
+        gMpssLoaderStarted = true;
+    }
+}
+
 extern "C" void native_wlan_probe(void) {
     unsigned stage = 0;
     if (!PE_parse_boot_argn("sheng-wlan", &stage, sizeof stage) || stage < 1) return;
@@ -262,12 +442,28 @@ extern "C" void native_wlan_probe(void) {
     if (stage > WLAN_PROBE_STAGE_MAX) stage = WLAN_PROBE_STAGE_MAX;
     native_wlan_stage_req = stage;
 
+    // DDR-only inventory first: it cannot hang a bus and is the ground truth for the transport.
+    wlanSmemInventory();
+    // PAS scan (opt-in): tells us which subsystem ids the secure monitor can boot.
+    wlanPasScan();
+    // Modem partition reachability (opt-in): proves LUN 4 is readable from the kernel.
+    wlanModemPartitionProbe();
+
     Session session = {};
-    const struct wlan_probe_ops ops = {&session, stage1, stage2, stage3, stage4, stage5};
+    const struct wlan_probe_ops ops = {&session, stage1_gated, stage2, stage3, stage4, stage5};
     struct wlan_probe_state state;
     const int rc = wlan_probe_run(&ops, stage, &state);
     copyState(state);
     printf("PICASSO_WLAN end stage=%u step=%u error=%d transport=%s\n", native_wlan_stage, native_wlan_step,
            native_wlan_error, wlan_transport_name(static_cast<int>(native_wlan_transport)));
     (void)rc;
+}
+
+// The integrator stages firmware through native_wlan_set_firmware(); the weak externs above bind
+// only when a blob was compiled into the image, which this tree never does. Define the absent-blob
+// objects so the final link resolves the data symbols; size 0 keeps stage3 on the honest
+// "no firmware staged" path.
+extern "C" {
+const uint8_t native_wlan_firmware[1] = {0};
+const uint32_t native_wlan_firmware_size = 0;
 }

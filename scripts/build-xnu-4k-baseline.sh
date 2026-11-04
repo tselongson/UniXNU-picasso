@@ -124,6 +124,14 @@ if [ "$PICASSO_CPUFREQ" = 1 ]; then
   if [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-picasso-cpufreq.py; fi
 fi
 ADRENO620_PROBE=${XNU_ADRENO620_PROBE:-0}
+NATIVE_BUTTONS=${XNU_NATIVE_BUTTONS:-0}
+NATIVE_PMIC=${XNU_NATIVE_PMIC:-0}
+NATIVE_WLAN=${XNU_NATIVE_WLAN:-0}
+# Our three archives are built here because the tip's archive phase enumerates only its own drivers;
+# the link-input guards below then find them. Additive hook, no existing path changes.
+if [ "$NATIVE_BUTTONS" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-native-buttons.py; fi
+if [ "$NATIVE_PMIC" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-native-pmic.py; fi
+if [ "$NATIVE_WLAN" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-native-wlan.py; fi
 if [ "$ADRENO620_PROBE" != 0 ] && [ "$ADRENO620_PROBE" != 1 ]; then
   echo 'XNU_ADRENO620_PROBE must be 0 or 1' >&2
   exit 1
@@ -832,6 +840,22 @@ PY_BINDINGS
     test -f "$ADRENO620_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ADRENO620_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ADRENO620_ARCHIVE"
+  fi
+  if [ "$NATIVE_BUTTONS" = 1 ]; then
+    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ROOT/build/buttons/libNativeButtons.a"
+    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ROOT/build/buttons/libNativeButtons.a"
+  fi
+  if [ "$NATIVE_PMIC" = 1 ]; then
+    PMIC_ARCHIVE=$ROOT/build/native-pmic/libNativePmic.a
+    test -f "$PMIC_ARCHIVE"
+    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$PMIC_ARCHIVE"
+    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $PMIC_ARCHIVE"
+  fi
+  if [ "$NATIVE_WLAN" = 1 ]; then
+    WLAN_ARCHIVE=$ROOT/build/native-wlan/libNativeWlan.a
+    test -f "$WLAN_ARCHIVE"
+    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$WLAN_ARCHIVE"
+    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $WLAN_ARCHIVE"
   fi
   KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES ${XNU_EXTRA_LD_ARCHIVES:-}"
   EXTRA_MAKE_ARGS+=("LD_KERNEL_ARCHIVES=$KERNEL_EXTRA_ARCHIVES")
