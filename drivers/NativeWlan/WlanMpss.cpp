@@ -171,43 +171,101 @@ bool fatReadChain(const FatVolume &volume, uint32_t firstCluster, uint32_t bytes
 }
 
 
-// Scans one directory (a cluster chain) for an 8.3 name. The modem volume keeps its payload in a
-// single subdirectory, so the fixed root area alone is not enough.
-bool fatFindInDirectory(const FatVolume &volume, uint32_t firstCluster, const char *shortName,
-                        FatEntry &out, unsigned depth)
+// The modem volume stores its payload under long file names: the 8.3 aliases are generated
+// (WNORW3~2JSN), so matching must use the LFN entries that precede each short entry. This walker
+// assembles those names and matches case-insensitively, one directory tree at a time.
+void lfnClear(uint16_t *units, unsigned &count, unsigned &expected)
 {
-    if (depth > 2 || firstCluster < 2 || firstCluster >= 0xFFF8U) return false;
+    for (unsigned index = 0; index < 260; ++index) units[index] = 0;
+    count = 0;
+    expected = 0;
+}
+
+void lfnAdd(uint16_t *units, unsigned &count, unsigned &expected, const uint8_t *entry)
+{
+    const unsigned sequence = entry[0] & 0x1f;
+    if (!sequence) return;
+    const uint16_t last = static_cast<uint16_t>(entry[0] | 0x40);
+    if (entry[0] & 0x40) expected = sequence;      // last part carries bit 6
+    if (last == sequence && !expected) expected = sequence;
+    unsigned at = (sequence - 1) * 13;
+    const unsigned offsets[3] = {1, 14, 28};
+    for (unsigned group = 0; group < 3; ++group) {
+        for (unsigned index = 0; index < (group == 2 ? 4u : 5u); ++index) {
+            const uint32_t offset = offsets[group] + index * 2;
+            const uint16_t value = static_cast<uint16_t>(entry[offset] | (entry[offset + 1] << 8));
+            if (at < 260) units[at] = value;
+            ++at;
+        }
+    }
+    if (at > count) count = at;
+}
+
+bool lfnMatches(const uint16_t *units, unsigned count, const char *target)
+{
+    if (!count) return false;
+    unsigned index = 0;
+    for (unsigned at = 0; at < count && index < 259; ++at) {
+        const uint16_t value = units[at];
+        if (value == 0 || value == 0xFFFF) break;
+        char c = value < 0x80 ? static_cast<char>(value) : '?';
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (target[index] == 0 || target[index] != c) return false;
+        ++index;
+    }
+    return target[index] == 0;
+}
+
+bool scanDirectory(const FatVolume &volume, uint32_t firstCluster, const char *longName,
+                   const char *shortName, FatEntry &out, unsigned depth)
+{
     const uint32_t clusterBytes = volume.sectorsPerCluster * volume.bytesPerSector;
-    // A directory is at most a handful of clusters here; walk up to 16 of them.
+    if (clusterBytes > 4096) return false;
     uint8_t buffer[4096];
+    uint16_t units[260];
+    unsigned unitCount = 0, unitExpected = 0;
+    lfnClear(units, unitCount, unitExpected);
     uint32_t cluster = firstCluster;
-    for (unsigned step = 0; step < 16 && cluster >= 2 && cluster < 0xFFF8U; ++step) {
-        if (clusterBytes > sizeof buffer) return false;
+    for (unsigned step = 0; step < 24 && cluster >= 2 && cluster < 0xFFF8U; ++step) {
         const uint64_t offset = volume.dataByteOffset + static_cast<uint64_t>(cluster - 2) * clusterBytes;
         if (!readPartitionBytes(volume, offset, clusterBytes, buffer)) return false;
         for (uint32_t index = 0; index + 32 <= clusterBytes; index += 32) {
             const uint8_t *entry = buffer + index;
             if (entry[0] == 0) return false;
-            if (entry[0] == 0xE5) continue;
-            if (entry[11] == 0x0F) continue;
-            if (entry[11] & 0x08) continue;
-            const uint32_t child = static_cast<uint32_t>(le16(entry + 26));
-            if ((entry[11] & 0x10) && depth < 2) {
-                if (fatFindInDirectory(volume, child, shortName, out, depth + 1)) return true;
+            if (entry[0] == 0xE5) { lfnClear(units, unitCount, unitExpected); continue; }
+            if (entry[11] == 0x0F) { lfnAdd(units, unitCount, unitExpected, entry); continue; }
+            if (entry[11] & 0x08) { lfnClear(units, unitCount, unitExpected); continue; }
+            const bool isDir = (entry[11] & 0x10) != 0;
+            const bool nameHit = longName ? lfnMatches(units, unitCount, longName)
+                                          : (memcmp(entry, shortName, 11) == 0);
+            if (isDir) {
+                lfnClear(units, unitCount, unitExpected);
+                if (entry[0] == '.') continue;
+                if (depth < 3) {
+                    const uint32_t child = static_cast<uint32_t>(le16(entry + 26));
+                    if (scanDirectory(volume, child, longName, shortName, out, depth + 1)) return true;
+                }
                 continue;
             }
-            if (memcmp(entry, shortName, 11) != 0) continue;
-            uint32_t nameLength = 0;
-            for (unsigned c = 0; c < 8 && entry[c] != ' '; ++c) out.name[nameLength++] = static_cast<char>(entry[c]);
-            if (entry[8] != ' ') {
-                out.name[nameLength++] = '.';
-                for (unsigned c = 8; c < 11 && entry[c] != ' '; ++c) out.name[nameLength++] = static_cast<char>(entry[c]);
+            if (!nameHit) {
+                lfnClear(units, unitCount, unitExpected);
+                continue;
             }
-            out.name[nameLength] = 0;
+            out.valid = true;
+            out.directory = false;
             out.size = le32(entry + 28);
             out.firstCluster = static_cast<uint32_t>(le16(entry + 26));
-            out.directory = false;
-            out.valid = true;
+            out.name[0] = 0;
+            if (longName) {
+                unsigned at = 0;
+                for (; at < unitCount && at < 63; ++at) {
+                    const uint16_t value = units[at];
+                    if (!value || value == 0xFFFF) break;
+                    out.name[at] = value < 0x80 ? static_cast<char>(value) : '?';
+                }
+                out.name[at] = 0;
+            }
+            lfnClear(units, unitCount, unitExpected);
             return true;
         }
         uint32_t next = 0;
@@ -217,15 +275,16 @@ bool fatFindInDirectory(const FatVolume &volume, uint32_t firstCluster, const ch
     return false;
 }
 
-// Walks the root directory and fills `out` for the requested short name
-// ("MODEM   MDT" style: 8.3, space padded, upper case). Long-name entries are
-// skipped because the firmware files use plain 8.3 names.
-bool fatFindFile(const FatVolume &volume, const char *shortName, FatEntry &out)
+// Public entry: root first (fixed area), then the subdirectories it points at.
+bool fatFindFile(const FatVolume &volume, const char *longName, const char *shortName, FatEntry &out)
 {
     out.valid = false;
     const uint32_t entryBytes = volume.rootEntries * 32;
     const uint32_t maxChunk = 2048;
     uint8_t buffer[maxChunk];
+    uint16_t units[260];
+    unsigned unitCount = 0, unitExpected = 0;
+    lfnClear(units, unitCount, unitExpected);
     for (uint32_t offset = 0; offset < entryBytes; offset += maxChunk) {
         uint32_t chunk = entryBytes - offset;
         if (chunk > maxChunk) chunk = maxChunk;
@@ -233,37 +292,17 @@ bool fatFindFile(const FatVolume &volume, const char *shortName, FatEntry &out)
         for (uint32_t index = 0; index + 32 <= chunk; index += 32) {
             const uint8_t *entry = buffer + index;
             if (entry[0] == 0) return true;
-            if (entry[0] == 0xE5) continue;
-            if (entry[11] == 0x0F) continue;
-            if (entry[11] & 0x08) continue;
-            if (memcmp(entry, shortName, 11) != 0) continue;
-            uint32_t nameLength = 0;
-            for (unsigned c = 0; c < 8 && entry[c] != ' '; ++c) out.name[nameLength++] = static_cast<char>(entry[c]);
-            if (entry[8] != ' ') {
-                out.name[nameLength++] = '.';
-                for (unsigned c = 8; c < 11 && entry[c] != ' '; ++c) out.name[nameLength++] = static_cast<char>(entry[c]);
+            if (entry[0] == 0xE5) { lfnClear(units, unitCount, unitExpected); continue; }
+            if (entry[11] == 0x0F) { lfnAdd(units, unitCount, unitExpected, entry); continue; }
+            if (entry[11] & 0x08) { lfnClear(units, unitCount, unitExpected); continue; }
+            if (entry[11] & 0x10) {
+                lfnClear(units, unitCount, unitExpected);
+                if (entry[0] == '.') continue;
+                const uint32_t child = static_cast<uint32_t>(le16(entry + 26));
+                if (scanDirectory(volume, child, longName, shortName, out, 1)) return true;
+                continue;
             }
-            out.name[nameLength] = 0;
-            out.size = le32(entry + 28);
-            out.firstCluster = le16(entry + 26);
-            out.directory = (entry[11] & 0x10) != 0;
-            out.valid = true;
-            return true;
-        }
-    }
-    // The fixed root area can be just a pointer directory; search the subdirectories it names.
-    for (uint32_t offset = 0; offset < entryBytes; offset += maxChunk) {
-        uint32_t chunk = entryBytes - offset;
-        if (chunk > maxChunk) chunk = maxChunk;
-        if (!readPartitionBytes(volume, volume.rootByteOffset + offset, chunk, buffer)) return false;
-        for (uint32_t index = 0; index + 32 <= chunk; index += 32) {
-            const uint8_t *entry = buffer + index;
-            if (entry[0] == 0) return true;
-            if (entry[0] == 0xE5 || entry[11] == 0x0F || (entry[11] & 0x08)) continue;
-            if (!(entry[11] & 0x10)) continue;
-            if (entry[0] == '.') continue;
-            const uint32_t child = static_cast<uint32_t>(le16(entry + 26));
-            if (fatFindInDirectory(volume, child, shortName, out, 1)) return true;
+            lfnClear(units, unitCount, unitExpected);
         }
     }
     return true;
@@ -325,7 +364,7 @@ extern "C" void native_wlan_modem_inventory(void)
            static_cast<unsigned long long>(volume.dataByteOffset));
 
     FatEntry mdt;
-    if (!fatFindFile(volume, "MODEM   MDT", mdt) || !mdt.valid) {
+    if (!fatFindFile(volume, "modem.mdt", "MODEM   MDT", mdt) || !mdt.valid) {
         printf("PICASSO_WLAN mpss: modem.mdt not found\n");
         return;
     }
@@ -353,7 +392,12 @@ extern "C" void native_wlan_modem_inventory(void)
     uint64_t segmentBytes = 0;
     for (unsigned index = 0; index < 64; ++index) {
         char shortName[12];
+        char longName[16];
         static const char hex[] = "0123456789ABCDEF";
+        memcpy(longName, "modem.b", 7);
+        longName[7] = hex[(index >> 4) & 0xF];
+        longName[8] = hex[index & 0xF];
+        longName[9] = 0;
         shortName[0] = 'M';
         shortName[1] = 'O';
         shortName[2] = 'D';
@@ -366,7 +410,7 @@ extern "C" void native_wlan_modem_inventory(void)
         shortName[9] = hex[(index >> 4) & 0xF];
         shortName[10] = hex[index & 0xF];
         FatEntry entry;
-        if (!fatFindFile(volume, shortName, entry) || !entry.valid) {
+        if (!fatFindFile(volume, longName, shortName, entry) || !entry.valid) {
             if (index == 0) continue;
             break;
         }
@@ -487,7 +531,7 @@ extern "C" bool native_wlan_mpss_start(void)
         return false;
     }
     FatEntry mdt;
-    if (!fatFindFile(volume, "MODEM   MDT", mdt) || !mdt.valid) {
+    if (!fatFindFile(volume, "modem.mdt", "MODEM   MDT", mdt) || !mdt.valid) {
         printf("PICASSO_WLAN mpss: modem.mdt missing\n");
         return false;
     }
@@ -560,15 +604,20 @@ extern "C" bool native_wlan_mpss_start(void)
             zeroDevice(region + offset, memsz);
             continue;
         }
+        char longName[16];
         char shortName[12];
         static const char hex[] = "0123456789ABCDEF";
+        memcpy(longName, "modem.b", 7);
+        longName[7] = hex[(index >> 4) & 0xF];
+        longName[8] = hex[index & 0xF];
+        longName[9] = 0;
         memcpy(shortName, "MODEM   B", 9);
         shortName[9] = hex[(index >> 4) & 0xF];
         shortName[10] = hex[index & 0xF];
         shortName[11] = 0;
         FatEntry segment;
-        if (!fatFindFile(volume, shortName, segment) || !segment.valid) {
-            printf("PICASSO_WLAN mpss: segment %u file %s missing\n", index, shortName);
+        if (!fatFindFile(volume, longName, shortName, segment) || !segment.valid) {
+            printf("PICASSO_WLAN mpss: segment %u file %s missing\n", index, longName);
             ok = false;
             break;
         }
