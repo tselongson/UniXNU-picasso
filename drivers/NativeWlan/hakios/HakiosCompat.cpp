@@ -233,3 +233,19 @@ hakios_aop_mailbox_send(const char *text)
 	(void)text;
 	return true;
 }
+
+/*
+ * picasso_usb.c (the XNU console patch) keeps its poller static, but the WLAN
+ * driver's long PAS/QRTR waits call it to keep the CDC ring drained. Weak empty
+ * definitions keep the static archive link whole; the XNU patch's own copy is
+ * used inside that translation unit, and this one is only the external name.
+ */
+extern "C" __attribute__((weak)) void
+picasso_usb_console_drive_poll(void)
+{
+}
+
+extern "C" __attribute__((weak)) void
+picasso_usb_reboot_fastboot(void)
+{
+}
