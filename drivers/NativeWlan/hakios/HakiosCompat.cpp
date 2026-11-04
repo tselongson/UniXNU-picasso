@@ -252,6 +252,37 @@ picasso_usb_reboot_fastboot(void)
 }
 
 /* hakios.net.c initialises the virtio link it knows; this tree has its own. */
+extern "C" void hakios_net_init(void);
+extern "C" void picasso_modem_init(void);
+
+static void
+picasso_wlan_boot_thread(void *arg, wait_result_t wr)
+{
+	(void)arg;
+	(void)wr;
+	/* Leave bsd_init alone: ifnet_allocate_extended needs the network stack
+	 * settled, and a blocking WCN3990 bring-up here would keep the CDC console
+	 * from ever starting. Five seconds is past the root publication. */
+	IOSleep(5000);
+	printf("PICASSO_WLAN: deferred init thread: starting en0 and WCN3990\n");
+	hakios_net_init();
+	picasso_modem_init();
+	printf("PICASSO_WLAN: deferred init thread: returned\n");
+	thread_terminate(current_thread());
+}
+
+extern "C" void
+picasso_wlan_deferred_start(void)
+{
+	thread_t thread;
+	if (kernel_thread_start(picasso_wlan_boot_thread, NULL, &thread) == KERN_SUCCESS) {
+		thread_deallocate(thread);
+	} else {
+		printf("PICASSO_WLAN: cannot start the deferred init thread\n");
+	}
+}
+
+
 extern "C" void
 hakios_virtio_net_init(void)
 {

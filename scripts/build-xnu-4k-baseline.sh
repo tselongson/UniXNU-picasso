@@ -72,10 +72,8 @@ p = Path('.cache/xnu-work/bsd/kern/bsd_init.c')
 s = p.read_text()
 old = '\tprintf(copyright);\n'
 add = ('\t{\n'
-       '\t\textern void hakios_net_init(void);\n'
-       '\t\textern void picasso_modem_init(void);\n'
-       '\t\thakios_net_init();\n'
-       '\t\tpicasso_modem_init();\n'
+       '\t\textern void picasso_wlan_deferred_start(void);\n'
+       '\t\tpicasso_wlan_deferred_start();\n'
        '\t}\n')
 if 'picasso_modem_init' not in s and old in s:
     s = s.replace(old, old + add, 1)
