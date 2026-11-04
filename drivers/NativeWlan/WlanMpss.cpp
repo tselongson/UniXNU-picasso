@@ -18,6 +18,7 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <IOKit/IOPlatformExpert.h>
 #include <pexpert/pexpert.h>
 #include <string.h>
 

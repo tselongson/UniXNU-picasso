@@ -73,13 +73,13 @@ uint16_t readLe16(volatile const uint8_t *p)
     return static_cast<uint16_t>(p[0] | (p[1] << 8));
 }
 
-bool smemReadCallback(void *context, uint32_t offset, void *dst, uint32_t bytes)
+int smemReadCallback(void *context, uint32_t offset, void *dst, uint32_t bytes)
 {
     volatile const uint8_t *base = static_cast<volatile const uint8_t *>(context);
-    if (!base || !dst || offset + bytes > kSmemSize) return false;
+    if (!base || !dst || offset + bytes > kSmemSize) return CW_BOUNDS;
     uint8_t *out = static_cast<uint8_t *>(dst);
     for (uint32_t index = 0; index < bytes; ++index) out[index] = base[offset + index];
-    return true;
+    return CW_OK;
 }
 
 void fifoWrite(uint32_t head, const void *data, uint32_t bytes)
