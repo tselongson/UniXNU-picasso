@@ -242,11 +242,12 @@ kernel_args = [
   "native-buttons=1",
   "native-pmic=1",
   "sheng-wlan=3",
-  "sheng-wlan-ufs=1",
+  "sheng-wlan-ufs=3",
   "sheng-cpufreq=4",
   "sheng-cpufreq-cap=1600",
   "sheng-cpufreq-min=800",
 ]
+
 
 # Stage-5 blind-spot instrumentation (docs/zh/guide/debugging.md 颜色条):
 # scripts/patch-xnu-entry-probe.py (ported from UniXNU-sheng; it adapts itself

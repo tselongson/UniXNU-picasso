@@ -470,31 +470,39 @@ constexpr uint32_t kPasSvc = 0x02;
 constexpr uint32_t kPasInitImage = 0x01;
 constexpr uint32_t kPasMemSetup = 0x02;
 constexpr uint32_t kPasAuthAndReset = 0x05;
-constexpr uint32_t kPasShutdown = 0x06;   /* measured: never returns with the modem off */
-constexpr uint32_t kPasMssReset = 0x0a;
-bool gAllowReset = false;
+/* Linux qcom_q6v5_pas.c: every modern mpss_resource descriptor (sm6350, sm8150,
+ * sm8350, sm8450, sm8550...) uses pas_id 4 for modem.mdt. pas_id 1 is ADSP/LPASS.
+ * Our PAS_IS_SUPPORTED scan reported 4 supported. The previous value 1 made TZ
+ * answer PAS_INIT_IMAGE with 0xffcfffbb. */
+constexpr uint32_t kModemPasId = 4;
 constexpr uint32_t kArgInfoInitImage = 0x82;
 constexpr uint32_t kArgInfoMemSetup = 0x03;
 constexpr uint32_t kArgInfoAuth = 0x01;
 constexpr uint32_t kScmSipStd = 0x42000000u;
-constexpr uint32_t kModemPasId = 1;
 
 struct PasResult { ScmReply reply; uint64_t ticks; };
 
 PasResult pasCall(uint32_t command, uint32_t arginfo, uint64_t arg0, uint64_t arg1 = 0)
 {
+    const uint32_t function = kScmSipStd | (kPasSvc << 8) | command;
     uint64_t pmr = 0, daif = 0, begin = 0, end = 0;
+    /* wf120: mask Non-secure interrupt delivery for the first attempt only. */
     __asm__ volatile("mrs %0, icc_pmr_el1" : "=r"(pmr));
     __asm__ volatile("mrs %0, daif" : "=r"(daif));
     __asm__ volatile("msr daifset, #2" ::: "memory");
     __asm__ volatile("msr icc_pmr_el1, %0" :: "r"(UINT64_C(0)) : "memory");
     __asm__ volatile("isb" ::: "memory");
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(begin));
-    const ScmReply reply = scmSipCall(kScmSipStd | (kPasSvc << 8) | command, arginfo, kModemPasId, arg0, arg1);
+    ScmReply reply = scmSipCall(function, arginfo, kModemPasId, arg0, arg1);
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(end));
     __asm__ volatile("msr icc_pmr_el1, %0" :: "r"(pmr) : "memory");
     __asm__ volatile("msr daif, %0" :: "r"(daif) : "memory");
     __asm__ volatile("isb" ::: "memory");
+    /* wf112: QCOM_SCM_INTERRUPTED (a0 == 1) carries a session id in x6; resuming
+     * without it wedges the PIL session. Retries run unmasked. */
+    for (unsigned attempt = 0; reply.a0 == 1u && attempt < 64; ++attempt) {
+        reply = scmSipCall(1u, arginfo, kModemPasId, arg0, arg1, 0, reply.a6);
+    }
     return PasResult{reply, end - begin};
 }
 
@@ -565,39 +573,113 @@ extern "C" bool native_wlan_mpss_start(void)
     const uint16_t phentsize = le16(meta + 42);
     const uint16_t phnum = le16(meta + 44);
 
-    // First pass: physical span of the image.
-    uint64_t minAddress = ~0ULL, maxAddress = 0, imageBytes = 0;
-    for (unsigned index = 0; index < phnum; ++index) {
+    /* Linux mdt_loader.c: mdt_phdr_loadable() = PT_LOAD && (flags & 0x07000000) != HASH
+     * && p_memsz != 0. The hash phdr (type 0, flags 0x02200000) is metadata only and must
+     * never be staged into the carveout or counted in the image span. */
+    constexpr uint32_t kMdtTypeMask = 0x07000000u;
+    constexpr uint32_t kMdtTypeHash = 0x02000000u;
+    constexpr uint32_t kMdtRelocatable = 0x08000000u;
+    const uint32_t ehdrSize = (phnum && phoff + 32 <= mdt.size) ? le32(meta + phoff + 16) : 0;
+    uint32_t hashIndex = 0, hashSize = 0;
+    for (unsigned index = 1; index < phnum; ++index) {
         const uint64_t at = static_cast<uint64_t>(phoff) + static_cast<uint64_t>(index) * phentsize;
-        if (at + 32 > mdt.size) { IOFree(meta, mdt.size); return false; }
-        const uint8_t *ph = meta + at;
-        const uint32_t type = le32(ph + 0);
-        const uint32_t paddr = le32(ph + 12);
-        const uint32_t filesz = le32(ph + 16);
-        const uint32_t memsz = le32(ph + 20);
-        // PT_LOAD segments make up the image; a non-PT_LOAD header with a plausible address is the
-        // hash table, which the secure monitor reads from the region it names (0x9b800000 here).
-        const bool loadable = type == 1 || (paddr >= 0x80000000U && filesz);
-        if (!loadable) continue;
-        if (paddr < minAddress) minAddress = paddr;
-        const uint64_t end = static_cast<uint64_t>(paddr) + (memsz > filesz ? memsz : filesz);
-        if (end > maxAddress) maxAddress = end;
-        imageBytes += memsz;
+        if (at + 32 > mdt.size) break;
+        if ((le32(meta + at + 24) & kMdtTypeMask) == kMdtTypeHash) {
+            hashIndex = index;
+            hashSize = le32(meta + at + 16);
+            break;
+        }
     }
-    const uint64_t span = (maxAddress - minAddress + 0xfffffULL) & ~0xfffffULL;
-    printf("PICASSO_WLAN mpss: image base=%llx span=%llx memsz=%llu phdrs=%u\n",
-           static_cast<unsigned long long>(minAddress), static_cast<unsigned long long>(span),
-           static_cast<unsigned long long>(imageBytes), phnum);
-
-    // The carveout is fixed by the image; map it device-uncached and stage every segment.
-    IODeviceMemory *carveout = IODeviceMemory::withRange(minAddress, span);
-    if (!carveout) {
-        printf("PICASSO_WLAN mpss: carveout descriptor failed\n");
+    if (!hashIndex || !ehdrSize || !hashSize || ehdrSize + hashSize > mdt.size) {
+        printf("PICASSO_WLAN mpss: no hash segment (ehdr=%u hash=%u idx=%u size=%u)\n",
+               ehdrSize, hashSize, hashIndex, mdt.size);
         IOFree(meta, mdt.size);
         return false;
     }
-    IOMemoryMap *carveoutMap = carveout->map(kIOMapAnywhere | kIOMapInhibitCache);
-    carveout->release();
+    /* qcom_mdt_read_metadata(): ELF header directly followed by the hash segment, no padding.
+     * Split firmware packs the hash after the ELF header (offset = phdrs[0].p_filesz). */
+    const uint32_t metadataBytes = ehdrSize + hashSize;
+    uint8_t *metadata = static_cast<uint8_t *>(IOMalloc(metadataBytes));
+    if (!metadata) { IOFree(meta, mdt.size); return false; }
+    memcpy(metadata, meta, ehdrSize);
+    memcpy(metadata + ehdrSize, meta + ehdrSize, hashSize);
+    printf("PICASSO_WLAN mpss: metadata ehdr=%u hash=%u total=%u mdt=%u pas=%u\n",
+           ehdrSize, hashSize, metadataBytes, mdt.size, kModemPasId);
+
+    uint64_t minAddress = ~0ULL, maxAddress = 0;
+    bool relocate = false;
+    for (unsigned index = 0; index < phnum; ++index) {
+        const uint64_t at = static_cast<uint64_t>(phoff) + static_cast<uint64_t>(index) * phentsize;
+        if (at + 32 > mdt.size) { IOFree(metadata, metadataBytes); IOFree(meta, mdt.size); return false; }
+        const uint8_t *ph = meta + at;
+        const uint32_t flags = le32(ph + 24);
+        const uint32_t memsz = le32(ph + 20);
+        if (le32(ph + 0) != 1 || (flags & kMdtTypeMask) == kMdtTypeHash || !memsz) continue;
+        if (flags & kMdtRelocatable) relocate = true;
+        const uint32_t paddr = le32(ph + 12);
+        if (paddr < minAddress) minAddress = paddr;
+        const uint64_t high = (static_cast<uint64_t>(paddr) + memsz + 0xfffULL) & ~0xfffULL;
+        if (high > maxAddress) maxAddress = high;
+    }
+    const uint64_t span = maxAddress - minAddress;
+    printf("PICASSO_WLAN mpss: image base=%llx span=%llx reloc=%u phdrs=%u\n",
+           static_cast<unsigned long long>(minAddress), static_cast<unsigned long long>(span),
+           relocate ? 1U : 0U, phnum);
+
+    /* PAS_INIT_IMAGE's metadata must be physically contiguous, 4 KiB aligned and uncached
+     * (Linux uses dma_alloc_coherent). Copied bytewise through an inhibit-cache mapping. */
+    const IOOptionBits metaOptions = static_cast<IOOptionBits>(kIODirectionInOut) |
+                                     static_cast<IOOptionBits>(kIOMemoryMapperNone) |
+                                     static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous);
+    IOBufferMemoryDescriptor *metaBuffer = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+        kernel_task, metaOptions, (metadataBytes + 0xfffU) & ~0xfffU, UINT64_C(0xfffff000));
+    IOMemoryMap *metaMap = nullptr;
+    uint64_t metaPhys = 0;
+    if (metaBuffer && metaBuffer->prepare() == kIOReturnSuccess) {
+        IOByteCount metaLength = 0;
+        metaPhys = metaBuffer->getPhysicalSegment(0, &metaLength, kIOMemoryMapperNone);
+        metaMap = metaBuffer->map(kIOMapAnywhere | kIOMapInhibitCache);
+        if (metaMap && metaPhys && metaLength >= metadataBytes) {
+            copyToDevice(reinterpret_cast<volatile uint8_t *>(
+                static_cast<uintptr_t>(metaMap->getAddress())), metadata, metadataBytes);
+            __asm__ volatile("dsb sy" ::: "memory");
+        } else {
+            if (metaMap) { metaMap->release(); metaMap = nullptr; }
+        }
+    }
+    IOFree(metadata, metadataBytes);
+    if (!metaMap) {
+        printf("PICASSO_WLAN mpss: metadata buffer unavailable\n");
+        if (metaBuffer) { metaBuffer->complete(); metaBuffer->release(); }
+        IOFree(meta, mdt.size);
+        return false;
+    }
+    printf("PICASSO_WLAN mpss: metadata phys=%llx\n", static_cast<unsigned long long>(metaPhys));
+
+    /* Linux qcom_mdt_pas_load(): INIT_IMAGE first, MEM_SETUP only for relocatable images,
+     * then the segments are loaded, then AUTH_AND_RESET. */
+    const PasResult init = pasCall(kPasInitImage, kArgInfoInitImage, metaPhys);
+    printf("PICASSO_WLAN mpss: init a0=%08x a1=%08x ticks=%llu\n", init.reply.a0, init.reply.a1,
+           static_cast<unsigned long long>(init.ticks));
+    gReport.initReply = init.reply.a0;
+    gReport.attempted = true;
+    if (init.reply.a0 != 0) {
+        printf("PICASSO_WLAN mpss: INIT rejected, no segments staged\n");
+        IOFree(meta, mdt.size);
+        return false;
+    }
+    if (relocate) {
+        const PasResult setup = pasCall(kPasMemSetup, kArgInfoMemSetup, minAddress, span);
+        printf("PICASSO_WLAN mpss: memsetup a0=%08x a1=%08x ticks=%llu\n", setup.reply.a0,
+               setup.reply.a1, static_cast<unsigned long long>(setup.ticks));
+        gReport.setupReply = setup.reply.a0;
+        if (setup.reply.a0 != 0) { IOFree(meta, mdt.size); return false; }
+    }
+
+    /* Stage the PT_LOAD segments into the carveout named by their p_paddr. */
+    IODeviceMemory *carveout = IODeviceMemory::withRange(minAddress, span);
+    IOMemoryMap *carveoutMap = carveout ? carveout->map(kIOMapAnywhere | kIOMapInhibitCache) : nullptr;
+    if (carveout) carveout->release();
     if (!carveoutMap) {
         printf("PICASSO_WLAN mpss: carveout map failed\n");
         IOFree(meta, mdt.size);
@@ -605,168 +687,65 @@ extern "C" bool native_wlan_mpss_start(void)
     }
     volatile uint8_t *region = reinterpret_cast<volatile uint8_t *>(
         static_cast<uintptr_t>(carveoutMap->getAddress()));
-    printf("PICASSO_WLAN mpss: carveout va=%llx\n",
-           static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(region)));
-
     unsigned staged = 0;
     uint64_t stagedBytes = 0;
     bool ok = true;
-    uint64_t firstOffset = 0;
-    uint32_t firstWord = 0;
-    bool haveFirst = false;
+    char longName[16], shortName[12];
+    memcpy(longName, "modem.b", 7);
+    memcpy(shortName, "MODEM   B", 9);
     for (unsigned index = 0; index < phnum && ok; ++index) {
-        const uint64_t at = static_cast<uint64_t>(phoff) + static_cast<uint64_t>(index) * phentsize;
-        const uint8_t *ph = meta + at;
-        const uint32_t type = le32(ph + 0);
+        const uint8_t *ph = meta + phoff + static_cast<uint64_t>(index) * phentsize;
+        const uint32_t flags = le32(ph + 24);
         const uint32_t paddr = le32(ph + 12);
         const uint32_t filesz = le32(ph + 16);
         const uint32_t memsz = le32(ph + 20);
-        if (!(type == 1 || (paddr >= 0x80000000U && filesz))) continue;
+        if (le32(ph + 0) != 1 || (flags & kMdtTypeMask) == kMdtTypeHash || !memsz) continue;
         const uint64_t offset = paddr - minAddress;
         if (offset + memsz > span) { ok = false; break; }
-        if (!filesz) {
-            zeroDevice(region + offset, memsz);
-            continue;
-        }
-        // Segment files are named in decimal (modem.b00..modem.b33) and correspond one-to-one
-        // with program-header indices; a header with p_filesz 0 has no file.
-        char longName[16];
-        char shortName[12];
-        memcpy(longName, "modem.b", 7);
+        if (!filesz) { zeroDevice(region + offset, memsz); continue; }
         longName[7] = static_cast<char>('0' + (index / 10) % 10);
         longName[8] = static_cast<char>('0' + index % 10);
         longName[9] = 0;
-        memcpy(shortName, "MODEM   B", 9);
         shortName[9] = longName[7];
         shortName[10] = longName[8];
         shortName[11] = 0;
-        FatEntry segment;
-        if (!fatFindFile(volume, longName, shortName, segment) || !segment.valid) {
-            printf("PICASSO_WLAN mpss: segment %u file %s missing\n", index, longName);
-            ok = false;
-            break;
+        FatEntry seg;
+        if (!fatFindFile(volume, longName, shortName, seg) || !seg.valid) {
+            printf("PICASSO_WLAN mpss: segment %u %s missing\n", index, longName);
+            ok = false; break;
         }
-        uint8_t *data = static_cast<uint8_t *>(IOMalloc(segment.size ? segment.size : 1));
+        uint8_t *data = static_cast<uint8_t *>(IOMalloc(seg.size ? seg.size : 1));
         if (!data) { ok = false; break; }
-        if (!fatReadChain(volume, segment.firstCluster, segment.size, data, segment.size)) {
-            printf("PICASSO_WLAN mpss: segment %u read failed\n", index);
-            IOFree(data, segment.size);
-            ok = false;
-            break;
+        if (!fatReadChain(volume, seg.firstCluster, seg.size, data, seg.size)) {
+            IOFree(data, seg.size); ok = false; break;
         }
-        uint32_t copyBytes = segment.size;
-        if (copyBytes > filesz) copyBytes = filesz;
-        if (!haveFirst && copyBytes >= 4) {
-            firstOffset = offset;
-            firstWord = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
-                        (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
-            haveFirst = true;
-        }
+        uint32_t copyBytes = seg.size > filesz ? filesz : seg.size;
         copyToDevice(region + offset, data, copyBytes);
         if (memsz > copyBytes) zeroDevice(region + offset + copyBytes, memsz - copyBytes);
-        IOFree(data, segment.size);
+        IOFree(data, seg.size);
         staged++;
         stagedBytes += copyBytes;
-        if ((index & 7) == 0 || index + 1 == phnum) {
-            printf("PICASSO_WLAN mpss: seg %u paddr=%x filesz=%x memsz=%x\n", index, paddr, filesz, memsz);
-        }
+        if ((index & 7) == 0 || index + 1 == phnum)
+            printf("PICASSO_WLAN mpss: seg %u paddr=%x filesz=%x memsz=%x\n",
+                   index, paddr, filesz, memsz);
     }
     __asm__ volatile("dsb sy" ::: "memory");
-    // Read the first staged word back: a mismatch means the carveout is not writable from the AP
-    // (XPU), which is worth knowing before any PAS call runs.
-    if (haveFirst) {
-        const volatile uint8_t *probe = region + firstOffset;
-        const uint32_t back = static_cast<uint32_t>(probe[0]) | (static_cast<uint32_t>(probe[1]) << 8) |
-                              (static_cast<uint32_t>(probe[2]) << 16) | (static_cast<uint32_t>(probe[3]) << 24);
-        gReport.readbackWrote = firstWord;
-        gReport.readbackRead = back;
-        printf("PICASSO_WLAN mpss: readback wrote=%08x read=%08x %s\n", firstWord, back,
-               back == firstWord ? "ok" : "MISMATCH");
-    }
-    gReport.attempted = true;
     gReport.staged = ok;
     gReport.segments = staged;
     gReport.bytes = stagedBytes;
     printf("PICASSO_WLAN mpss: staged=%u bytes=%llu ok=%u\n", staged,
            static_cast<unsigned long long>(stagedBytes), ok ? 1U : 0U);
-    if (!ok) {
-        carveoutMap->release();
-        IOFree(meta, mdt.size);
-        return false;
-    }
+    if (!ok) { IOFree(meta, mdt.size); return false; }
 
-    // Metadata must be physically contiguous and stay resident (wf126).
-    const IOOptionBits metaOptions = static_cast<IOOptionBits>(kIODirectionInOut) |
-                                     static_cast<IOOptionBits>(kIOMemoryMapperNone) |
-                                     static_cast<IOOptionBits>(kIOMemoryPhysicallyContiguous);
-    IOBufferMemoryDescriptor *metaBuffer = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
-        kernel_task, metaOptions, (mdt.size + 0xfffU) & ~0xfffU, UINT64_C(0xfffff000));
-    bool started = false;
-    if (!metaBuffer || metaBuffer->prepare() != kIOReturnSuccess) {
-        printf("PICASSO_WLAN mpss: metadata allocation failed\n");
-        if (metaBuffer) metaBuffer->release();
-    } else {
-        IOByteCount metaLength = 0;
-        const uint64_t metaPhys = metaBuffer->getPhysicalSegment(0, &metaLength, kIOMemoryMapperNone);
-        IOMemoryMap *metaMap = metaBuffer->map(kIOMapAnywhere | kIOMapInhibitCache);
-        if (!metaMap || !metaPhys) {
-            printf("PICASSO_WLAN mpss: metadata mapping failed\n");
-            if (metaMap) metaMap->release();
-        } else {
-            copyToDevice(reinterpret_cast<volatile uint8_t *>(static_cast<uintptr_t>(metaMap->getAddress())),
-                         meta, mdt.size);
-            __asm__ volatile("dsb sy" ::: "memory");
-            printf("PICASSO_WLAN mpss: metadata phys=%llx bytes=%u\n",
-                   static_cast<unsigned long long>(metaPhys), mdt.size);
-
-            // PAS_SHUTDOWN was measured on device and never returns while the modem is already
-            // off: the loader thread wedged inside the SMC and only finished when the call was
-            // removed. The reset pair stays out of the default path for the same reason.
-            if (gAllowReset) {
-                const PasResult mssReset = pasCall(kPasMssReset, 0x01, 0);
-                printf("PICASSO_WLAN mpss: mss_reset a0=%08x a1=%08x\n", mssReset.reply.a0, mssReset.reply.a1);
-            }
-            // Vendor PIL for fixed images is sometimes driven region-first; try that order once
-            // before the metadata-first order Linux uses.
-            const PasResult setupFirst = pasCall(kPasMemSetup, kArgInfoMemSetup, minAddress, span);
-            printf("PICASSO_WLAN mpss: memsetup-first a0=%08x a1=%08x\n", setupFirst.reply.a0, setupFirst.reply.a1);
-            const bool haveRegion = setupFirst.reply.a0 == 0;
-            PasResult init = pasCall(kPasInitImage, kArgInfoInitImage, metaPhys);
-            printf("PICASSO_WLAN mpss: init meta a0=%08x a1=%08x ticks=%llu\n", init.reply.a0, init.reply.a1,
-                   static_cast<unsigned long long>(init.ticks));
-            if (init.reply.a0 != 0) {
-                // Some PIL implementations expect the metadata to live inside the image region at
-                // its lowest address, which is where a fixed-address MBN places its header.
-                const PasResult second = pasCall(kPasInitImage, kArgInfoInitImage, minAddress);
-                printf("PICASSO_WLAN mpss: init base a0=%08x a1=%08x ticks=%llu\n", second.reply.a0,
-                       second.reply.a1, static_cast<unsigned long long>(second.ticks));
-                if (second.reply.a0 == 0) init = second;
-            }
-            if (init.reply.a0 == 0) {
-                PasResult setup = setupFirst;
-                if (!haveRegion) {
-                    setup = pasCall(kPasMemSetup, kArgInfoMemSetup, minAddress, span);
-                    printf("PICASSO_WLAN mpss: memsetup a0=%08x a1=%08x\n", setup.reply.a0, setup.reply.a1);
-                }
-                gReport.setupReply = setup.reply.a0;
-                printf("PICASSO_WLAN mpss: memsetup a0=%08x a1=%08x ticks=%llu\n", setup.reply.a0, setup.reply.a1,
-                       static_cast<unsigned long long>(setup.ticks));
-                if (setup.reply.a0 == 0) {
-                    const PasResult auth = pasCall(kPasAuthAndReset, kArgInfoAuth, 0);
-                    gReport.authReply = auth.reply.a0;
-                    printf("PICASSO_WLAN mpss: auth a0=%08x a1=%08x ticks=%llu\n", auth.reply.a0, auth.reply.a1,
-                           static_cast<unsigned long long>(auth.ticks));
-                    started = auth.reply.a0 == 0;
-                }
-            }
-            // Retain both mappings and buffers: TZ keeps using the region after AUTH (wf126).
-            gReport.initReply = init.reply.a0;
-    gReport.setupReply = gReport.initReply == 0 ? 0 : 0xffffffffU;
-    gReport.authReply = 0xffffffffU;
+    const PasResult auth = pasCall(kPasAuthAndReset, kArgInfoAuth, 0);
+    gReport.authReply = auth.reply.a0;
+    printf("PICASSO_WLAN mpss: auth a0=%08x a1=%08x ticks=%llu\n", auth.reply.a0, auth.reply.a1,
+           static_cast<unsigned long long>(auth.ticks));
+    const bool started = auth.reply.a0 == 0;
     gReport.started = started;
     printf("PICASSO_WLAN mpss: started=%u\n", started ? 1U : 0U);
-        }
-    }
+    IOFree(meta, mdt.size);
+    /* Keep both mappings and buffers resident: TZ keeps using the region after AUTH (wf126). */
     return started;
 }
 
