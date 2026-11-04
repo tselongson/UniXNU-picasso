@@ -335,6 +335,7 @@ static ScmReply wlanScmCall(uint32_t function, uint32_t arginfo, uint64_t arg0) 
 // Read-only raw block access exported by NativeUfs (additive integration hook).
 extern "C" uint32_t native_ufs_raw_max_blocks(void);
 extern "C" int native_ufs_raw_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst);
+extern "C" void native_ufs_raw_diag(uint32_t *out);
 extern "C" void native_wlan_modem_inventory(void);
 extern "C" bool native_wlan_mpss_start(void);
 extern "C" void native_wlan_glink_probe(void);
@@ -357,6 +358,14 @@ static void wlanModemPartitionProbe(void) {
     uint8_t *sector = static_cast<uint8_t *>(IOMalloc(4096));
     if (!sector) return;
     memset(sector, 0, 4096);
+    // Control 1: LUN 0 LBA 0 is the GPT/MBR the root path already reads. If this fails too, the
+    // host is not ready rather than the LUN being wrong.
+    const int rcControl = native_ufs_raw_read(0, 0, 1, sector);
+    printf("PICASSO_WLAN ufs control lun=0 lba=0 rc=%d sig=%02x%02x\n", rcControl, sector[510], sector[511]);
+    uint32_t diag[5] = {0, 0, 0, 0, 0};
+    native_ufs_raw_diag(diag);
+    printf("PICASSO_WLAN ufs diag ready=%u scsi=%04x proto=%u ocs=%x cmd=%u\n",
+           diag[0], diag[1], diag[2], diag[3], diag[4]);
     const int rc = native_ufs_raw_read(kModemLun, kModemLba, 1, sector);
     const unsigned bps = sector[11] | (sector[12] << 8);
     const unsigned spc = sector[13];
