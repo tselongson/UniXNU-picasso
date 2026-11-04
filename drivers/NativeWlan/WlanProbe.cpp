@@ -14,6 +14,7 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <libkern/c++/OSSharedPtr.h>
 #include <pexpert/pexpert.h>
+#include <kern/thread.h>
 #include <string.h>
 extern "C" {
 #include "WlanBoard.h"
@@ -335,6 +336,10 @@ static ScmReply wlanScmCall(uint32_t function, uint32_t arginfo, uint64_t arg0) 
 extern "C" uint32_t native_ufs_raw_max_blocks(void);
 extern "C" int native_ufs_raw_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst);
 extern "C" void native_wlan_modem_inventory(void);
+extern "C" bool native_wlan_mpss_start(void);
+extern "C" kern_return_t kernel_thread_start(void (*)(void *, wait_result_t), void *, thread_t *);
+extern "C" void thread_deallocate(thread_t);
+static void wlanMpssLoaderStart(void);
 
 // Modem partition identity probe. picasso stores the modem FAT on LUN 4 starting at LBA 61606
 // (rawprogram4.xml: physical_partition_number=4, start_sector=61606, SECTOR_SIZE_IN_BYTES=4096).
@@ -345,7 +350,7 @@ static constexpr uint64_t kModemLba = 61606;
 
 static void wlanModemPartitionProbe(void) {
     unsigned enabled = 0;
-    if (!PE_parse_boot_argn("sheng-wlan-ufs", &enabled, sizeof enabled) || enabled != 1) return;
+    if (!PE_parse_boot_argn("sheng-wlan-ufs", &enabled, sizeof enabled) || enabled < 1) return;
     const uint32_t maxBlocks = native_ufs_raw_max_blocks();
     uint8_t *sector = static_cast<uint8_t *>(IOMalloc(4096));
     if (!sector) return;
@@ -365,6 +370,7 @@ static void wlanModemPartitionProbe(void) {
     IOFree(sector, 4096);
     // Same switch also walks the modem FAT and reports its firmware directory.
     native_wlan_modem_inventory();
+    if (enabled >= 2) wlanMpssLoaderStart();
 }
 
 static void wlanPasScan(void) {
@@ -375,6 +381,26 @@ static void wlanPasScan(void) {
     for (uint32_t id = 0; id <= 20; ++id) {
         const ScmReply r = wlanScmCall(kStdSipSmc64 | (kSvcPil << 8) | kPasIsSupported, 0x01u, id);
         printf("PICASSO_WLAN pas: id=%u a0=%08x a1=%08x\n", id, r.a0, r.a1);
+    }
+}
+
+
+static volatile bool gMpssLoaderStarted = false;
+
+static void wlanMpssLoader(void *, wait_result_t) {
+    // Let the boot page and the root mount settle before touching 250 MB of carveout.
+    IOSleep(8000);
+    printf("PICASSO_WLAN mpss: loader thread begin\n");
+    const bool started = native_wlan_mpss_start();
+    printf("PICASSO_WLAN mpss: loader thread end started=%u\n", started ? 1U : 0U);
+}
+
+static void wlanMpssLoaderStart(void) {
+    if (gMpssLoaderStarted) return;
+    thread_t thread = nullptr;
+    if (kernel_thread_start(wlanMpssLoader, nullptr, &thread) == KERN_SUCCESS) {
+        thread_deallocate(thread);
+        gMpssLoaderStarted = true;
     }
 }
 
