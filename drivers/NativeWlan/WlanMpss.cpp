@@ -82,25 +82,18 @@ uint8_t gBlock[kBlockBytes] __attribute__((aligned(4096)));
 
 bool readPartitionBytes(const FatVolume &volume, uint64_t offset, uint32_t bytes, void *dst)
 {
-    if (!bytes || bytes > kBlockBytes) return false;
-    const uint64_t absolute = volume.partLba * kBlockBytes + offset;
-    const uint64_t lba = absolute / kBlockBytes;
-    const uint32_t skip = static_cast<uint32_t>(absolute % kBlockBytes);
-    if (skip + bytes <= kBlockBytes) {
-        if (native_ufs_raw_read(volume.lun, lba, 1, gBlock) != 0) return false;
-        memcpy(dst, gBlock + skip, bytes);
-        return true;
-    }
-    // Rare in this layout (only when a caller crosses a block boundary).
+    if (!bytes) return false;
+    uint8_t *out = static_cast<uint8_t *>(dst);
+    const uint64_t partitionBase = volume.partLba * kBlockBytes;
     uint32_t done = 0;
     while (done < bytes) {
-        const uint64_t at = offset + done;
-        const uint64_t curLba = (volume.partLba * kBlockBytes + at) / kBlockBytes;
-        const uint32_t curSkip = static_cast<uint32_t>((volume.partLba * kBlockBytes + at) % kBlockBytes);
-        if (native_ufs_raw_read(volume.lun, curLba, 1, gBlock) != 0) return false;
-        uint32_t take = kBlockBytes - curSkip;
+        const uint64_t at = partitionBase + offset + done;
+        const uint64_t lba = at / kBlockBytes;
+        const uint32_t skip = static_cast<uint32_t>(at % kBlockBytes);
+        if (native_ufs_raw_read(volume.lun, lba, 1, gBlock) != 0) return false;
+        uint32_t take = kBlockBytes - skip;
         if (take > bytes - done) take = bytes - done;
-        memcpy(static_cast<uint8_t *>(dst) + done, gBlock + curSkip, take);
+        memcpy(out + done, gBlock + skip, take);
         done += take;
     }
     return true;
@@ -222,18 +215,19 @@ bool scanDirectory(const FatVolume &volume, uint32_t firstCluster, const char *l
                    const char *shortName, FatEntry &out, unsigned depth)
 {
     const uint32_t clusterBytes = volume.sectorsPerCluster * volume.bytesPerSector;
-    if (clusterBytes > 4096) return false;
-    uint8_t buffer[4096];
+    if (clusterBytes < 32 || clusterBytes > 65536) return false;
+    uint8_t *buffer = static_cast<uint8_t *>(IOMalloc(clusterBytes));
+    if (!buffer) return false;
     uint16_t units[260];
     unsigned unitCount = 0, unitExpected = 0;
     lfnClear(units, unitCount, unitExpected);
     uint32_t cluster = firstCluster;
     for (unsigned step = 0; step < 24 && cluster >= 2 && cluster < 0xFFF8U; ++step) {
         const uint64_t offset = volume.dataByteOffset + static_cast<uint64_t>(cluster - 2) * clusterBytes;
-        if (!readPartitionBytes(volume, offset, clusterBytes, buffer)) return false;
+        if (!readPartitionBytes(volume, offset, clusterBytes, buffer)) { IOFree(buffer, clusterBytes); return false; }
         for (uint32_t index = 0; index + 32 <= clusterBytes; index += 32) {
             const uint8_t *entry = buffer + index;
-            if (entry[0] == 0) return false;
+                        if (entry[0] == 0) { IOFree(buffer, clusterBytes); return false; }
             if (entry[0] == 0xE5) { lfnClear(units, unitCount, unitExpected); continue; }
             if (entry[11] == 0x0F) { lfnAdd(units, unitCount, unitExpected, entry); continue; }
             if (entry[11] & 0x08) { lfnClear(units, unitCount, unitExpected); continue; }
@@ -268,12 +262,14 @@ bool scanDirectory(const FatVolume &volume, uint32_t firstCluster, const char *l
                 out.name[at] = 0;
             }
             lfnClear(units, unitCount, unitExpected);
+            IOFree(buffer, clusterBytes);
             return true;
         }
         uint32_t next = 0;
-        if (!fatNextCluster(volume, cluster, next)) return false;
+        if (!fatNextCluster(volume, cluster, next)) { IOFree(buffer, clusterBytes); return false; }
         cluster = next;
     }
+    IOFree(buffer, clusterBytes);
     return false;
 }
 
