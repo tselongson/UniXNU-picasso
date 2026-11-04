@@ -277,8 +277,14 @@ public:
         if(transferred && gpuStartTick) {
             uint64_t held=0;absolutetime_to_nanoseconds(mach_absolute_time()-gpuStartTick,&held);
             if(held>=1500000000ull) {
+                // Drop the frame instead of copying it: with sheng-early-retire the swap was already retired
+                // while the GPU copy was in flight, so the client may already have recycled the surface. The
+                // earlier version of this fallback fell through to the CPU copy of that same request, which is
+                // how backboardd ended up zeroing a mapping the client had torn down.
                 gpuRequest=nullptr;gpuLength=0;gpuRetired=false;transferred=false;gpuBypass=true;gpuStartTick=0;
                 native_legacy_gpu_fallback_observed(kIOReturnTimeout);
+                kickSwapQueue();
+                return;
             }
         }
         unsigned enabled=1;PE_parse_boot_argn("offline-legacy-transfer",&enabled,sizeof(enabled));
