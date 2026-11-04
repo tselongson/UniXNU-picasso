@@ -38,6 +38,10 @@ extern void HakiosWLANStart(const char *interface, const uint8_t *address);  /* 
 
 static LCK_GRP_DECLARE(net_lck_grp, "hakios-net");
 
+static const uint8_t hakios_ether_broadcast[ETHER_ADDR_LEN] = {
+	0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
+
 /* One interface: enN on its link. */
 struct net_if {
 	unsigned        unit;
@@ -358,7 +362,7 @@ hakios_net_attach(const struct hakios_net_link *link)
 		.check_multi = ether_check_multi,
 		.framer_extended = ether_frameout_extended,
 		.ioctl = net_ioctl,
-		.broadcast_addr = etherbroadcastaddr,
+		.broadcast_addr = hakios_ether_broadcast,
 		.broadcast_len = ETHER_ADDR_LEN,
 	};
 	const uint8_t *address = link->address;
