@@ -453,6 +453,19 @@ ScmReply scmSipCall(uint32_t function, uint32_t arginfo, uint64_t arg0,
     return ScmReply{uint32_t(x0), uint32_t(x1), uint32_t(x2), uint32_t(x3), x6};
 }
 
+// Results of the last load attempt, so the console can be told about them long after the
+// bring-up prints scrolled away: the CDC link only comes up tens of seconds into boot.
+struct MpssReport {
+    bool attempted;
+    bool staged;
+    bool started;
+    uint32_t initReply, setupReply, authReply;
+    uint32_t readbackWrote, readbackRead;
+    unsigned segments;
+    uint64_t bytes;
+};
+MpssReport gReport = {};
+
 constexpr uint32_t kPasSvc = 0x02;
 constexpr uint32_t kPasInitImage = 0x01;
 constexpr uint32_t kPasMemSetup = 0x02;
@@ -655,9 +668,15 @@ extern "C" bool native_wlan_mpss_start(void)
         const volatile uint8_t *probe = region + firstOffset;
         const uint32_t back = static_cast<uint32_t>(probe[0]) | (static_cast<uint32_t>(probe[1]) << 8) |
                               (static_cast<uint32_t>(probe[2]) << 16) | (static_cast<uint32_t>(probe[3]) << 24);
+        gReport.readbackWrote = firstWord;
+        gReport.readbackRead = back;
         printf("PICASSO_WLAN mpss: readback wrote=%08x read=%08x %s\n", firstWord, back,
                back == firstWord ? "ok" : "MISMATCH");
     }
+    gReport.attempted = true;
+    gReport.staged = ok;
+    gReport.segments = staged;
+    gReport.bytes = stagedBytes;
     printf("PICASSO_WLAN mpss: staged=%u bytes=%llu ok=%u\n", staged,
            static_cast<unsigned long long>(stagedBytes), ok ? 1U : 0U);
     if (!ok) {
@@ -695,17 +714,23 @@ extern "C" bool native_wlan_mpss_start(void)
                    static_cast<unsigned long long>(init.ticks));
             if (init.reply.a0 == 0) {
                 const PasResult setup = pasCall(kPasMemSetup, kArgInfoMemSetup, minAddress, span);
+                gReport.setupReply = setup.reply.a0;
                 printf("PICASSO_WLAN mpss: memsetup a0=%08x a1=%08x ticks=%llu\n", setup.reply.a0, setup.reply.a1,
                        static_cast<unsigned long long>(setup.ticks));
                 if (setup.reply.a0 == 0) {
                     const PasResult auth = pasCall(kPasAuthAndReset, kArgInfoAuth, 0);
+                    gReport.authReply = auth.reply.a0;
                     printf("PICASSO_WLAN mpss: auth a0=%08x a1=%08x ticks=%llu\n", auth.reply.a0, auth.reply.a1,
                            static_cast<unsigned long long>(auth.ticks));
                     started = auth.reply.a0 == 0;
                 }
             }
             // Retain both mappings and buffers: TZ keeps using the region after AUTH (wf126).
-            printf("PICASSO_WLAN mpss: started=%u\n", started ? 1U : 0U);
+            gReport.initReply = init.reply.a0;
+    gReport.setupReply = gReport.initReply == 0 ? 0 : 0xffffffffU;
+    gReport.authReply = 0xffffffffU;
+    gReport.started = started;
+    printf("PICASSO_WLAN mpss: started=%u\n", started ? 1U : 0U);
         }
     }
     return started;
@@ -787,4 +812,18 @@ extern "C" void native_wlan_modem_scan(void)
     }
     printf("PICASSO_WLAN scan: done hits=%u fat=%u\n", hits, fatSeen);
     IOFree(buffer, kScanChunkBlocks * 4096);
+}
+
+// One-line status, repeated by the caller so a late-attaching console still sees the outcome.
+extern "C" void native_wlan_mpss_report(void)
+{
+    if (!gReport.attempted) {
+        printf("PICASSO_WLAN mpss: report not attempted\n");
+        return;
+    }
+    printf("PICASSO_WLAN mpss: report staged=%u segs=%u bytes=%llu rb=%08x/%08x init=%08x setup=%08x auth=%08x started=%u\n",
+           gReport.staged ? 1U : 0U, gReport.segments,
+           static_cast<unsigned long long>(gReport.bytes),
+           gReport.readbackWrote, gReport.readbackRead,
+           gReport.initReply, gReport.setupReply, gReport.authReply, gReport.started ? 1U : 0U);
 }

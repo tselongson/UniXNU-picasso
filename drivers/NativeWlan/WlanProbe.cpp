@@ -342,6 +342,7 @@ extern "C" void native_wlan_glink_probe(void);
 extern "C" bool native_wlan_glink_attach(void);
 extern "C" void native_wlan_modem_scan(void);
 extern "C" void native_wlan_smp2p_poll(unsigned seconds);
+extern "C" void native_wlan_mpss_report(void);
 extern "C" kern_return_t kernel_thread_start(void (*)(void *, wait_result_t), void *, thread_t *);
 extern "C" void thread_deallocate(thread_t);
 static void wlanMpssLoaderStart(void);
@@ -418,6 +419,11 @@ static void wlanMpssLoader(void *, wait_result_t) {
         native_wlan_glink_probe();
     }
     printf("PICASSO_WLAN mpss: loader thread end started=%u\n", started ? 1U : 0U);
+    // The CDC link comes up long after these prints, so repeat the outcome for a while.
+    for (unsigned step = 0; step < 16; ++step) {
+        IOSleep(15000);
+        native_wlan_mpss_report();
+    }
 }
 
 static void wlanMpssLoaderStart(void) {
