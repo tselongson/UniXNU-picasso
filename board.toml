@@ -299,7 +299,8 @@ kernel_args = [
   # Read GPUCC clock and GDSC state without touching the GPU core. SMMU and
   # RBBM probes remain separate opt-in arguments because either block may be
   # inaccessible until CX/GX power and clocks are established.
-  "sheng-gpu-probe=1",
+  # Isolation build: no A620 stage runs, so a WLAN panic cannot be the GPU.
+  "sheng-gpu=0",
   # Both pinned SQE images (linux-firmware 0x112 and the device's own 0x087)
   # are below a6xx_gpu.c's 0x095/0x190 floors, which are a650 phone security
   # floors; the image is pinned by size/CRC in Adreno620Board.cpp.
