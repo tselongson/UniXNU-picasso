@@ -229,3 +229,33 @@ extern "C" void native_wlan_glink_probe(void)
         remaining -= 8;
     }
 }
+
+// Polls the modem's SMP2P state entry. Item 435 is the inbound entry the modem writes (see
+// WlanSmem.h); a state that changes from 0 to nonzero after our PAS load is the first sign that
+// MPSS actually started. Read-only, bounded, and printing only on change.
+extern "C" void native_wlan_smp2p_poll(unsigned seconds)
+{
+    if (!gSmem) return;
+    struct cw_reader reader = {const_cast<uint8_t *>(gSmem), kSmemSize, smemReadCallback};
+    struct cw_smem smem = {};
+    if (cw_smem_layout(&reader, &smem) != CW_OK || !smem.has_modem) return;
+    struct cw_item item = {};
+    if (cw_smem_find(&reader, &smem.modem, CW_SMP2P_IN, &item) != CW_OK) {
+        printf("PICASSO_WLAN smp2p: item %u absent\n", CW_SMP2P_IN);
+        return;
+    }
+    struct cw_smp2p state = {};
+    int last = -1;
+    for (unsigned step = 0; step < seconds; ++step) {
+        if (cw_smp2p_read(&reader, &item, &state) == CW_OK) {
+            const int current = static_cast<int>(state.state);
+            if (current != last) {
+                printf("PICASSO_WLAN smp2p: t=%us state=%u valid=%u version=%u\n", step, state.state,
+                       state.valid, state.version);
+                last = current;
+            }
+            if (current) return;
+        }
+        IOSleep(1000);
+    }
+}

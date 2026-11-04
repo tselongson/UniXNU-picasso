@@ -339,7 +339,9 @@ extern "C" void native_ufs_raw_diag(uint32_t *out);
 extern "C" void native_wlan_modem_inventory(void);
 extern "C" bool native_wlan_mpss_start(void);
 extern "C" void native_wlan_glink_probe(void);
+extern "C" bool native_wlan_glink_attach(void);
 extern "C" void native_wlan_modem_scan(void);
+extern "C" void native_wlan_smp2p_poll(unsigned seconds);
 extern "C" kern_return_t kernel_thread_start(void (*)(void *, wait_result_t), void *, thread_t *);
 extern "C" void thread_deallocate(thread_t);
 static void wlanMpssLoaderStart(void);
@@ -409,7 +411,10 @@ static void wlanMpssLoader(void *, wait_result_t) {
     if (mode >= 4) native_wlan_modem_scan();
     const bool started = native_wlan_mpss_start();
     if (mode >= 3) {
-        IOSleep(8000);
+        // SMP2P first: it is the cheapest evidence that MPSS came up, before any GLINK traffic.
+        native_wlan_glink_attach();
+        native_wlan_smp2p_poll(started ? 60 : 10);
+        IOSleep(2000);
         native_wlan_glink_probe();
     }
     printf("PICASSO_WLAN mpss: loader thread end started=%u\n", started ? 1U : 0U);
