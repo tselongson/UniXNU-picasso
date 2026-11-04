@@ -334,6 +334,7 @@ static ScmReply wlanScmCall(uint32_t function, uint32_t arginfo, uint64_t arg0) 
 // Read-only raw block access exported by NativeUfs (additive integration hook).
 extern "C" uint32_t native_ufs_raw_max_blocks(void);
 extern "C" int native_ufs_raw_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst);
+extern "C" void native_wlan_modem_inventory(void);
 
 // Modem partition identity probe. picasso stores the modem FAT on LUN 4 starting at LBA 61606
 // (rawprogram4.xml: physical_partition_number=4, start_sector=61606, SECTOR_SIZE_IN_BYTES=4096).
@@ -362,6 +363,8 @@ static void wlanModemPartitionProbe(void) {
            kModemLun, static_cast<unsigned long long>(kModemLba), rc, maxBlocks,
            reinterpret_cast<const char *>(sector + 3), bps, spc, rsv, nfat, rootEnt, total16);
     IOFree(sector, 4096);
+    // Same switch also walks the modem FAT and reports its firmware directory.
+    native_wlan_modem_inventory();
 }
 
 static void wlanPasScan(void) {
