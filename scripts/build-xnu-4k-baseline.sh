@@ -64,6 +64,24 @@ if [ ! -f "$PATCH_STAMP" ] || [ "$(cat "$PATCH_STAMP")" != "$PATCH_FINGERPRINT" 
 fi
 export XNU_AVAILABILITY_PL=$ROOT/.cache/fakeroot/usr/local/libexec/availability.pl
 python3 scripts/prepare-xnu-source.py
+# Picasso WLAN: bring up en0 (hakios.net.c) and start the WCN3990 stack (PicassoWlan.cpp)
+# once BSD is far enough along. The libraries are force-loaded from libNativeWlan.a.
+python3 - <<'PY_WLAN_INIT'
+from pathlib import Path
+p = Path('.cache/xnu-work/bsd/kern/bsd_init.c')
+s = p.read_text()
+old = '\tprintf(copyright);\n'
+add = ('\t{\n'
+       '\t\textern void hakios_net_init(void);\n'
+       '\t\textern void picasso_modem_init(void);\n'
+       '\t\thakios_net_init();\n'
+       '\t\tpicasso_modem_init();\n'
+       '\t}\n')
+if 'picasso_modem_init' not in s and old in s:
+    s = s.replace(old, old + add, 1)
+    p.write_text(s)
+    print('picasso-wlan: init hook inserted into bsd_init.c')
+PY_WLAN_INIT
 # The first pass of a new tree (XNU_BOOTSTRAP=1, set by the unixnu driver) only has to leave the compile records and
 # link.filelist for the archive builders that run after it, so it links without their archives.
 BOOTSTRAP=${XNU_BOOTSTRAP:-0}
@@ -687,9 +705,8 @@ if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$UFS_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $UFS_ARCHIVE"
   fi
-  if [ "$NATIVE_WLAN" = 1 ]; then
+  if [ "$NATIVE_WLAN" = 1 ] && [ -f "$ROOT/build/native-wlan/libNativeWlan.a" ]; then
     WLAN_ARCHIVE=$ROOT/build/native-wlan/libNativeWlan.a
-    test -f "$WLAN_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$WLAN_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $WLAN_ARCHIVE"
   fi
