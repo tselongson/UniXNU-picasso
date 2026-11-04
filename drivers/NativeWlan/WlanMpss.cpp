@@ -589,6 +589,9 @@ extern "C" bool native_wlan_mpss_start(void)
     unsigned staged = 0;
     uint64_t stagedBytes = 0;
     bool ok = true;
+    uint64_t firstOffset = 0;
+    uint32_t firstWord = 0;
+    bool haveFirst = false;
     for (unsigned index = 0; index < phnum && ok; ++index) {
         const uint64_t at = static_cast<uint64_t>(phoff) + static_cast<uint64_t>(index) * phentsize;
         const uint8_t *ph = meta + at;
@@ -629,6 +632,12 @@ extern "C" bool native_wlan_mpss_start(void)
         }
         uint32_t copyBytes = segment.size;
         if (copyBytes > filesz) copyBytes = filesz;
+        if (!haveFirst && copyBytes >= 4) {
+            firstOffset = offset;
+            firstWord = static_cast<uint32_t>(data[0]) | (static_cast<uint32_t>(data[1]) << 8) |
+                        (static_cast<uint32_t>(data[2]) << 16) | (static_cast<uint32_t>(data[3]) << 24);
+            haveFirst = true;
+        }
         copyToDevice(region + offset, data, copyBytes);
         if (memsz > copyBytes) zeroDevice(region + offset + copyBytes, memsz - copyBytes);
         IOFree(data, segment.size);
@@ -639,6 +648,15 @@ extern "C" bool native_wlan_mpss_start(void)
         }
     }
     __asm__ volatile("dsb sy" ::: "memory");
+    // Read the first staged word back: a mismatch means the carveout is not writable from the AP
+    // (XPU), which is worth knowing before any PAS call runs.
+    if (haveFirst) {
+        const volatile uint8_t *probe = region + firstOffset;
+        const uint32_t back = static_cast<uint32_t>(probe[0]) | (static_cast<uint32_t>(probe[1]) << 8) |
+                              (static_cast<uint32_t>(probe[2]) << 16) | (static_cast<uint32_t>(probe[3]) << 24);
+        printf("PICASSO_WLAN mpss: readback wrote=%08x read=%08x %s\n", firstWord, back,
+               back == firstWord ? "ok" : "MISMATCH");
+    }
     printf("PICASSO_WLAN mpss: staged=%u bytes=%llu ok=%u\n", staged,
            static_cast<unsigned long long>(stagedBytes), ok ? 1U : 0U);
     if (!ok) {
