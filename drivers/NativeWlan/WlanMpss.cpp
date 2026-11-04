@@ -568,11 +568,17 @@ extern "C" bool native_wlan_mpss_start(void)
         const uint64_t at = static_cast<uint64_t>(phoff) + static_cast<uint64_t>(index) * phentsize;
         if (at + 32 > mdt.size) { IOFree(meta, mdt.size); return false; }
         const uint8_t *ph = meta + at;
-        if (le32(ph + 0) != 1) continue;
+        const uint32_t type = le32(ph + 0);
         const uint32_t paddr = le32(ph + 12);
+        const uint32_t filesz = le32(ph + 16);
         const uint32_t memsz = le32(ph + 20);
+        // PT_LOAD segments make up the image; a non-PT_LOAD header with a plausible address is the
+        // hash table, which the secure monitor reads from the region it names (0x9b800000 here).
+        const bool loadable = type == 1 || (paddr >= 0x80000000U && filesz);
+        if (!loadable) continue;
         if (paddr < minAddress) minAddress = paddr;
-        if (static_cast<uint64_t>(paddr) + memsz > maxAddress) maxAddress = static_cast<uint64_t>(paddr) + memsz;
+        const uint64_t end = static_cast<uint64_t>(paddr) + (memsz > filesz ? memsz : filesz);
+        if (end > maxAddress) maxAddress = end;
         imageBytes += memsz;
     }
     const uint64_t span = (maxAddress - minAddress + 0xfffffULL) & ~0xfffffULL;
@@ -608,10 +614,11 @@ extern "C" bool native_wlan_mpss_start(void)
     for (unsigned index = 0; index < phnum && ok; ++index) {
         const uint64_t at = static_cast<uint64_t>(phoff) + static_cast<uint64_t>(index) * phentsize;
         const uint8_t *ph = meta + at;
-        if (le32(ph + 0) != 1) continue;
+        const uint32_t type = le32(ph + 0);
         const uint32_t paddr = le32(ph + 12);
         const uint32_t filesz = le32(ph + 16);
         const uint32_t memsz = le32(ph + 20);
+        if (!(type == 1 || (paddr >= 0x80000000U && filesz))) continue;
         const uint64_t offset = paddr - minAddress;
         if (offset + memsz > span) { ok = false; break; }
         if (!filesz) {
@@ -709,9 +716,17 @@ extern "C" bool native_wlan_mpss_start(void)
             printf("PICASSO_WLAN mpss: metadata phys=%llx bytes=%u\n",
                    static_cast<unsigned long long>(metaPhys), mdt.size);
 
-            const PasResult init = pasCall(kPasInitImage, kArgInfoInitImage, metaPhys);
-            printf("PICASSO_WLAN mpss: init a0=%08x a1=%08x ticks=%llu\n", init.reply.a0, init.reply.a1,
+            PasResult init = pasCall(kPasInitImage, kArgInfoInitImage, metaPhys);
+            printf("PICASSO_WLAN mpss: init meta a0=%08x a1=%08x ticks=%llu\n", init.reply.a0, init.reply.a1,
                    static_cast<unsigned long long>(init.ticks));
+            if (init.reply.a0 != 0) {
+                // Some PIL implementations expect the metadata to live inside the image region at
+                // its lowest address, which is where a fixed-address MBN places its header.
+                const PasResult second = pasCall(kPasInitImage, kArgInfoInitImage, minAddress);
+                printf("PICASSO_WLAN mpss: init base a0=%08x a1=%08x ticks=%llu\n", second.reply.a0,
+                       second.reply.a1, static_cast<unsigned long long>(second.ticks));
+                if (second.reply.a0 == 0) init = second;
+            }
             if (init.reply.a0 == 0) {
                 const PasResult setup = pasCall(kPasMemSetup, kArgInfoMemSetup, minAddress, span);
                 gReport.setupReply = setup.reply.a0;
