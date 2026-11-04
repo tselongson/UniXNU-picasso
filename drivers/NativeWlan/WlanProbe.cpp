@@ -337,6 +337,7 @@ extern "C" uint32_t native_ufs_raw_max_blocks(void);
 extern "C" int native_ufs_raw_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst);
 extern "C" void native_wlan_modem_inventory(void);
 extern "C" bool native_wlan_mpss_start(void);
+extern "C" void native_wlan_glink_probe(void);
 extern "C" kern_return_t kernel_thread_start(void (*)(void *, wait_result_t), void *, thread_t *);
 extern "C" void thread_deallocate(thread_t);
 static void wlanMpssLoaderStart(void);
@@ -390,8 +391,16 @@ static volatile bool gMpssLoaderStarted = false;
 static void wlanMpssLoader(void *, wait_result_t) {
     // Let the boot page and the root mount settle before touching 250 MB of carveout.
     IOSleep(8000);
-    printf("PICASSO_WLAN mpss: loader thread begin\n");
+    unsigned mode = 0;
+    PE_parse_boot_argn("sheng-wlan-ufs", &mode, sizeof mode);
+    printf("PICASSO_WLAN mpss: loader thread begin mode=%u\n", mode);
+    // Baseline: whether the modem endpoint is already up before we load anything.
+    if (mode >= 3) native_wlan_glink_probe();
     const bool started = native_wlan_mpss_start();
+    if (mode >= 3) {
+        IOSleep(8000);
+        native_wlan_glink_probe();
+    }
     printf("PICASSO_WLAN mpss: loader thread end started=%u\n", started ? 1U : 0U);
 }
 
