@@ -188,10 +188,12 @@ void lfnAdd(uint16_t *units, unsigned &count, unsigned &expected, const uint8_t 
     const uint16_t last = static_cast<uint16_t>(entry[0] | 0x40);
     if (entry[0] & 0x40) expected = sequence;      // last part carries bit 6
     if (last == sequence && !expected) expected = sequence;
+    // One LFN entry carries 13 UTF-16 units: five at 1..10, six at 14..25, two at 28..31.
     unsigned at = (sequence - 1) * 13;
     const unsigned offsets[3] = {1, 14, 28};
+    const unsigned counts[3] = {5, 6, 2};
     for (unsigned group = 0; group < 3; ++group) {
-        for (unsigned index = 0; index < (group == 2 ? 4u : 5u); ++index) {
+        for (unsigned index = 0; index < counts[group]; ++index) {
             const uint32_t offset = offsets[group] + index * 2;
             const uint16_t value = static_cast<uint16_t>(entry[offset] | (entry[offset + 1] << 8));
             if (at < 260) units[at] = value;
