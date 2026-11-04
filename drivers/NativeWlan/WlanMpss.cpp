@@ -170,6 +170,53 @@ bool fatReadChain(const FatVolume &volume, uint32_t firstCluster, uint32_t bytes
     return done == bytes;
 }
 
+
+// Scans one directory (a cluster chain) for an 8.3 name. The modem volume keeps its payload in a
+// single subdirectory, so the fixed root area alone is not enough.
+bool fatFindInDirectory(const FatVolume &volume, uint32_t firstCluster, const char *shortName,
+                        FatEntry &out, unsigned depth)
+{
+    if (depth > 2 || firstCluster < 2 || firstCluster >= 0xFFF8U) return false;
+    const uint32_t clusterBytes = volume.sectorsPerCluster * volume.bytesPerSector;
+    // A directory is at most a handful of clusters here; walk up to 16 of them.
+    uint8_t buffer[4096];
+    uint32_t cluster = firstCluster;
+    for (unsigned step = 0; step < 16 && cluster >= 2 && cluster < 0xFFF8U; ++step) {
+        if (clusterBytes > sizeof buffer) return false;
+        const uint64_t offset = volume.dataByteOffset + static_cast<uint64_t>(cluster - 2) * clusterBytes;
+        if (!readPartitionBytes(volume, offset, clusterBytes, buffer)) return false;
+        for (uint32_t index = 0; index + 32 <= clusterBytes; index += 32) {
+            const uint8_t *entry = buffer + index;
+            if (entry[0] == 0) return false;
+            if (entry[0] == 0xE5) continue;
+            if (entry[11] == 0x0F) continue;
+            if (entry[11] & 0x08) continue;
+            const uint32_t child = static_cast<uint32_t>(le16(entry + 26));
+            if ((entry[11] & 0x10) && depth < 2) {
+                if (fatFindInDirectory(volume, child, shortName, out, depth + 1)) return true;
+                continue;
+            }
+            if (memcmp(entry, shortName, 11) != 0) continue;
+            uint32_t nameLength = 0;
+            for (unsigned c = 0; c < 8 && entry[c] != ' '; ++c) out.name[nameLength++] = static_cast<char>(entry[c]);
+            if (entry[8] != ' ') {
+                out.name[nameLength++] = '.';
+                for (unsigned c = 8; c < 11 && entry[c] != ' '; ++c) out.name[nameLength++] = static_cast<char>(entry[c]);
+            }
+            out.name[nameLength] = 0;
+            out.size = le32(entry + 28);
+            out.firstCluster = static_cast<uint32_t>(le16(entry + 26));
+            out.directory = false;
+            out.valid = true;
+            return true;
+        }
+        uint32_t next = 0;
+        if (!fatNextCluster(volume, cluster, next)) return false;
+        cluster = next;
+    }
+    return false;
+}
+
 // Walks the root directory and fills `out` for the requested short name
 // ("MODEM   MDT" style: 8.3, space padded, upper case). Long-name entries are
 // skipped because the firmware files use plain 8.3 names.
@@ -202,6 +249,21 @@ bool fatFindFile(const FatVolume &volume, const char *shortName, FatEntry &out)
             out.directory = (entry[11] & 0x10) != 0;
             out.valid = true;
             return true;
+        }
+    }
+    // The fixed root area can be just a pointer directory; search the subdirectories it names.
+    for (uint32_t offset = 0; offset < entryBytes; offset += maxChunk) {
+        uint32_t chunk = entryBytes - offset;
+        if (chunk > maxChunk) chunk = maxChunk;
+        if (!readPartitionBytes(volume, volume.rootByteOffset + offset, chunk, buffer)) return false;
+        for (uint32_t index = 0; index + 32 <= chunk; index += 32) {
+            const uint8_t *entry = buffer + index;
+            if (entry[0] == 0) return true;
+            if (entry[0] == 0xE5 || entry[11] == 0x0F || (entry[11] & 0x08)) continue;
+            if (!(entry[11] & 0x10)) continue;
+            if (entry[0] == '.') continue;
+            const uint32_t child = static_cast<uint32_t>(le16(entry + 26));
+            if (fatFindInDirectory(volume, child, shortName, out, 1)) return true;
         }
     }
     return true;
