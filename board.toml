@@ -300,6 +300,8 @@ kernel_args = [
   # RBBM probes remain separate opt-in arguments because either block may be
   # inaccessible until CX/GX power and clocks are established.
   "sheng-gpu-probe=1",
+  "sheng-wlan=3",
+  "sheng-wlan-ufs=3",
   # Opt-in write limited to GPUCC_CX_GDSCR.SW_COLLAPSE; no GPU core access.
   # Official UniXNU boot-page UI trace. boot-progress=2 keeps the OS running.
   # boot-diag-resume is deliberately absent: taking the panel back after 30 s
@@ -309,7 +311,6 @@ kernel_args = [
   "boot-ui-focus=chronod",
   "boot-ui-focus2=SpringBoard",
   "boot-ui-focus3=backboardd",
-  "boot-ui-focus4=liveactivitiesd",
   "boot-ui-follow=1",
   # Owned offline HID source (ShengHidInput). offline-hid-input=1 lets the probe
   # attach a virtual keyboard through the ORIGINAL IOHIDDevice ABI;

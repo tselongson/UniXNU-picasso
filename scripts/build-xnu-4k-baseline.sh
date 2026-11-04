@@ -123,6 +123,12 @@ if [ "$PICASSO_CPUFREQ" = 1 ]; then
   # Inert unless the boot arguments carry sheng-cpufreq=<1..4>.
   if [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-picasso-cpufreq.py; fi
 fi
+NATIVE_WLAN=${XNU_SHENG_WLAN:-0}
+if [ "$NATIVE_WLAN" != 0 ] && [ "$NATIVE_WLAN" != 1 ]; then
+  echo 'XNU_SHENG_WLAN must be 0 or 1' >&2
+  exit 1
+fi
+if [ "$NATIVE_WLAN" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-native-wlan.py; fi
 ADRENO620_PROBE=${XNU_ADRENO620_PROBE:-0}
 if [ "$ADRENO620_PROBE" != 0 ] && [ "$ADRENO620_PROBE" != 1 ]; then
   echo 'XNU_ADRENO620_PROBE must be 0 or 1' >&2
@@ -680,6 +686,12 @@ if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
     test -f "$UFS_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$UFS_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $UFS_ARCHIVE"
+  fi
+  if [ "$NATIVE_WLAN" = 1 ]; then
+    WLAN_ARCHIVE=$ROOT/build/native-wlan/libNativeWlan.a
+    test -f "$WLAN_ARCHIVE"
+    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$WLAN_ARCHIVE"
+    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $WLAN_ARCHIVE"
   fi
   if [ "${XNU_NATIVE_ADRENO:-0}" = 1 ]; then
     # NativeAdreno plus its kits (scripts/build-native-adreno-kits.py). No personality is installed: the
