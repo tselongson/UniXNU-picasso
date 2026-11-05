@@ -314,6 +314,7 @@ hif_dump_regs(const char *why)
 #define WMI_SERVICE_READY_EVENTID     0x0001
 #define WMI_READY_EVENTID             0x0002
 #define WMI_START_SCAN_CMDID          0x3001   /* WMI_GRP_SCAN  = 3 */
+#define WMI_VDEV_CREATE_CMDID         0x5001   /* wmi.h: WMI_CMD_GRP(WMI_GRP_VDEV) */
 #define WMI_SCAN_EVENTID              0x3001
 #define WMI_MGMT_RX_EVENTID           0x7001   /* WMI_GRP_MGMT  = 7 */
 
@@ -326,6 +327,7 @@ hif_dump_regs(const char *why)
 #define WMI_TLV_INIT_CMD              74
 #define WMI_TLV_RESOURCE_CONFIG       75
 #define WMI_TLV_START_SCAN_CMD        77
+#define WMI_TLV_VDEV_CREATE_CMD       86      /* wmi-tlv.h enum wmi_tlv_tag */
 /* wmi-tlv.c: WMI_TLV_ABI_VER0 / VER1 / VER_NS0 */
 #define WMI_TLV_ABI_VER0              0x01000000u
 #define WMI_TLV_ABI_VER1              53u
@@ -451,7 +453,7 @@ hif_send_wmi_init(void)
 		uint32_t abi[6];
 		uint32_t num_host_mem_chunks;
 	} __attribute__((packed)) init;
-	uint32_t cfg[44];
+	uint32_t cfg[43];
 	uint32_t i;
 
 	memset(&init, 0, sizeof(init));
@@ -460,10 +462,13 @@ hif_send_wmi_init(void)
 	init.abi[2] = WMI_TLV_ABI_VER_NS0;
 	init.num_host_mem_chunks = 0;
 
-	/* wmi-tlv.h: struct wmi_tlv_resource_config (41 u32).  A deliberately
-	 * small but valid configuration: two vdevs, a handful of peers, 2x2
-	 * chains, native 802.11 decap, no offload. */
-	for (i = 0; i < 44; i++) cfg[i] = 0;
+	/* wmi-tlv.h: struct wmi_tlv_resource_config is 43 u32 once the
+	 * rx_timeout_pri[4] array is counted (the scalar-only count is 40).
+	 * Index map used below: 0 num_vdevs, 1 num_peers, 4 num_peer_keys,
+	 * 5 num_tids, 7/8 tx/rx chain masks, 13 rx_decap_mode,
+	 * 14 scan_max_pending_reqs, 22 num_wds_entries, 28 num_msdu_desc,
+	 * 34 num_wow_filters, 39 wmi_send_separate. */
+	for (i = 0; i < 43; i++) cfg[i] = 0;
 	cfg[0] = 2;      /* num_vdevs */
 	cfg[1] = 16;     /* num_peers */
 	cfg[4] = 2;      /* num_peer_keys */
@@ -496,6 +501,36 @@ static const uint32_t g_scan_freqs[] = {
 
 /* wmi-tlv.c: ath10k_wmi_tlv_op_gen_start_scan()
  * wmi.h: struct wmi_start_scan_common (16 u32) + 6 u32 + 2 mac addresses. */
+/* wmi-tlv.c: ath10k_wmi_tlv_op_gen_vdev_create().  A START_SCAN names a
+ * vdev_id, and the firmware rejects the scan if that vdev was never created -
+ * which is why a scan attempt on a bare WMI session cannot work.  wmi.h:
+ * struct wmi_vdev_create_cmd is 18 packed bytes, WMI_VDEV_TYPE_STA = 2,
+ * WMI_VDEV_SUBTYPE_NONE = 0.  VDEV_CREATE has no response event. */
+static int
+hif_send_vdev_create(void)
+{
+	uint8_t tlv[64];
+	uint8_t *p = tlv;
+	struct {
+		uint32_t vdev_id;
+		uint32_t vdev_type;
+		uint32_t vdev_subtype;
+		uint8_t mac[6];
+	} __attribute__((packed)) cmd;
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.vdev_id = 0;
+	cmd.vdev_type = 2;                     /* WMI_VDEV_TYPE_STA */
+	cmd.vdev_subtype = 0;                  /* WMI_VDEV_SUBTYPE_NONE */
+	cmd.mac[0] = 0x02;                     /* locally administered */
+	cmd.mac[1] = 0x00; cmd.mac[2] = 0x00;
+	cmd.mac[3] = 0x00; cmd.mac[4] = 0x00; cmd.mac[5] = 0x01;
+
+	p = hif_put_tlv(p, WMI_TLV_VDEV_CREATE_CMD, (uint16_t)sizeof(cmd), &cmd);
+	HIF_LOG("WMI: send VDEV_CREATE id=0 type=STA");
+	return hif_wmi_command(WMI_VDEV_CREATE_CMDID, tlv, (uint32_t)(p - tlv));
+}
+
 static int
 hif_send_wmi_start_scan(uint32_t dwell_ms)
 {
@@ -625,8 +660,14 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 		}
 		break;
 	case WMI_READY_EVENTID:
-		HIF_LOG("WMI: READY (0x%x) - WMI is up, scanning is available", event_id);
-		g_state = HIF_READY;
+		HIF_LOG("WMI: READY (0x%x) - WMI is up, creating the scan vdev", event_id);
+		/* START_SCAN carries a vdev_id, so the vdev must exist first. */
+		if (hif_send_vdev_create() == 0) {
+			g_state = HIF_READY;
+			HIF_LOG("WMI: scan vdev created, scanning is available");
+		} else {
+			HIF_LOG("WMI: VDEV_CREATE failed");
+		}
 		break;
 	case WMI_MGMT_RX_EVENTID:
 		hif_handle_mgmt_rx(payload + 4, len - 4);
