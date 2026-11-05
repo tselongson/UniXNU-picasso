@@ -5044,7 +5044,7 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 				uint32_t targets[2] = { sid & 0x7fffu, sid2 & 0x7fffu };
 				for (unsigned t = 0; t < (wlansmmu >= 3 ? 2u : 1u); t++) {
 					uint32_t want = targets[t];
-					int match_idx = -1, free_idx = -1;
+					int exact_idx = -1, match_idx = -1, free_idx = -1;
 					for (uint32_t i = 0; i < num_smr && i < 128; i++) {
 						uint32_t smr = r[(0x800 >> 2) + i];
 						if (!(smr & (1u << 31))) {
@@ -5052,39 +5052,62 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 							continue;
 						}
 						/* SMMU-500 SMR: [31] VALID, [30:16] SID,
-						 * [15:0] MASK (1 = ignore that SID bit).
-						 * The previous code read the two halves the
-						 * other way round, so it never matched the
-						 * entry already covering 0x20 and appended a
-						 * second, lower-priority one - the stream kept
-						 * using the old translation S2CR. */
+						 * [15:0] MASK (1 = ignore that SID bit). */
 						uint32_t mask = smr & 0xffffu;
 						uint32_t smr_sid = (smr >> 16) & 0x7fffu;
-						if (((smr_sid ^ want) & ~mask & 0x7fffu) == 0) {
-							match_idx = (int)i;
-							break;
+						if (((smr_sid ^ want) & ~mask & 0x7fffu) != 0) continue;
+						if (match_idx < 0) match_idx = (int)i;
+						if (mask == 0) { exact_idx = (int)i; break; }
+					}
+					if (exact_idx >= 0) {
+						uint32_t s2 = r[(0xc00 >> 2) + exact_idx];
+						uint32_t type = (s2 >> 16) & 3u;
+						LOG("wlan smmu: SID %x has exact SMR[%d] S2CR=%08x type=%u",
+						    want, exact_idx, s2, type);
+						if (wlansmmu >= 2 && type != 1u) {
+							r[(0xc00 >> 2) + exact_idx] =
+							    (s2 & ~(3u << 16)) | (1u << 16);
+							__asm__ volatile ("dsb sy" ::: "memory");
+							LOG("wlan smmu: S2CR[%d] -> bypass", exact_idx);
 						}
+						continue;
 					}
 					if (match_idx >= 0) {
-						uint32_t s2 = r[(0xc00 >> 2) + match_idx];
-						uint32_t type = (s2 >> 16) & 3u;
-						LOG("wlan smmu: SID %x matched SMR[%d] S2CR=%08x type=%u",
-						    want, match_idx, s2, type);
-						if (wlansmmu >= 2 && type != 1u) {
-							s2 = (s2 & ~(3u << 16)) | (1u << 16);
-							r[(0xc00 >> 2) + match_idx] = s2;
+						uint32_t smr = r[(0x800 >> 2) + match_idx];
+						uint32_t mask = smr & 0xffffu;
+						uint32_t smr_sid = (smr >> 16) & 0x7fffu;
+						LOG("wlan smmu: SID %x covered by SMR[%d] (sid %x mask %x), narrowing",
+						    want, match_idx, smr_sid, mask);
+						/* Never rewrite that entry's S2CR.  Its mask also
+						 * covers streams that are already doing DMA
+						 * (modem, UFS, USB); moving them from
+						 * translation to bypass points their IOVAs at
+						 * the wrong physical pages and the interconnect
+						 * hangs - that is exactly what v336 did.  Drop
+						 * only the bits that make it match `want`, then
+						 * give the WLAN stream a dedicated entry. */
+						uint32_t narrowed = mask & ~(want & 0x7fffu);
+						if (narrowed != mask) {
+							r[(0x800 >> 2) + match_idx] = 0;
 							__asm__ volatile ("dsb sy" ::: "memory");
-							LOG("wlan smmu: S2CR[%d] -> bypass (%08x)", match_idx, s2);
+							r[(0x800 >> 2) + match_idx] =
+							    (smr & 0xffff0000u) | narrowed;
+							__asm__ volatile ("dsb sy" ::: "memory");
+							LOG("wlan smmu: SMR[%d] mask %x -> %x",
+							    match_idx, mask, narrowed);
 						}
-					} else if (wlansmmu >= 2 && free_idx >= 0) {
-						/* Exact match: SID in [30:16], MASK 0 in [15:0].
-						 * Writing (1 << 31) | sid put the SID in the
-						 * MASK field instead, which both matched stream
-						 * 0x00 and left 0x20 uncovered. */
-						r[(0x800 >> 2) + free_idx] = (1u << 31) | (want << 16);
+					}
+					if (wlansmmu >= 2 && free_idx >= 0) {
+						/* Bypass first, then enable the match: the
+						 * other order lets one DMA go through the
+						 * entry while its S2CR still says translation. */
 						r[(0xc00 >> 2) + free_idx] = (1u << 16);
+						r[(0x800 >> 2) + free_idx] = 0;
 						__asm__ volatile ("dsb sy" ::: "memory");
-						LOG("wlan smmu: SID %x allocated SMR[%d] S2CR=bypass",
+						r[(0x800 >> 2) + free_idx] =
+						    (1u << 31) | (want << 16);
+						__asm__ volatile ("dsb sy" ::: "memory");
+						LOG("wlan smmu: SID %x exact SMR[%d] S2CR=bypass",
 						    want, free_idx);
 					} else {
 						LOG("wlan smmu: SID %x no SMR slot (free=%d)", want, free_idx);

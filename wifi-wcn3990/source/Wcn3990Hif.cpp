@@ -237,8 +237,11 @@ hif_ce_send(uint32_t ce, uint8_t *buf, uint32_t len)
 	ring[idx].flags = 0;
 	ring[idx].toeplitz = 0;
 	hif_mb();
-	flush_dcache64((addr64_t)kvtophys((vm_offset_t)buf), len, TRUE);
-	flush_dcache64((addr64_t)kvtophys((vm_offset_t)&ring[idx]), 64, TRUE);
+	flush_dcache64((addr64_t)kvtophys((vm_offset_t)buf), (len + 63u) & ~63u, TRUE);
+	/* Flush the whole source ring: the 16-byte descriptor can straddle two
+	 * 64-byte lines, and a partial clean lets the CE read a stale addr. */
+	flush_dcache64((addr64_t)(ce == 0 ? g_src0_pa : g_src3_pa),
+	    (unsigned)(ce == 0 ? sizeof(s_src0) : sizeof(s_src3)), TRUE);
 
 	*wr = (idx + 1) & (entries - 1);
 
@@ -332,6 +335,7 @@ hif_dump_regs(const char *why)
 #define WMI_TLV_ABI_VER0              0x01000000u
 #define WMI_TLV_ABI_VER1              53u
 #define WMI_TLV_ABI_VER_NS0           0x5f414351u
+#define WMI_TLV_ABI_VER_NS1           0x00004c4du   /* wmi-tlv.c: "ML" */
 /* wmi.h: WMI_SCAN_FILTER_PROBE_REQ */
 #define WMI_SCAN_FILTER_PROBE_REQ     0x20
 
@@ -453,22 +457,26 @@ hif_send_wmi_init(void)
 		uint32_t abi[6];
 		uint32_t num_host_mem_chunks;
 	} __attribute__((packed)) init;
-	uint32_t cfg[43];
+	/* wmi-tlv.h: struct wmi_tlv_resource_config is exactly 44 __le32 once
+	 * rx_timeout_pri[4] is expanded.  Sending 43 made the TLV four bytes
+	 * short of sizeof(struct), which the firmware can reject outright. */
+	uint32_t cfg[44];
 	uint32_t i;
 
 	memset(&init, 0, sizeof(init));
 	init.abi[0] = WMI_TLV_ABI_VER0;
 	init.abi[1] = WMI_TLV_ABI_VER1;
 	init.abi[2] = WMI_TLV_ABI_VER_NS0;
+	init.abi[3] = WMI_TLV_ABI_VER_NS1;
 	init.num_host_mem_chunks = 0;
 
-	/* wmi-tlv.h: struct wmi_tlv_resource_config is 43 u32 once the
-	 * rx_timeout_pri[4] array is counted (the scalar-only count is 40).
-	 * Index map used below: 0 num_vdevs, 1 num_peers, 4 num_peer_keys,
-	 * 5 num_tids, 7/8 tx/rx chain masks, 13 rx_decap_mode,
-	 * 14 scan_max_pending_reqs, 22 num_wds_entries, 28 num_msdu_desc,
-	 * 34 num_wow_filters, 39 wmi_send_separate. */
-	for (i = 0; i < 43; i++) cfg[i] = 0;
+	/* wmi-tlv.h: struct wmi_tlv_resource_config is 44 u32 once the
+	 * rx_timeout_pri[4] array is counted.  Index map used below:
+	 * 0 num_vdevs, 1 num_peers, 4 num_peer_keys, 5 num_tids,
+	 * 7/8 tx/rx chain masks, 13 rx_decap_mode, 14 scan_max_pending_reqs,
+	 * 22 num_wds_entries, 28 num_msdu_desc, 34 num_wow_filters,
+	 * 39 wmi_send_separate, 43 host_capab. */
+	for (i = 0; i < 44; i++) cfg[i] = 0;
 	cfg[0] = 2;      /* num_vdevs */
 	cfg[1] = 16;     /* num_peers */
 	cfg[4] = 2;      /* num_peer_keys */
@@ -565,11 +573,13 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 	cmd.common[5] = dwell_ms;                /* dwell_time_active */
 	cmd.common[6] = dwell_ms + 100;          /* dwell_time_passive */
 	cmd.common[7] = 50;                      /* min_rest_time */
-	cmd.common[8] = 200;                     /* max_rest_time */
+	cmd.common[8] = 5000;                    /* max_rest_time (ath10k default) */
 	cmd.common[9] = 0;                       /* repeat_probe_time */
 	cmd.common[10] = 0;                      /* probe_spacing_time */
 	cmd.common[11] = 0;                      /* idle_time */
-	cmd.common[12] = 3000;                   /* max_scan_time */
+	/* 39 channels x (dwell + rest) needs about 4 s; the previous 3000 ms
+	 * cut every full-band scan short. */
+	cmd.common[12] = 20000;                  /* max_scan_time */
 	cmd.common[13] = 0;                      /* probe_delay */
 	/* ath10k's TLV path XORs WMI_SCAN_FILTER_PROBE_REQ into the flags.  We
 	 * emit the post-XOR value directly: report beacons/probe responses only. */
@@ -786,6 +796,12 @@ wcn3990_hif_poll(void)
 	if (g_stage < 3) return;
 	if (g_scan_active) g_scan_polls++;
 
+	/* The CE updates nbytes behind the CPU's back.  A cache line that still
+	 * holds the zero from the initial memset will keep reporting "empty"
+	 * forever, so invalidate the destination ring before sampling it.  One
+	 * kilobyte per poll is cheap next to losing every receive. */
+	flush_dcache64((addr64_t)g_dst2_pa, (unsigned)sizeof(s_dst2), TRUE);
+
 	while (budget-- > 0) {
 		struct wcn_ce_desc_64 *d = &s_dst2[g_sw2];
 		uint32_t nbytes;
@@ -799,7 +815,7 @@ wcn3990_hif_poll(void)
 
 		flush_dcache64((addr64_t)kvtophys((vm_offset_t)d), 64, TRUE);
 		flush_dcache64((addr64_t)(g_rx2_pa + (uint64_t)idx * CE_BUF_BYTES),
-		    nbytes, TRUE);
+		    (nbytes + 63u) & ~63u, TRUE);
 		hif_handle_rx(s_rx2[idx], nbytes);
 
 		d->nbytes = 0;
