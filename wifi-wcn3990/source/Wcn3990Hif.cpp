@@ -256,15 +256,21 @@ hif_ce_send(uint32_t ce, uint8_t *buf, uint32_t len)
 
 	*wr = (idx + 1) & (entries - 1);
 
-	/* Real CE register first (ath10k_ce_src_ring_write_index_set).  WCN3990
-	 * also exposes a TrustZone-safe shadow copy; write that too so whichever
-	 * one the firmware polls sees the same index.  snoc.c:0x3C/0x40 table. */
-	hif_reg_write(ce, CE_SR_WR_INDEX, *wr);
+	/* wcn3990 sets hw_params.shadow_reg_support, and ce.c only takes the
+	 * shadow branch in that case:
+	 *   if (ar->hw_params.shadow_reg_support)
+	 *           ath10k_ce_shadow_src_ring_write_index_set(...)
+	 *   else
+	 *           ath10k_ce_src_ring_write_index_set(...)
+	 * so the doorbell the CE actually watches is 0x32000/0x3200C, not the
+	 * per-CE 0x3c register. */
 	if (ce == 0) shadow = (uint8_t *)(uintptr_t)CE0_SHADOW_SR_WR;
 	else if (ce == 3) shadow = (uint8_t *)(uintptr_t)CE3_SHADOW_SR_WR;
 	if (shadow) {
 		*(volatile uint32_t *)(uintptr_t)(g_ce_va + (uintptr_t)shadow) = *wr;
 		hif_mb();
+	} else {
+		hif_reg_write(ce, CE_SR_WR_INDEX, *wr);
 	}
 
 	HIF_LOG("ce%u send: desc %u pa %llx len %u -> wr %u (reg %x shadow %x)",
