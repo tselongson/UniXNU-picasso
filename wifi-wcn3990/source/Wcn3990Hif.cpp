@@ -848,9 +848,12 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 
 	if (!ce_va || g_regs_live) return;
 
-	/* wcn3990-hif=0..3 pins a stage; absent (or 4+) runs the auto ladder. */
-	g_hif_mode = 4;
-	if (PE_parse_boot_argn("wcn3990-hif", &v, sizeof(v)) && v <= 3) {
+	/* Default 3 = program the CE and post the buffers immediately, because
+	 * HTC READY arrives within milliseconds of WLFW mission mode and a late
+	 * receive ring loses it forever.  wcn3990-hif=1/2/3 pins a stage and
+	 * wcn3990-hif=4 re-enables the 3 s / 6 s diagnostic ladder. */
+	g_hif_mode = 3;
+	if (PE_parse_boot_argn("wcn3990-hif", &v, sizeof(v)) && v <= 4) {
 		g_hif_mode = (int)v;
 	}
 	if (g_hif_mode == 0) {
@@ -930,7 +933,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	g_state = HIF_CE_UP;
 	g_regs_live = true;
 
-	HIF_LOG("stage 1: descriptors in DDR, no CE register writes yet (mode %d)", g_hif_mode);
+	HIF_LOG("descriptors ready, mode %d stage %d", g_hif_mode, g_stage);
 	if (g_hif_mode == 2) hif_program_bases();
 	if (g_hif_mode == 3) {
 		hif_program_bases();
