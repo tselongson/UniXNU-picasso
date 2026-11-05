@@ -2790,9 +2790,6 @@ int mbuf_copydata(void *m, size_t off, size_t len, void *out_data);
 }
 
 static void picasso_wlan_ce_poll(void);
-/* Set only once the CE2 destination ring and its window are live; the net
- * thread polls from the moment en0 attaches, long before WLFW is up. */
-static bool g_ce2_ready;
 
 static unsigned int
 picasso_wlan_poll(void)
@@ -3119,149 +3116,46 @@ picasso_add_bss(const char *ssid, const uint8_t *bssid, uint16_t freq, int16_t r
 #define WLAN_CE_BASE_PA             0x18800000ull
 #define WLAN_CE_SIZE                0x300000ull
 
-struct picasso_ce_desc {
-	uint64_t addr;
-	uint16_t nbytes;
-	uint16_t flags;
-	uint32_t toeplitz;
-} __attribute__((packed));
-
-/*
- * Qualcomm WCN3990 Copy Engine Register Offsets (ath10k hw.c):
- * CE2: target->host WMI / over-the-air frames (offset 0x242000 from WLAN_CE_BASE_PA)
- *
- * dr_base_addr:        0x0c (dr_base_lo)
- * dr_size_addr:        0x14 (dr_size)
- * current_drri_addr:   0x48 (read-only destination ring read index)
- *
- * Shadow register for destination ring write index:
- * shadow_dst_wr_ind_addr(CE2) = 0x00032038
- */
-#define WLAN_CE2_OFFSET             0x00242000ull
-#define CE_DR_BASE_LO               0x0c
-#define CE_DR_SIZE                  0x14
-#define CE_CURRENT_DRRI             0x48
-
-#define WLAN_CE2_SHADOW_DST_WR_IDX  0x00032038ull
-
-#define CE2_RING_ENTRIES            64
-#define CE2_BUF_SIZE                2048
+/* ---------------------------------------------------------------------------
+ * Host-side WCN3990 HIF.  The implementation lives in Wcn3990Hif.cpp: it
+ * programs CE0/CE2/CE3, speaks HTC and drives WMI-TLV.  This file keeps only
+ * the MMIO mapping, the beacon parser (fed by the HIF's frame sink) and the
+ * two call sites the rest of the stack already uses.
+ * ------------------------------------------------------------------------- */
+extern "C" {
+void wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa);
+void wcn3990_hif_poll(void);
+int  wcn3990_hif_start_scan(uint32_t dwell_ms);
+int  wcn3990_hif_state(void);
+void wcn3990_hif_set_frame_sink(void (*sink)(const uint8_t *, size_t, int16_t, uint16_t));
+}
 
 static IOMemoryMap *g_wlan_ce_map = NULL;
 static volatile uint8_t *g_wlan_ce_base = NULL;
-static volatile uint32_t *g_ce2_regs = NULL;
-static volatile uint32_t *g_ce2_shadow_wr = NULL;
-
-static struct picasso_ce_desc s_ce2_ring[CE2_RING_ENTRIES] __attribute__((aligned(4096)));
-static uint8_t s_ce2_buf[CE2_RING_ENTRIES * CE2_BUF_SIZE] __attribute__((aligned(4096)));
-
-static struct picasso_ce_desc *g_ce2_ring = NULL;
-static uint8_t *g_ce2_buf_virt = NULL;
-static uint64_t g_ce2_buf_phys = 0;
-static uint32_t g_ce2_sw_index = 0;
-
-extern "C" uint64_t kvtophys(vm_offset_t va);
 
 static void picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t rssi, uint16_t freq);
 
 static void
 picasso_wlan_ce_init(void)
 {
-	LOG("picasso_wlan_ce_init: Initializing Copy Engine 2 (Target->Host WMI/OTA Beacons)...");
-
-	if (!g_ce2_ring) {
-		bzero(s_ce2_ring, sizeof(s_ce2_ring));
-		bzero(s_ce2_buf, sizeof(s_ce2_buf));
-
-		g_ce2_ring = s_ce2_ring;
-		g_ce2_buf_virt = s_ce2_buf;
-
-		uint64_t ring_pa = kvtophys((vm_offset_t)s_ce2_ring);
-		uint64_t buf_pa = kvtophys((vm_offset_t)s_ce2_buf);
-		g_ce2_buf_phys = buf_pa;
-
-		for (unsigned i = 0; i < CE2_RING_ENTRIES; i++) {
-			g_ce2_ring[i].addr = g_ce2_buf_phys + (uint64_t)i * CE2_BUF_SIZE;
-			g_ce2_ring[i].nbytes = 0;
-			g_ce2_ring[i].flags = 0;
-			g_ce2_ring[i].toeplitz = 0;
-		}
-		mb();
-
+	if (!g_wlan_ce_map) {
+		g_wlan_ce_map = map_phys(WLAN_CE_BASE_PA, WLAN_CE_SIZE, false);
 		if (!g_wlan_ce_map) {
-			g_wlan_ce_map = map_phys(WLAN_CE_BASE_PA, WLAN_CE_SIZE, false);
-			if (!g_wlan_ce_map) {
-				LOG("picasso_wlan_ce_init: failed to map WLAN CE MMIO region (0x%llx)", WLAN_CE_BASE_PA);
-				return;
-			}
-			g_wlan_ce_base = (volatile uint8_t *)g_wlan_ce_map->getVirtualAddress();
-			g_ce2_regs = (volatile uint32_t *)(g_wlan_ce_base + WLAN_CE2_OFFSET);
-			g_ce2_shadow_wr = (volatile uint32_t *)(g_wlan_ce_base + WLAN_CE2_SHADOW_DST_WR_IDX);
+			LOG("picasso_wlan_ce_init: cannot map WLAN CE MMIO 0x%llx", WLAN_CE_BASE_PA);
+			return;
 		}
-
-		/* Note: Writing to hardware shadow write register directly can trigger
-		 * a TrustZone XPU interconnect violation on SM7250 if peripheral DMA
-		 * is not pre-approved in TZ memory policies. Initialize descriptors in RAM. */
-		g_ce2_sw_index = 0;
-		LOG("picasso_wlan_ce_init: CE2 dest ring initialized safely at PA 0x%llx (DR_BASE=0x%x, DR_SIZE=%u)",
-		    ring_pa,
-		    g_ce2_regs[CE_DR_BASE_LO >> 2],
-		    g_ce2_regs[CE_DR_SIZE >> 2]);
-		/* Only now may the net thread's poll touch the ring. */
-		g_ce2_ready = (g_ce2_ring != NULL && g_ce2_buf_virt != NULL && g_ce2_shadow_wr != NULL);
+		g_wlan_ce_base = (volatile uint8_t *)g_wlan_ce_map->getVirtualAddress();
 	}
+	/* Beacons delivered over WMI_MGMT_RX_EVENT go through the standard
+	 * 802.11 parser below, which fills g_picasso_bsss[]. */
+	wcn3990_hif_set_frame_sink(picasso_parse_beacon_frame);
+	wcn3990_hif_init(g_wlan_ce_base, WLAN_CE_BASE_PA);
 }
 
 static void
 picasso_wlan_ce_poll(void)
 {
-	if (!g_ce2_ready || !g_ce2_ring || !g_ce2_buf_virt || !g_ce2_shadow_wr) return;
-
-	for (unsigned iter = 0; iter < CE2_RING_ENTRIES; iter++) {
-		if (g_ce2_sw_index >= CE2_RING_ENTRIES) {
-			g_ce2_sw_index = 0;
-			break;
-		}
-		struct picasso_ce_desc *desc = &g_ce2_ring[g_ce2_sw_index];
-		uint16_t nbytes = desc->nbytes;
-		if (nbytes == 0) {
-			break;
-		}
-
-		LOG("picasso_wlan_ce_poll: [slot %u] received %u bytes", g_ce2_sw_index, nbytes);
-
-		if (nbytes <= CE2_BUF_SIZE) {
-			const uint8_t *pkt = g_ce2_buf_virt + (uint64_t)g_ce2_sw_index * CE2_BUF_SIZE;
-			/*
-			 * Check packet for 802.11 Beacon (0x80) or Probe Response (0x50) frame.
-			 * The frame may be raw 802.11 or encapsulated in HTC (8B) + WMI (4B) + TLVs.
-			 */
-			bool parsed = false;
-			for (size_t off = 0; off + 36 <= (size_t)nbytes; off++) {
-				uint8_t b0 = pkt[off];
-				uint8_t b1 = pkt[off + 1];
-				if ((b0 == 0x80 || b0 == 0x50) && b1 == 0x00) {
-					picasso_parse_beacon_frame(pkt + off, nbytes - off, -50, 2412);
-					parsed = true;
-					break;
-				}
-			}
-			if (!parsed && nbytes >= 36) {
-				if (pkt[0] == 0x80 || pkt[0] == 0x50) {
-					picasso_parse_beacon_frame(pkt, nbytes, -50, 2412);
-				} else if (nbytes > 12 && (pkt[12] == 0x80 || pkt[12] == 0x50)) {
-					picasso_parse_beacon_frame(pkt + 12, nbytes - 12, -50, 2412);
-				}
-			}
-		}
-
-		desc->nbytes = 0;
-		mb();
-
-		g_ce2_sw_index = (g_ce2_sw_index + 1) & (CE2_RING_ENTRIES - 1);
-		*g_ce2_shadow_wr = (g_ce2_sw_index - 1) & (CE2_RING_ENTRIES - 1);
-		mb();
-	}
+	wcn3990_hif_poll();
 }
 
 static void
@@ -3314,95 +3208,31 @@ picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t rssi, uint1
 	}
 }
 
-static void
-picasso_feed_air_beacon(const char *ssid, const uint8_t *bssid, uint8_t channel, uint16_t freq, int16_t rssi, bool wpa2)
-{
-	uint8_t frame[256];
-	memset(frame, 0, sizeof(frame));
-
-	/* IEEE 802.11 Management Frame Header */
-	frame[0] = 0x80; /* Frame Control: Management Beacon (0x0080) */
-	frame[1] = 0x00;
-	frame[2] = 0x00; /* Duration */
-	frame[3] = 0x00;
-	memset(frame + 4, 0xff, 6);  /* DA: Broadcast */
-	memcpy(frame + 10, bssid, 6); /* SA: BSSID */
-	memcpy(frame + 16, bssid, 6); /* BSSID */
-	frame[22] = 0x10;            /* Sequence Control */
-	frame[23] = 0x00;
-
-	/* Fixed parameters */
-	uint64_t ts = mach_absolute_time();
-	memcpy(frame + 24, &ts, 8);   /* Timestamp: 8 bytes */
-	frame[32] = 0x64;             /* Beacon Interval: 100 TU (102.4 ms) */
-	frame[33] = 0x00;
-	frame[34] = wpa2 ? 0x11 : 0x01; /* Capability: ESS | Privacy */
-	frame[35] = 0x00;
-
-	size_t off = 36;
-	/* Element 0: SSID */
-	uint8_t slen = (uint8_t)strlen(ssid);
-	if (slen > 32) slen = 32;
-	frame[off++] = 0;
-	frame[off++] = slen;
-	memcpy(frame + off, ssid, slen);
-	off += slen;
-
-	/* Element 1: Supported Rates (1, 2, 5.5, 11, 6, 9, 12, 18 Mbps) */
-	frame[off++] = 1;
-	frame[off++] = 8;
-	frame[off++] = 0x82; frame[off++] = 0x84; frame[off++] = 0x8b; frame[off++] = 0x96;
-	frame[off++] = 0x0c; frame[off++] = 0x12; frame[off++] = 0x18; frame[off++] = 0x24;
-
-	/* Element 3: DS Parameter Set (Current Channel) */
-	frame[off++] = 3;
-	frame[off++] = 1;
-	frame[off++] = channel;
-
-	/* Element 48: RSN (WPA2-PSK AES-CCMP) */
-	if (wpa2) {
-		frame[off++] = 48;
-		frame[off++] = 20;
-		frame[off++] = 0x01; frame[off++] = 0x00;
-		frame[off++] = 0x00; frame[off++] = 0x0f; frame[off++] = 0xac; frame[off++] = 0x04;
-		frame[off++] = 0x01; frame[off++] = 0x00;
-		frame[off++] = 0x00; frame[off++] = 0x0f; frame[off++] = 0xac; frame[off++] = 0x04;
-		frame[off++] = 0x01; frame[off++] = 0x00;
-		frame[off++] = 0x00; frame[off++] = 0x0f; frame[off++] = 0xac; frame[off++] = 0x02;
-		frame[off++] = 0x00; frame[off++] = 0x00;
-	}
-
-	/* Pass raw over-the-air frame directly to standard IEEE 802.11 beacon parser */
-	picasso_parse_beacon_frame(frame, off, rssi, freq);
-}
-
 static int
 picasso_sta_scan(const struct hakios_sta_scan *what)
 {
-	(void)what;
-	IOLog("picasso_sta_scan: WCN3990 scanning over-the-air 2.4GHz & 5GHz channels...\n");
+	uint32_t dwell = (what && what->dwell_ms) ? what->dwell_ms : 40;
+
+	IOLog("picasso_sta_scan: real WCN3990 WMI scan (dwell %u ms, HIF state %d)\n",
+	    dwell, wcn3990_hif_state());
 
 	g_picasso_bss_count = 0;
+	if (wcn3990_hif_start_scan(dwell) != 0) {
+		/* No fake networks: if the HIF is not up yet, the scan result is
+		 * honestly empty and wifid can ask again. */
+		IOLog("picasso_sta_scan: HIF not ready, reporting no networks\n");
+		return 0;
+	}
 
-	/* Real physical over-the-air RF access points present in current environment */
-	static const uint8_t bssid_tomc_5g[6] = { 0x26, 0x0b, 0x2a, 0xb4, 0x69, 0x4c };
-	static const uint8_t bssid_tomc_2g[6] = { 0x26, 0x0b, 0x2a, 0x14, 0x69, 0x4c };
-	static const uint8_t bssid_5g[6]      = { 0x26, 0x0b, 0x2a, 0x94, 0x69, 0x4c };
-	static const uint8_t bssid_nhim_5g[6] = { 0x24, 0x0b, 0x2a, 0xd4, 0x69, 0x4d };
-	static const uint8_t bssid_nhim_2g[6] = { 0x24, 0x0b, 0x2a, 0xd4, 0x69, 0x4c };
-	static const uint8_t bssid_truong[6]  = { 0x26, 0x0b, 0x2a, 0x24, 0x69, 0x4c };
+	/* hakios_sta_ask_scan() is synchronous: it calls ops->heard() as soon as
+	 * scan() returns.  Wait here while the modem thread drains CE2, parses
+	 * WMI_MGMT_RX_EVENT beacons and fills g_picasso_bsss[]. */
+	for (unsigned i = 0; i < 30; i++) {
+		IOSleep(100);
+	}
 
-	picasso_feed_air_beacon("ID-TOMC-VP", bssid_tomc_5g, 48, 5240, -26, true);
-	picasso_feed_air_beacon("ID-TOMC-VP", bssid_tomc_2g, 1, 2412, -29, true);
-	picasso_feed_air_beacon("5G", bssid_5g, 48, 5240, -24, true);
-	picasso_feed_air_beacon("Nhim Chua", bssid_nhim_5g, 48, 5240, -24, true);
-	picasso_feed_air_beacon("Nhim Chua", bssid_nhim_2g, 1, 2412, -29, true);
-	picasso_feed_air_beacon("TRUONG CUOM", bssid_truong, 1, 2412, -30, true);
-
-	/* Poll Copy Engine 2 ring for any incoming hardware OTA packets */
-	picasso_wlan_ce_poll();
-
-	IOLog("picasso_sta_scan: WCN3990 scan complete, heard %u access points\n", g_picasso_bss_count);
+	IOLog("picasso_sta_scan: real scan complete, heard %u access points (HIF state %d)\n",
+	    g_picasso_bss_count, wcn3990_hif_state());
 	return 0;
 }
 
