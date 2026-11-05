@@ -5030,7 +5030,15 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 		 *
 		 * Apps SMMU on SM7250 is ARM MMU-500 (SMMUv2):
 		 * SMR registers at 0x800 + 4*i, S2CR at 0xc00 + 4*i. */
-		uint32_t wlansmmu = 2;
+		/* Default 0: leave the Apps SMMU exactly as the bootloader left it.
+		 * Stream 0x20 is already covered by SMR[6] (sid 0, mask 0xe0), and
+		 * that entry also covers 0x00/0x40/0x80/0xc0 - masters that are
+		 * doing DMA during bsd_init.  Rewriting the entry's SMR or S2CR
+		 * (v336, v338) hangs the interconnect on the store itself, so a
+		 * bypass cannot be installed here.  modem_wlansmmu=2 enables the
+		 * old attempt for experiments only; a real fix has to come from a
+		 * context bank or the DT's iommu-dma-addr-pool. */
+		uint32_t wlansmmu = 0;
 		uint32_t sid = 0x20;                 /* decimal 32 if overridden */
 		uint32_t sid2 = 0xc0;               /* legacy platform, best-effort */
 		(void)PE_parse_boot_argn("modem_wlansmmu", &wlansmmu, sizeof(wlansmmu));

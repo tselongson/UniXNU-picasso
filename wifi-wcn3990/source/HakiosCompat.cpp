@@ -320,6 +320,9 @@ hakios_ufs_read_part(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
 			continue;
 		}
 		if (native_ufs_raw_read(p->lun, lba4k, blocks, dst) != 0) return -1;
+		/* Same pacing as read4k(), for the 128 KiB batch path. */
+		ufs_io_tuning();
+		if (g_ufs_slow_ms) IOSleep(g_ufs_slow_ms);
 		dst += bytes;
 		len -= bytes;
 		lba4k += blocks;
@@ -372,8 +375,13 @@ picasso_wlan_boot_thread(void *arg, wait_result_t wr)
 	(void)wr;
 	/* Leave bsd_init alone: ifnet_allocate_extended needs the network stack
 	 * settled, and a blocking WCN3990 bring-up here would keep the CDC console
-	 * from ever starting. Five seconds is past the root publication. */
-	IOSleep(5000);
+	 * from ever starting. Five seconds is past the root publication.
+	 * wlan_delay_ms moves the whole bring-up later, which keeps the ~30 MiB
+	 * firmware pull off the UFS host while init is still exec'ing launchd. */
+	uint32_t delay_ms = 5000;
+	PE_parse_boot_argn("wlan_delay_ms", &delay_ms, sizeof(delay_ms));
+	if (delay_ms < 1000) delay_ms = 1000;
+	IOSleep(delay_ms);
 	printf("PICASSO_WLAN: deferred init thread: starting en0 and WCN3990\n");
 	hakios_net_init();
 	picasso_modem_init();
