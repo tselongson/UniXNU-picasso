@@ -1285,10 +1285,6 @@ index 0000000000000000000000000000000000000000..b0cb022b7bf788160665d262e9105498
 ++		printf("PICASSO USB: SMMU bind S2CR readback FAIL\n");
 ++		return false;
 ++	}
-++	/* SMMU-500 SMR is [31] VALID, [30:16] SID, [15:0] MASK.  Writing the
-++	 * stream id into the low half made this entry match SID 0x00, 0x20,
-++	 * 0x40 ... instead of 0xe0 - it silently swallowed the WLAN stream,
-++	 * whose CE then had no translation and froze the interconnect. */
 ++	picasso_usb_smmu_write(smmu, 0x800u + 4u * plan->slot,
 ++	    0x80000000u | (USB_STREAM_ID << 16));
 ++	uint32_t smr = usb_rd(smmu, 0x800u + 4u * plan->slot);
