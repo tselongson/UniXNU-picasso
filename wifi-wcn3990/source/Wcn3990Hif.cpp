@@ -943,6 +943,11 @@ hif_ce_ctrl1(uint32_t ce, bool is_src)
 	v |= CE_CTRL1_RRI_UPD;
 	hif_reg_write(ce, CE_CTRL1, v);
 	HIF_LOG("CE%u ctrl1 %08x -> %08x", ce, old, v);
+	/* The CDC console has a transfer in flight per line; if the very next
+	 * register access wedges the interconnect the tail of the log is lost.
+	 * 30 ms here makes the printed line an accurate record of where we got
+	 * to, which is worth far more than the delay. */
+	IOSleep(30);
 }
 
 /* Stage 2: program the CE ring registers but do not post any receive buffer.
@@ -1014,6 +1019,9 @@ hif_post_buffers(void)
 	hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
 	HIF_LOG("stage 3: posted %u receive buffers (desc.addr=%llx wr=%u)",
 	    n, (unsigned long long)s_dst2[0].addr, g_post2);
+	/* Same reason as in hif_ce_ctrl1(): if the target's first write into
+	 * these buffers faults in the SMMU, this line must already be out. */
+	IOSleep(50);
 }
 
 extern "C" void
