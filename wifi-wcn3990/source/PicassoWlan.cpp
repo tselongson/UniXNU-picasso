@@ -5162,18 +5162,32 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 				LOG("wlan smmu: cannot map 0x15000000");
 			}
 		} else {
-			/* Read-only look at the entry that owns stream 0x20.  Only the
-			 * stream-match registers are touched: reading a context bank
-			 * past the implemented count (CBAR at 0x8000 + n*0x1000) hung
-			 * the interconnect in v341, which itself says the bank S2CR[6]
-			 * names is probably not implemented. */
-			vm_offset_t smmu = ml_io_map(0x15000000, 0x2000);
+			/* Read-only.  Reading a context bank past the implemented
+			 * count (CBAR at 0x8000 + n*0x1000) hung the interconnect
+			 * in v341, so only the stream-match half is inspected.
+			 * This dump answers one question: did the entry that
+			 * picasso_wlan_smmu_early() took at bsd_init survive? */
+			vm_offset_t smmu = ml_io_map(WLAN_SMMU_PA, 0x1000);
 			if (smmu != 0) {
 				volatile uint32_t *r = (volatile uint32_t *)smmu;
-				uint32_t s2cr6 = r[(0xc00 >> 2) + 6];
-				uint32_t smr6 = r[(0x800 >> 2) + 6];
-				LOG("wlan smmu: SMR[6]=%08x S2CR[6]=%08x cb=%u type=%u",
-				    smr6, s2cr6, s2cr6 & 0xffu, (s2cr6 >> 16) & 3u);
+				uint32_t i;
+				int owner = -1, free_slot = -1;
+
+				for (i = 0; i < 8; i++) {
+					uint32_t smr = r[(0x800 >> 2) + i];
+					uint32_t s2 = r[(0xc00 >> 2) + i];
+					LOG("wlan smmu: SMR[%u]=%08x S2CR[%u]=%08x cb=%u type=%u",
+					    i, smr, i, s2, s2 & 0xffu, (s2 >> 16) & 3u);
+					if (!(smr & WLAN_SMMU_SMR_VALID)) {
+						if (free_slot < 0) free_slot = (int)i;
+					} else if (owner < 0 &&
+					    wlan_smmu_smr_matches(smr, WLAN_SMMU_SID)) {
+						owner = (int)i;
+					}
+				}
+				LOG("wlan smmu: stream 0x20 owner=%d type=%u free=%d",
+				    owner, owner >= 0 ?
+				    (r[(0xc00 >> 2) + owner] >> 16) & 3u : 0, free_slot);
 			} else {
 				LOG("wlan smmu: cannot map 0x15000000");
 			}
@@ -5274,38 +5288,110 @@ done:
 	thread_terminate(current_thread());
 }
 
+/* MMU-500 SMR: [31] VALID, [30:16] SID, [15:0] MASK (1 = ignore that SID bit).
+ * S2CR: [17:16] TYPE (0 = translation, 1 = bypass, 2 = fault), [7:0] CBNDX. */
+#define WLAN_SMMU_PA                0x15000000ull
+#define WLAN_SMMU_SID               0x20u
+#define WLAN_SMMU_SMR_VALID         (1u << 31)
+#define WLAN_SMMU_S2CR_BYPASS       (1u << 16)
+
+static bool
+wlan_smmu_smr_matches(uint32_t smr, uint32_t sid)
+{
+	uint32_t mask, entry_sid;
+
+	if (!(smr & WLAN_SMMU_SMR_VALID)) return false;
+	mask = smr & 0xffffu;
+	entry_sid = (smr >> 16) & 0x7fffu;
+	return ((entry_sid ^ sid) & ~mask & 0x7fffu) == 0;
+}
+
 /*
- * Optional early bypass of the WLAN stream, called from the first line of
- * bsd_init.  At that point neither the root UFS nor USB has started DMA, so
- * rewriting the stream-match entry cannot disturb an in-flight transfer - which
- * is why the very same store hangs when the modem thread does it minutes later
- * (v336 wrote S2CR[6], v338 wrote SMR[6], both froze the interconnect).
- * Off by default; enable with wlan_smmu_early=1 while validating.
+ * Give stream 0x20 (the WLAN copy engines) its own bypass entry, called from
+ * the first line of bsd_init.
+ *
+ * The Apps SMMU is empty at that moment (v342 printed SMR[6]=0 S2CR[6]=0), so a
+ * free slot - normally slot 0 - can be claimed without touching a live entry.
+ * That matters because every attempt to rewrite the entry the bootloader later
+ * installs (SMR[6]=800000e0, a *mask* entry that also spans 0x00/0x40..0xe0 and
+ * is shared with the USB console) froze the interconnect: v336 wrote its S2CR,
+ * v338 wrote its SMR, both with DMA already in flight.
+ *
+ * Writing a *free* slot instead is harmless, and because slot 0 wins over slot
+ * 6 in the SMR scan the WLAN stream no longer depends on what the bootloader or
+ * the USB driver put there later.
  */
 extern "C" void
 picasso_wlan_smmu_early(void)
 {
-	uint32_t on = 0;
-	(void)PE_parse_boot_argn("wlan_smmu_early", &on, sizeof(on));
-	if (!on) return;
+	uint32_t on = 1;
+	uint32_t idr0, count, i;
+	int free_slot = -1, match = -1;
+	vm_offset_t smmu;
+	volatile uint32_t *r;
 
-	vm_offset_t smmu = ml_io_map(0x15000000, 0x2000);
+	if (PE_parse_boot_argn("wlan_smmu_early", &on, sizeof(on)) && on == 0) {
+		LOG("wlan smmu early: disabled by boot-arg");
+		return;
+	}
+
+	smmu = ml_io_map(WLAN_SMMU_PA, 0x1000);
 	if (smmu == 0) {
-		LOG("wlan smmu early: cannot map 0x15000000");
+		LOG("wlan smmu early: cannot map %llx", WLAN_SMMU_PA);
 		return;
 	}
-	volatile uint32_t *r = (volatile uint32_t *)smmu;
-	uint32_t s2 = r[(0xc00 >> 2) + 6];
-	uint32_t type = (s2 >> 16) & 3u;
-	LOG("wlan smmu early: SMR[6]=%08x S2CR[6]=%08x type=%u",
-	    r[(0x800 >> 2) + 6], s2, type);
-	if (type == 1u) {
-		LOG("wlan smmu early: stream 0x20 is already bypassed");
+	r = (volatile uint32_t *)smmu;
+
+	idr0 = r[0x20 >> 2];
+	count = idr0 & 0xffu;
+	LOG("wlan smmu early: idr0=%08x smr_count=%u", idr0, count);
+	if (count == 0 || count > 128) {
+		/* Registers still read as zero this early; the array is at a
+		 * fixed offset, so assume the architectural maximum and rely on
+		 * the VALID bit instead of the reported size. */
+		count = 128;
+	}
+
+	for (i = 0; i < count; i++) {
+		uint32_t smr = r[(0x800 >> 2) + i];
+
+		if (!(smr & WLAN_SMMU_SMR_VALID)) {
+			if (free_slot < 0) free_slot = (int)i;
+			continue;
+		}
+		if (match < 0 && wlan_smmu_smr_matches(smr, WLAN_SMMU_SID)) {
+			match = (int)i;
+		}
+	}
+	LOG("wlan smmu early: stream 0x20 match=%d first_free=%d", match, free_slot);
+
+	if (match >= 0) {
+		uint32_t s2 = r[(0xc00 >> 2) + match];
+		uint32_t type = (s2 >> 16) & 3u;
+
+		if (type == 1u) {
+			LOG("wlan smmu early: SMR[%d] already bypasses 0x20", match);
+			return;
+		}
+		/* Never rewrite it: this entry can cover other live masters. */
+		LOG("wlan smmu early: SMR[%d] covers 0x20 with type=%u, leaving it alone",
+		    match, type);
 		return;
 	}
-	r[(0xc00 >> 2) + 6] = (s2 & ~(3u << 16)) | (1u << 16);
+	if (free_slot < 0) {
+		LOG("wlan smmu early: no free SMR slot");
+		return;
+	}
+
+	r[(0x800 >> 2) + free_slot] = WLAN_SMMU_SMR_VALID |
+	    (WLAN_SMMU_SID << 16);
 	__asm__ volatile ("dsb sy" ::: "memory");
-	LOG("wlan smmu early: S2CR[6] -> bypass (%08x)", r[(0xc00 >> 2) + 6]);
+	r[(0xc00 >> 2) + free_slot] = WLAN_SMMU_S2CR_BYPASS;
+	__asm__ volatile ("dsb sy" ::: "memory");
+
+	LOG("wlan smmu early: SMR[%d]=%08x S2CR[%d]=%08x (bypass)",
+	    free_slot, r[(0x800 >> 2) + free_slot],
+	    free_slot, r[(0xc00 >> 2) + free_slot]);
 }
 
 extern "C" void

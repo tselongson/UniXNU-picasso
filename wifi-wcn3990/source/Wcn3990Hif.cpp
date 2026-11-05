@@ -114,6 +114,13 @@ hif_put32(uint8_t *p, uint32_t v)
 #define CE_DST_WR_INDEX          0x40   /* WCN3990_DST_WR_IDX_OFFSET */
 #define CE_CURRENT_SRRI          0x44
 #define CE_CURRENT_DRRI          0x48
+/* hw.c: wcn3990_ce_regs.ce_rri_low/high live in the CE wrapper at 0x24C000,
+ * not inside a per-CE window.  ce.c: ath10k_ce_alloc_rri() stores the DDR
+ * address of the read-index array there and then sets bit 19 in every CE's
+ * CTRL1 so the CE updates that array instead of the 0x44 register. */
+#define CE_WRAP_RRI_LOW          0x0024C004u
+#define CE_WRAP_RRI_HIGH         0x0024C008u
+#define CE_CTRL1_RRI_UPD         (1u << 19)  /* wcn3990_ctrl1_upd.mask */
 /* ce.c: shadow_sr_wr_ind_addr() */
 #define CE0_SHADOW_SR_WR         0x00032000u
 #define CE3_SHADOW_SR_WR         0x0003200Cu
@@ -151,6 +158,9 @@ struct hif_dma_block {
 	uint8_t rx2[CE2_ENTRIES][CE_BUF_BYTES];
 	uint8_t tx0[CE_BUF_BYTES];
 	uint8_t tx3[CE_BUF_BYTES];
+	/* wcn3990 keeps the per-CE read indices in DDR (hw_params.rri_on_ddr);
+	 * ce.c: ath10k_ce_alloc_rri() points the wrapper at this array. */
+	uint32_t rri[16];
 };
 
 #define HIF_DMA_SIZE   0x40000u          /* 256 KiB, >sizeof(hif_dma_block) */
@@ -161,6 +171,7 @@ static struct hif_dma_block *g_dma;
 #define s_rx2   (g_dma->rx2)
 #define s_tx0   (g_dma->tx0)
 #define s_tx3   (g_dma->tx3)
+#define s_rri   (g_dma->rri)
 
 extern "C" void *picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out,
     uint32_t assign_level);
@@ -265,20 +276,24 @@ hif_ce_send(uint32_t ce, uint8_t *buf, uint32_t len)
 
 /* Post one more receive buffer on CE2 and advance the dest write index.
  * ce.c: ath10k_ce_rx_update_write_idx() keeps one slot free; we start with
- * CE2_ENTRIES-1 posted buffers for the same reason. */
+ * CE2_ENTRIES-1 posted buffers for the same reason.  The buffer must be filled
+ * at the *write* index (the one slot the target does not own yet), not at the
+ * slot just consumed. */
 static void
 hif_ce2_repost(uint32_t idx)
 {
-	struct wcn_ce_desc_64 *d = &s_dst2[idx];
+	uint32_t slot = g_post2 & (CE2_ENTRIES - 1);
+	struct wcn_ce_desc_64 *d = &s_dst2[slot];
 
-	d->addr = (g_rx2_pa + (uint64_t)idx * CE_BUF_BYTES) & CE_DESC_ADDR_MASK;
+	(void)idx;
+	d->addr = (g_rx2_pa + (uint64_t)slot * CE_BUF_BYTES) & CE_DESC_ADDR_MASK;
 	d->nbytes = 0;
 	d->flags = 0;
 	d->toeplitz = 0;
 	hif_mb();
 	flush_dcache64((addr64_t)kvtophys((vm_offset_t)d), 64, TRUE);
 
-	g_post2 = (g_post2 + 1) & (CE2_ENTRIES - 1);
+	g_post2 = (slot + 1) & (CE2_ENTRIES - 1);
 	hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
 }
 
@@ -904,6 +919,8 @@ hif_ce_ctrl1(uint32_t ce, bool is_src)
 	} else {
 		v &= ~CE_CTRL1_DST_BSWAP;
 	}
+	/* ath10k_ce_alloc_rri() enables DDR read-index updates on every CE. */
+	v |= CE_CTRL1_RRI_UPD;
 	hif_reg_write(ce, CE_CTRL1, v);
 	HIF_LOG("CE%u ctrl1 %08x -> %08x", ce, old, v);
 }
@@ -915,6 +932,23 @@ static void
 hif_program_bases(void)
 {
 	uint32_t hi;
+	uint64_t rri_pa;
+
+	/* Must precede the CTRL1 writes: bit 19 tells the CE to publish read
+	 * indices into this array, so a stale/zero address would send a DMA to
+	 * physical 0.  It lives in the same contiguous block as the rings. */
+	rri_pa = kvtophys((vm_offset_t)s_rri);
+	memset(s_rri, 0, sizeof(s_rri));
+	hif_mb();
+	flush_dcache64((addr64_t)rri_pa, (unsigned)sizeof(s_rri), TRUE);
+	*(volatile uint32_t *)(uintptr_t)(g_ce_va + CE_WRAP_RRI_LOW) = (uint32_t)rri_pa;
+	hif_mb();
+	*(volatile uint32_t *)(uintptr_t)(g_ce_va + CE_WRAP_RRI_HIGH) =
+	    (uint32_t)(rri_pa >> 32) & 0x1fu;
+	hif_mb();
+	HIF_LOG("RRI pa=%llx wrapper=%08x/%08x", (unsigned long long)rri_pa,
+	    *(volatile uint32_t *)(uintptr_t)(g_ce_va + CE_WRAP_RRI_LOW),
+	    *(volatile uint32_t *)(uintptr_t)(g_ce_va + CE_WRAP_RRI_HIGH));
 
 	hif_reg_write(0, CE_SR_BASE_LO, (uint32_t)g_src0_pa);
 	hif_reg_write(0, CE_SR_BASE_HI, (uint32_t)(g_src0_pa >> 32) & 0x1f);
@@ -948,10 +982,18 @@ hif_program_bases(void)
 static void
 hif_post_buffers(void)
 {
-	g_post2 = g_post_count;
+	/* ce.c: the write index is a free-running counter masked with
+	 * nentries-1, and __ath10k_ce_rx_post_buf_64() posts on top of
+	 * whatever the register already holds.  Keep one slot free so the
+	 * ring can never look full to the target. */
+	uint32_t cur = hif_reg_read(2, CE_DST_WR_INDEX) & (CE2_ENTRIES - 1);
+	uint32_t n = (g_post_count > 0 && g_post_count < CE2_ENTRIES) ?
+	    g_post_count : (CE2_ENTRIES - 1);
+
+	g_post2 = (cur + n) & (CE2_ENTRIES - 1);
 	hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
-	HIF_LOG("stage 3: posted %u receive buffers (desc.addr=%llx)", g_post2,
-	    (unsigned long long)s_dst2[0].addr);
+	HIF_LOG("stage 3: posted %u receive buffers (desc.addr=%llx wr=%u)",
+	    n, (unsigned long long)s_dst2[0].addr, g_post2);
 }
 
 extern "C" void
