@@ -3987,6 +3987,17 @@ rmtfs_load_efs(void)
 		return;
 	}
 	efs_loaded = true;
+	{
+		/* 25 MiB of EFS read this early competes with init for the single UFS
+		 * slot; modem_efs=0 keeps the partitions on disk and serves them
+		 * from the rmtfs path instead, which is how we tell a bandwidth
+		 * problem from a protocol one. */
+		uint32_t on = 1;
+		if (PE_parse_boot_argn("modem_efs", &on, sizeof(on)) && on == 0) {
+			LOG("rmtfs: EFS precache disabled (modem_efs=0)");
+			return;
+		}
+	}
 	for (unsigned i = 0; i < 4; i++) {
 		uint64_t sz = 0;
 		uint8_t *p;

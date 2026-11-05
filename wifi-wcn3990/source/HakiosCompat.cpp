@@ -23,6 +23,8 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/systm.h>
+#include <pexpert/pexpert.h>
+#include <IOKit/IOLib.h>
 
 extern "C" int native_ufs_raw_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst);
 extern "C" uint32_t native_ufs_raw_max_blocks(void);
@@ -77,11 +79,34 @@ gpt_name(const uint8_t *utf16, char out[GPT_NAME_MAX])
 }
 
 /* Read one 4 KiB block. The UFS hook works in 4 KiB units. */
+/* Delay between 4 KiB reads, in milliseconds.  The Wi-Fi bring-up pulls about
+ * 30 MiB through the single-slot UFS host while init is still reading the root
+ * volume; that burst was enough to leave a root read with UTSLOT busy until its
+ * deadline, which poisons the controller and turns launchd's exec into ENOEXEC.
+ * modem_slowio=N paces the firmware reads so APFS keeps getting slots. */
+static uint32_t g_ufs_slow_ms;
+
+static void
+ufs_io_tuning(void)
+{
+	static bool done;
+	if (done) return;
+	done = true;
+	uint32_t v = 0;
+	if (PE_parse_boot_argn("modem_slowio", &v, sizeof(v))) {
+		g_ufs_slow_ms = v;
+	}
+}
+
 static int
 read4k(uint32_t lun, uint64_t lba4k, void *dst)
 {
 	if (native_ufs_raw_max_blocks() == 0) return -1;
-	return native_ufs_raw_read(lun, lba4k, 1, dst);
+	ufs_io_tuning();
+	int r = native_ufs_raw_read(lun, lba4k, 1, dst);
+	/* hostRead4k has already dropped gHost.lock by the time we get here. */
+	if (g_ufs_slow_ms) IOSleep(g_ufs_slow_ms);
+	return r;
 }
 
 /* Arbitrary byte reads on top of the 4 KiB hook: the GPT entry array of a
@@ -252,6 +277,17 @@ hakios_ufs_read_part(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
 	scan_parts();
 	if (part >= (uint32_t)g_part_count || dst == NULL) return -1;
 	const struct gpt_part *p = &g_parts[part];
+	/* Clamp to the partition.  A firmware file whose FAT length disagrees with
+	 * the GPT used to run past `last` and read whatever LBA followed, which the
+	 * controller reports as a host error for every later command as well. */
+	uint64_t part_bytes = (p->last - p->first + 1) * (uint64_t)p->sector;
+	if (offset >= part_bytes) return -1;
+	if (len > part_bytes - offset) {
+		printf("HAKIOS_WLAN: read overruns %s: off %llu len %llu, clamped to %llu\n",
+		    p->name, (unsigned long long)offset, (unsigned long long)len,
+		    (unsigned long long)(part_bytes - offset));
+		len = part_bytes - offset;
+	}
 	uint64_t byte = p->first * p->sector + offset;
 	uint64_t lba4k = byte / 4096;
 	unsigned skip = (unsigned)(byte % 4096);
