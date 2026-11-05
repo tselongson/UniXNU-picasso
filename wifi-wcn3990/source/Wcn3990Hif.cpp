@@ -140,6 +140,15 @@ static uint8_t s_tx3[CE_BUF_BYTES] __attribute__((aligned(64)));
 
 static volatile uint8_t *g_ce_va;
 static bool g_regs_live;
+/* Bring-up stages: 1 = descriptors only (no CE register writes),
+ * 2 = program CE base/size but leave DST_WR_INDEX at 0 (no DMA),
+ * 3 = post the receive buffers and start the CE.  Default is auto: the poll
+ * thread advances one stage every ~3 s, with a heartbeat before each step, so
+ * a single boot shows exactly which step hangs the SoC.  wcn3990-hif=0..3
+ * pins a stage (0 disables the HIF completely). */
+static int g_stage = 1;
+static int g_hif_mode = 0;
+static bool g_bases_programmed;
 static uint32_t g_wr0, g_wr3;         /* source ring write index */
 static uint32_t g_sw2, g_post2;       /* dest ring software / posted index */
 static uint64_t g_rx2_pa, g_dst2_pa, g_src0_pa, g_src3_pa;
@@ -305,15 +314,6 @@ enum hif_state {
 };
 
 static enum hif_state g_state = HIF_OFF;
-/* Bring-up stages: 1 = descriptors only (no CE register writes),
- * 2 = program CE base/size but leave DST_WR_INDEX at 0 (no DMA),
- * 3 = post the receive buffers and start the CE.  Default is auto: the poll
- * thread advances one stage every ~3 s, with a heartbeat before each step, so
- * a single boot shows exactly which step hangs the SoC.  wcn3990-hif=0..3
- * pins a stage (0 disables the HIF completely). */
-static int g_stage = 1;
-static int g_hif_mode = 0;
-static bool g_bases_programmed;
 static uint8_t g_wmi_eid = 1;
 static uint16_t g_credit_count, g_credit_size;
 static uint32_t g_polls;
