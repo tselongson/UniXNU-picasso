@@ -4082,6 +4082,65 @@ rmtfs_init_buf(void)
 	LOG("rmtfs: shared buffer %llx+%llx assign %llx", rmtfs_pa, g_rmtfs_size, r);
 }
 
+/* ---------------------------------------------------------------------------
+ * wifi-wcn3990: host-side CE DMA memory.
+ *
+ * Linux gives the CE rings to dma_alloc_coherent(), which maps them into the
+ * WLAN device's IOMMU domain.  We have no DMA API, so allocate a standalone
+ * contiguous block and assign its pages to the WLAN CE / WLAN VMs through SCM.
+ * hyp_assign() always keeps VMID_HLOS with RW, so the kernel can keep driving
+ * the rings.  Returning NULL makes the HIF stay completely inert rather than
+ * starting a DMA that a firmware master is not allowed to complete (v333 hung
+ * the SoC that way, with no panic, until the APSS watchdog bit).
+ * ------------------------------------------------------------------------- */
+extern "C" void *
+picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out, uint32_t assign_level)
+{
+	vm_offset_t va = 0;
+	ppnum_t page;
+	uint64_t pa, r;
+	kern_return_t kr;
+
+	kr = kmem_alloc_contig(kernel_map, &va, (vm_size_t)size, PAGE_MASK, 0, 0,
+	    (kma_flags_t)(KMA_DATA | KMA_ZERO | KMA_PERMANENT), VM_KERN_MEMORY_IOKIT);
+	if (kr != KERN_SUCCESS || va == 0) {
+		LOG("CE dma: kmem_alloc_contig(%llx) failed kr=%d", size, kr);
+		return NULL;
+	}
+	page = pmap_find_phys(kernel_pmap, (addr64_t)va);
+	if (page == 0) {
+		LOG("CE dma: no physical page for va %llx", (uint64_t)va);
+		return NULL;
+	}
+	pa = ptoa_64(page);
+	if (pa_out) *pa_out = pa;
+
+	if (assign_level == 0) {
+		LOG("CE dma: pa %llx size %llx NOT assigned (boot-arg)", pa, size);
+		return (void *)va;
+	}
+
+	{
+		static const uint32_t vm_two[2] = { VMID_WLAN_CE, VMID_WLAN };
+		static const uint32_t vm_ce[1] = { VMID_WLAN_CE };
+		uint32_t level = assign_level;
+retry:
+		r = hyp_assign(pa, size, level >= 2 ? vm_two : vm_ce,
+		    level >= 2 ? 2 : 1);
+		LOG("CE dma: pa %llx size %llx assign level %u rc %lld",
+		    pa, size, level, (long long)r);
+		if (r != 0 && level >= 2) {
+			level = 1;
+			goto retry;
+		}
+		if (r != 0) {
+			LOG("CE dma: assignment failed, HIF stays inert");
+			return NULL;
+		}
+	}
+	return (void *)va;
+}
+
 /* rmtfs paths are QMI strings: u8 length then the characters. */
 static bool
 qm_string_qmi(const uint8_t *d, uint32_t len, uint8_t type, char *out, size_t max)

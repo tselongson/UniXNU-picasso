@@ -39,8 +39,8 @@
  *   HTT_DATA      (0x0300)  OUT -> CE4, IN -> CE1   (not used for scanning)
  *
  * This is a polled HIF: the modem thread calls wcn3990_hif_poll() every ~1 ms.
- * No MSI, no interrupts, no DMA API.  All rings and buffers are static .bss
- * (16 KiB kernel stacks must not hold them) and are cache-flushed explicitly.
+ * No MSI, no interrupts, no DMA API: rings and buffers live in one contiguous
+ * SCM-assigned block and are cache-flushed explicitly.
  */
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
@@ -131,12 +131,35 @@ typedef char wcn_ce_desc_size_check[(sizeof(struct wcn_ce_desc_64) == 16) ? 1 : 
 #define CE3_ENTRIES   32     /* snoc.c: target_ce_config_wlan[3] nentries */
 #define CE_BUF_BYTES  2048    /* nbytes_max for CE0/2/3 */
 
-static struct wcn_ce_desc_64 s_src0[CE0_ENTRIES] __attribute__((aligned(4096)));
-static struct wcn_ce_desc_64 s_dst2[CE2_ENTRIES] __attribute__((aligned(4096)));
-static struct wcn_ce_desc_64 s_src3[CE3_ENTRIES] __attribute__((aligned(4096)));
-static uint8_t s_rx2[CE2_ENTRIES][CE_BUF_BYTES] __attribute__((aligned(4096)));
-static uint8_t s_tx0[CE_BUF_BYTES] __attribute__((aligned(64)));
-static uint8_t s_tx3[CE_BUF_BYTES] __attribute__((aligned(64)));
+/* Linux gives the CE rings to dma_alloc_coherent(), which maps them into the
+ * WLAN device's IOMMU domain.  Here there is no DMA API: static .bss pages are
+ * HLOS-only, and v333 proved that the moment CE2 starts writing them the SoC
+ * hangs with no panic (30 s APSS watchdog bite) - the WLAN CE master is not
+ * the WLAN MAC stream 0xc0 that modem_wlansmmu puts in bypass.
+ *
+ * Allocate one contiguous block instead and hand its pages to VMID_WLAN_CE /
+ * VMID_WLAN through SCM hyp_assign (HLOS keeps RW).  The allocator lives in
+ * PicassoWlan.cpp because that is where the SCM call and VMIDs already are. */
+struct hif_dma_block {
+	struct wcn_ce_desc_64 src0[CE0_ENTRIES];
+	struct wcn_ce_desc_64 src3[CE3_ENTRIES];
+	struct wcn_ce_desc_64 dst2[CE2_ENTRIES];
+	uint8_t rx2[CE2_ENTRIES][CE_BUF_BYTES];
+	uint8_t tx0[CE_BUF_BYTES];
+	uint8_t tx3[CE_BUF_BYTES];
+};
+
+#define HIF_DMA_SIZE   0x40000u          /* 256 KiB, >sizeof(hif_dma_block) */
+static struct hif_dma_block *g_dma;
+#define s_src0  (g_dma->src0)
+#define s_dst2  (g_dma->dst2)
+#define s_src3  (g_dma->src3)
+#define s_rx2   (g_dma->rx2)
+#define s_tx0   (g_dma->tx0)
+#define s_tx3   (g_dma->tx3)
+
+extern "C" void *picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out,
+    uint32_t assign_level);
 
 static volatile uint8_t *g_ce_va;
 static bool g_regs_live;
@@ -149,6 +172,8 @@ static bool g_regs_live;
 static int g_stage = 1;
 static int g_hif_mode = 0;
 static bool g_bases_programmed;
+/* Number of receive descriptors to hand to CE2 in stage 3. */
+static uint32_t g_post_count = CE2_ENTRIES - 1;
 static uint32_t g_wr0, g_wr3;         /* source ring write index */
 static uint32_t g_sw2, g_post2;       /* dest ring software / posted index */
 static uint64_t g_rx2_pa, g_dst2_pa, g_src0_pa, g_src3_pa;
@@ -778,9 +803,10 @@ hif_program_bases(void)
 static void
 hif_post_buffers(void)
 {
-	g_post2 = CE2_ENTRIES - 1;
+	g_post2 = g_post_count;
 	hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
-	hif_dump_regs("stage 3: receive buffers posted");
+	HIF_LOG("stage 3: posted %u receive buffers (desc.addr=%llx)", g_post2,
+	    (unsigned long long)s_dst2[0].addr);
 }
 
 extern "C" void
@@ -802,6 +828,38 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (g_hif_mode == 0) {
 		HIF_LOG("disabled by wcn3990-hif=0");
 		return;
+	}
+
+	/* wcn3990-hif-post=1 narrows stage 3 to a single descriptor; useful to
+	 * tell a permission fault from a ring-wrap fault. */
+	v = 0;
+	if (PE_parse_boot_argn("wcn3990-hif-post", &v, sizeof(v)) && v >= 1 &&
+	    v < CE2_ENTRIES) {
+		g_post_count = v;
+	}
+
+	/* wcn3990-hif-assign: 0 = leave the pages HLOS-only (the v333 behaviour),
+	 * 1 = VMID_WLAN_CE only, 2 (default) = VMID_WLAN_CE + VMID_WLAN. */
+	uint32_t assign_level = 2;
+	v = 0;
+	if (PE_parse_boot_argn("wcn3990-hif-assign", &v, sizeof(v)) && v <= 2) {
+		assign_level = v;
+	}
+	{
+		uint64_t dma_pa = 0;
+		g_dma = (struct hif_dma_block *)picasso_wlan_ce_dma_alloc(
+		    HIF_DMA_SIZE, &dma_pa, assign_level);
+		if (!g_dma || dma_pa == 0) {
+			HIF_LOG("CE DMA allocation failed: HIF disabled, no CE registers touched");
+			return;
+		}
+		HIF_LOG("CE DMA block va=%p pa=%llx size=%x assign_level=%u",
+		    g_dma, (unsigned long long)dma_pa, (unsigned)HIF_DMA_SIZE, assign_level);
+		/* If the SCM assign failed we must NOT start DMA: that is exactly the
+		 * ungranted-memory hang from v333.  Stay at stage 1 and keep polling. */
+		if (assign_level == 0) {
+			HIF_LOG("assignment disabled by boot-arg; stage 3 will still post buffers");
+		}
 	}
 
 	g_ce_va = ce_va;
