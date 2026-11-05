@@ -11,9 +11,10 @@ implementation of its own.**
 
 | path | contents |
 |---|---|
-| `source/` | 13 files, ~7.9k lines: PAS/PIL, SMP2P/GLINK, QRTR, WLFW QMI, BDF, rmtfs, CE2, `en0` (IONetworkInterface), Apple80211 `kern_control` control port, and the UniXNU compatibility shim (GPT/UFS partition reads, RPMh/AOP rail votes) |
+| `source/` | the modem loader and, in `Wcn3990Hif.cpp`, the host-side CE / HTC / WMI-TLV stack: PAS/PIL, SMP2P/GLINK, QRTR, WLFW QMI, BDF, rmtfs, CE0/2/3 rings, HTC handshake, WMI INIT + START_SCAN, MGMT_RX beacon parsing, `en0`, Apple80211 `kern_control` and the UniXNU compatibility shim |
 | `manifest.json` | entry point, boot argument, platform dependencies, link method, verified/unverified features |
 | `USAGE.txt` | the two supported integration methods |
+| `docs/wcn3990-protocol.md` | every CE/HTC/WMI constant with its Linux ath10k file:macro source |
 | `integration/` | the four patches a clean `e790d5d` tree needs, one concern each |
 
 The archive itself (`build/native-wlan/libNativeWlan.a`) is produced by CI with
@@ -35,17 +36,22 @@ we are waiting on upstream before moving to a newer tip. Removing them (or setti
 
 ## Honest status
 
-Verified on hardware: MPSS PAS (`init_image` / `mem_setup` / `auth_and_reset`
-all return 0), WLFW BDF download, `FW_READY_IND`, mission mode, QRTR/rmtfs,
-`en0` attach and Apple80211 ioctls from `wifid`.
+Verified on hardware before the HIF work: MPSS PAS (`init_image` /
+`mem_setup` / `auth_and_reset` all return 0), WLFW BDF download,
+`FW_READY_IND`, mission mode, QRTR/rmtfs, `en0` attach and Apple80211 ioctls
+from `wifid`.
 
-**Not implemented:** real over-the-air scanning and association. The upstream
-`hakios-picasso` implementation this was ported from feeds six hard-coded BSSIDs
-in `picasso_sta_scan()` and forges DHCP/ARP replies locally; there is no
-HTC/WMI/HTT host stack. CE2 only fills descriptors without programming the
-target's copy-engine registers. Real scanning needs CE pipe setup, an HTC
-handshake, `WMI_INIT`/`WMI_START_SCAN` and `WMI_MGMT_RX_EVENT` parsing. The
-package is structured so that work can land entirely inside `source/`.
+**New in this revision (pending hardware confirmation):** `Wcn3990Hif.cpp`
+programs CE0/CE2/CE3 with ath10k's WCN3990 register map and 64-bit
+descriptors, completes the HTC READY → CONNECT_SERVICE → SETUP_COMPLETE
+handshake, sends WMI-TLV `INIT` and `START_SCAN`, and turns `MGMT_RX` beacons
+into real scan results. `picasso_sta_scan()` no longer fabricates networks.
+`wcn3990-hif=0` disables CE register programming without rebuilding.
+
+**Still not implemented:** association and the data path. The upstream
+`hakios-picasso` transmit function still forges DHCP/ARP replies locally and
+there is no HTT/HTC data pipe, so a successful scan does not yet mean
+connectivity. See `docs/wcn3990-protocol.md` section 5.
 
 ## Licence
 

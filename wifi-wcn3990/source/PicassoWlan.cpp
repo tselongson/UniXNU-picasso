@@ -3211,7 +3211,11 @@ picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t rssi, uint1
 static int
 picasso_sta_scan(const struct hakios_sta_scan *what)
 {
-	uint32_t dwell = (what && what->dwell_ms) ? what->dwell_ms : 40;
+	/* struct hakios_sta_scan is only forward-declared in this translation
+	 * unit; the sta layer already normalised the request, so use the WMI
+	 * default dwell instead of reaching into an incomplete type. */
+	(void)what;
+	uint32_t dwell = 40;
 
 	IOLog("picasso_sta_scan: real WCN3990 WMI scan (dwell %u ms, HIF state %d)\n",
 	    dwell, wcn3990_hif_state());

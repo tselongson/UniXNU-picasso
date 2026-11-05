@@ -47,6 +47,11 @@ Runtime
                   after printf(copyright); it spawns a kernel thread that waits
                   5 s for the network stack, attaches en0, then boots the modem.
   link          : -force_load build/native-wlan/libNativeWlan.a (already present)
+  HIF           : wcn3990_hif_init() runs once after WLFW mission mode;
+                  the modem thread calls wcn3990_hif_poll() every ~1 ms.
+                  Console prefix "WCN3990-HIF:" shows CE register values,
+                  HTC READY / CONNECT_SERVICE_RESP, WMI READY and START_SCAN.
+                  wcn3990-hif=0 leaves the CE registers untouched.
 
 Alternative integration
 -----------------------
@@ -70,6 +75,8 @@ stock phone firmware; do not replace partitions.
 
 Validation
 ----------
-See manifest.json -> validation. Hardware evidence: PAS all ret=0, WLFW BDF
-download complete, FW_READY_IND (0x21), MISSION MODE, en0 attached, wifid
-ioctls answered. Real scanning/association is NOT yet implemented.
+See manifest.json -> validation. Hardware evidence so far: PAS all ret=0, WLFW
+BDF download complete, FW_READY_IND (0x21), MISSION MODE, en0 attached,
+wifid ioctls answered. The CE/HTC/WMI-TLV host stack is implemented but its
+real-device scan results are still being validated; association is not
+implemented.

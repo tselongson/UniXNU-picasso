@@ -1,6 +1,6 @@
 {
   "name": "UniXNU Picasso WCN3990 Wi-Fi driver package",
-  "revision": "clean-2",
+  "revision": "hif-1",
   "kind": "self-contained source package, archived into the host tree's existing libNativeWlan.a",
   "baseline": {
     "repository": "silenzio111/UniXNU-picasso",
@@ -37,8 +37,8 @@
     "disable_behaviour": "with wifi=0 or absent the package is inert and the tree is stock upstream",
     "archive": "build/native-wlan/libNativeWlan.a",
     "linking": "-force_load the single existing archive; the stock CONFIG_XNU_NATIVE_WLAN gate drives the build",
-    "object_count": 13,
-    "source_lines": 7862,
+    "object_count": 8,
+    "source_lines": 8493,
     "config_changes_required": false,
     "firmware_files_required": false
   },
@@ -58,18 +58,24 @@
       "GPT parsing on 4 KiB-sector UFS, FAT reader for the modem image",
       "BSD en0 (IONetworkInterface) attach",
       "Apple80211 kern_control ioctl bridge to wifid",
-      "CE2 destination ring allocation and guarded polling"
+      "CE0/CE2/CE3 ring programming (64-bit descriptors, shadow write indices, dcache flush)",
+      "HTC READY / CONNECT_SERVICE / SETUP_COMPLETE handshake",
+      "WMI-TLV INIT, START_SCAN, SCAN_EVENT and MGMT_RX beacon decoding",
+      "real scan results via the Apple80211 sta bridge (no hard-coded BSSIDs)"
     ],
     "not_implemented": [
-      "copy-engine pipe programming on the target",
-      "HTC handshake",
-      "WMI_INIT / WMI_START_SCAN / WMI_MGMT_RX_EVENT",
       "real over-the-air scanning and association",
       "WPA2, DHCP offload, data path",
-      "Metal / GPU interaction (intentionally out of scope)"
+      "Metal / GPU interaction (intentionally out of scope)",
+      "real TX data path: picasso_wlan_transmit() still forges DHCP/ARP replies locally"
+    ],
+    "pending_hardware_validation": [
+      "HTC READY reception",
+      "WMI READY",
+      "real SSIDs from MGMT_RX"
     ]
   },
-  "known_upstream_note": "the reference hakios-picasso stack feeds six hard-coded BSSIDs in picasso_sta_scan() and forges DHCP/ARP replies locally; do not mistake its scan list for real RF results",
+  "known_upstream_note": "the reference hakios-picasso stack fed six hard-coded BSSIDs and forged DHCP/ARP; the fake scan list has been removed, the fake data path is still present",
   "validation": {
     "hardware_tested": true,
     "pas_all_stages_ret0": true,
@@ -77,7 +83,7 @@
     "wlfw_mission_mode": true,
     "en0_attached": true,
     "wifid_ioctl_bridge": true,
-    "real_scan": false,
+    "real_scan": "pending hardware validation",
     "association_and_data": false
   }
 }
