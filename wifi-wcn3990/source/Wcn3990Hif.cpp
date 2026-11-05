@@ -106,6 +106,10 @@ hif_put32(uint8_t *p, uint32_t v)
 #define CE_DR_SIZE               0x14
 #define CE_HOST_IE               0x2c
 #define CE_MISC_IE               0x34
+#define CE_CTRL1                 0x18   /* hw.c: wcn3990_ctrl1.addr */
+#define CE_CTRL1_DMAX_MASK       0x0000ffffu
+#define CE_CTRL1_SRC_BSWAP       (1u << 17)  /* wcn3990_src_ring.mask */
+#define CE_CTRL1_DST_BSWAP       (1u << 18)  /* wcn3990_dst_ring.mask */
 #define CE_SR_WR_INDEX           0x3c   /* WCN3990_SRC_WR_IDX_OFFSET */
 #define CE_DST_WR_INDEX          0x40   /* WCN3990_DST_WR_IDX_OFFSET */
 #define CE_CURRENT_SRRI          0x44
@@ -767,6 +771,26 @@ wcn3990_hif_poll(void)
 
 /* --------------------------------------------------------------------- init */
 
+/* ce.c: ath10k_ce_init_src_ring() / ath10k_ce_init_dest_ring() both do a
+ * read-modify-write of CE_CTRL1: DMAX = src_sz_max for the OUT rings, and the
+ * src/dst byte-swap bits cleared.  Leaving the reset defaults in place lets
+ * the CE reinterpret our little-endian 64-bit descriptors. */
+static void
+hif_ce_ctrl1(uint32_t ce, bool is_src)
+{
+	uint32_t old = hif_reg_read(ce, CE_CTRL1);
+	uint32_t v = old;
+
+	if (is_src) {
+		v = (v & ~CE_CTRL1_DMAX_MASK) | CE_BUF_BYTES;
+		v &= ~CE_CTRL1_SRC_BSWAP;
+	} else {
+		v &= ~CE_CTRL1_DST_BSWAP;
+	}
+	hif_reg_write(ce, CE_CTRL1, v);
+	HIF_LOG("CE%u ctrl1 %08x -> %08x", ce, old, v);
+}
+
 /* Stage 2: program the CE ring registers but do not post any receive buffer.
  * ce.c: ath10k_ce_set_dest_ring_base_addr_hi() preserves the non-address bits
  * of dr_base_addr_hi, so use a read-modify-write with CE_DESC_ADDR_HI_MASK. */
@@ -794,6 +818,10 @@ hif_program_bases(void)
 	hif_reg_write(2, CE_DR_SIZE, CE2_ENTRIES);
 	hif_reg_write(2, CE_HOST_IE, 0);
 	hif_reg_write(2, CE_MISC_IE, 0);
+
+	hif_ce_ctrl1(0, true);
+	hif_ce_ctrl1(3, true);
+	hif_ce_ctrl1(2, false);
 
 	g_bases_programmed = true;
 	hif_dump_regs("stage 2: CE bases programmed, no buffers posted");
