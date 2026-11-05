@@ -1,0 +1,83 @@
+{
+  "name": "UniXNU Picasso WCN3990 Wi-Fi driver package",
+  "revision": "clean-2",
+  "kind": "self-contained source package, archived into the host tree's existing libNativeWlan.a",
+  "baseline": {
+    "repository": "silenzio111/UniXNU-picasso",
+    "branch": "stage12/picasso-cpufreq-big",
+    "commit": "e790d5d",
+    "kernel": "DEVELOPMENT_ARM64_BCM2837",
+    "architecture": "arm64",
+    "note": "Last upstream revision that links on its own. ba1aefc..e4a5a51 add an IPC census call without installing its patch into the prepared tree; waiting for upstream to fix that before upgrading."
+  },
+  "target": {
+    "device": "Xiaomi picasso / SM7250",
+    "wifi": "Qualcomm WCN3990 (hakios)",
+    "mss_pas_id": 4,
+    "wcss_base": "0x18800000",
+    "msa_base": "0x8ba00000"
+  },
+  "integration": {
+    "method": "apply integration/ patches to a clean e790d5d tree",
+    "patch_base": "e790d5d",
+    "patches": [
+      "01-board-wifi-arg.patch",
+      "02-build-native-wlan.patch",
+      "03-bsd-init-hook.patch",
+      "04-native-ufs-raw-read.patch"
+    ],
+    "host_files_touched": 4,
+    "entrypoint": "picasso_wlan_deferred_start",
+    "initialization_hook": {
+      "source": "bsd/kern/bsd_init.c",
+      "call_once": "picasso_wlan_deferred_start();",
+      "installed_by": "scripts/build-xnu-4k-baseline.sh after printf(copyright)"
+    },
+    "enable_boot_argument": "wifi=1",
+    "disable_behaviour": "with wifi=0 or absent the package is inert and the tree is stock upstream",
+    "archive": "build/native-wlan/libNativeWlan.a",
+    "linking": "-force_load the single existing archive; the stock CONFIG_XNU_NATIVE_WLAN gate drives the build",
+    "object_count": 13,
+    "source_lines": 7862,
+    "config_changes_required": false,
+    "firmware_files_required": false
+  },
+  "platform_dependencies": [
+    "native_ufs_raw_read / native_ufs_raw_max_blocks / native_ufs_raw_diag (read-only partition accessor)",
+    "PE_parse_boot_argn, IOSleep, kernel_thread_start, thread_terminate",
+    "ml_io_map / IOMemoryMap, smc_call, IOLock, mach_absolute_time",
+    "IONetworkInterface and kern_control KPIs",
+    "the device's own modem GPT partition and its FAT/BDF content"
+  ],
+  "features": {
+    "implemented": [
+      "MPSS PIL: init_image, mem_setup, auth_and_reset",
+      "SMP2P / GLINK / QRTR transport",
+      "WLFW QMI: BDF download, FW_READY_IND, mission mode",
+      "rmtfs / EFS and pd-mapper / TFTP service",
+      "GPT parsing on 4 KiB-sector UFS, FAT reader for the modem image",
+      "BSD en0 (IONetworkInterface) attach",
+      "Apple80211 kern_control ioctl bridge to wifid",
+      "CE2 destination ring allocation and guarded polling"
+    ],
+    "not_implemented": [
+      "copy-engine pipe programming on the target",
+      "HTC handshake",
+      "WMI_INIT / WMI_START_SCAN / WMI_MGMT_RX_EVENT",
+      "real over-the-air scanning and association",
+      "WPA2, DHCP offload, data path",
+      "Metal / GPU interaction (intentionally out of scope)"
+    ]
+  },
+  "known_upstream_note": "the reference hakios-picasso stack feeds six hard-coded BSSIDs in picasso_sta_scan() and forges DHCP/ARP replies locally; do not mistake its scan list for real RF results",
+  "validation": {
+    "hardware_tested": true,
+    "pas_all_stages_ret0": true,
+    "wlfw_bdf_download": true,
+    "wlfw_mission_mode": true,
+    "en0_attached": true,
+    "wifid_ioctl_bridge": true,
+    "real_scan": false,
+    "association_and_data": false
+  }
+}

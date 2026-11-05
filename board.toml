@@ -252,6 +252,8 @@ kernel_args = [
   # duetexpertd, ...) kept the services around it stalled. sheng's production
   # line sets this on the same 21H461 userland; with it the lock screen renders.
   "sheng-lite=1",
+  # WCN3990 package (wifi-wcn3990/): omit or set wifi=0 for a stock boot.
+  "wifi=1",
   # IOKit matching trace is off for the same reason as the UFS one: it answers
   # whether a personality matched, which the earlier root and probe=12 runs have
   # already established, and it prints a very long log while doing so. Turn it

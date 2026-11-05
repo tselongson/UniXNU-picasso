@@ -64,6 +64,22 @@ if [ ! -f "$PATCH_STAMP" ] || [ "$(cat "$PATCH_STAMP")" != "$PATCH_FINGERPRINT" 
 fi
 export XNU_AVAILABILITY_PL=$ROOT/.cache/fakeroot/usr/local/libexec/availability.pl
 python3 scripts/prepare-xnu-source.py
+# wifi-wcn3990: one init hook. The stack delays itself 5 s so bsd_init and the
+# CDC console are up before en0 attaches and the modem boots.
+python3 - <<'PY_WLAN_INIT'
+from pathlib import Path
+p = Path('.cache/xnu-work/bsd/kern/bsd_init.c')
+s = p.read_text()
+old = '\tprintf(copyright);\n'
+add = ('\t{\n'
+       '\t\textern void picasso_wlan_deferred_start(void);\n'
+       '\t\tpicasso_wlan_deferred_start();\n'
+       '\t}\n')
+if 'picasso_wlan_deferred_start' not in s and old in s:
+    s = s.replace(old, old + add, 1)
+    p.write_text(s)
+    print('picasso-wlan: init hook inserted into bsd_init.c')
+PY_WLAN_INIT
 # The first pass of a new tree (XNU_BOOTSTRAP=1, set by the unixnu driver) only has to leave the compile records and
 # link.filelist for the archive builders that run after it, so it links without their archives.
 BOOTSTRAP=${XNU_BOOTSTRAP:-0}

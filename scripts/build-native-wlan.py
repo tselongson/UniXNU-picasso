@@ -18,6 +18,16 @@ if not (ROOT / 'build/xnu').is_dir() and (ROOT / 'out/picasso/tree/build/xnu').i
     ROOT = ROOT / 'out/picasso/tree'
 
 DRIVER = ROOT / 'drivers/NativeWlan'
+# The WCN3990 driver is a self-contained package at the repository root, not
+# part of drivers/NativeWlan. This script is copied into out/picasso/tree by
+# --prepare, so walking upwards from __file__ is what reaches the checkout:
+# ROOT (the prepared tree) alone does not contain the package.
+PACKAGE = None
+for _parent in (ROOT, *Path(__file__).resolve().parents):
+    _candidate = _parent / 'wifi-wcn3990/source'
+    if _candidate.is_dir():
+        PACKAGE = _candidate
+        break
 RECORD = 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
 OUT = ROOT / 'build/native-wlan'
 OUT.mkdir(parents=True, exist_ok=True)
@@ -84,6 +94,15 @@ def main():
     for name in ('WlanBoard.cpp', 'WlanProbe.cpp'):
         obj = OUT / (name + '.o')
         compile_one(args.record, DRIVER / name, obj, 'c++')
+        objects.append(obj)
+
+    # Package sources: one archive, one -force_load. headers under source/sys
+    # resolve through the recorded -I source.parent flag above.
+    if PACKAGE is None:
+        raise SystemExit('wifi-wcn3990/source not found above ' + str(ROOT))
+    for source in sorted(PACKAGE.glob('*.cpp')) + sorted(PACKAGE.glob('*.c')):
+        obj = OUT / (source.stem + '.o')
+        compile_one(args.record, source, obj, 'c' if source.suffix == '.c' else 'c++')
         objects.append(obj)
 
     archive = OUT / 'libNativeWlan.a'
