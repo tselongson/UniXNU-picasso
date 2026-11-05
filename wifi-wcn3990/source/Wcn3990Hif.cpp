@@ -318,6 +318,7 @@ hif_dump_regs(const char *why)
 #define WMI_READY_EVENTID             0x0002
 #define WMI_START_SCAN_CMDID          0x3001   /* WMI_GRP_SCAN  = 3 */
 #define WMI_VDEV_CREATE_CMDID         0x5001   /* wmi.h: WMI_CMD_GRP(WMI_GRP_VDEV) */
+#define WMI_PDEV_SET_REGDOMAIN_CMDID  0x4001   /* WMI_CMD_GRP(WMI_GRP_PDEV) */
 #define WMI_SCAN_EVENTID              0x3001
 #define WMI_MGMT_RX_EVENTID           0x7001   /* WMI_GRP_MGMT  = 7 */
 
@@ -330,6 +331,7 @@ hif_dump_regs(const char *why)
 #define WMI_TLV_INIT_CMD              74
 #define WMI_TLV_RESOURCE_CONFIG       75
 #define WMI_TLV_START_SCAN_CMD        77
+#define WMI_TLV_PDEV_SET_REGDOMAIN_CMD 81
 #define WMI_TLV_VDEV_CREATE_CMD       86      /* wmi-tlv.h enum wmi_tlv_tag */
 /* wmi-tlv.c: WMI_TLV_ABI_VER0 / VER1 / VER_NS0 */
 #define WMI_TLV_ABI_VER0              0x01000000u
@@ -349,6 +351,7 @@ enum hif_state {
 };
 
 static enum hif_state g_state = HIF_OFF;
+static bool g_init_sent;
 static uint8_t g_wmi_eid = 1;
 static uint16_t g_credit_count, g_credit_size;
 static uint32_t g_polls;
@@ -517,6 +520,29 @@ static const uint32_t g_scan_freqs[] = {
  * which is why a scan attempt on a bare WMI session cannot work.  wmi.h:
  * struct wmi_vdev_create_cmd is 18 packed bytes, WMI_VDEV_TYPE_STA = 2,
  * WMI_VDEV_SUBTYPE_NONE = 0.  VDEV_CREATE has no response event. */
+/* wmi-tlv.c: ath10k_wmi_pdev_set_regdomain() is part of the normal start
+ * sequence.  Without a regdomain the firmware can refuse scan requests.  The
+ * values are the world domain, which is what ath10k sends before the
+ * regulatory core has pushed anything else.  There is no response event. */
+static int
+hif_send_pdev_regdomain(void)
+{
+	uint8_t tlv[32];
+	uint8_t *p = tlv;
+	struct {
+		uint32_t reg_domain;
+		uint32_t reg_domain_2g;
+		uint32_t reg_domain_5g;
+		uint32_t limit_2g;
+		uint32_t limit_5g;
+	} __attribute__((packed)) cmd;
+
+	memset(&cmd, 0, sizeof(cmd));
+	p = hif_put_tlv(p, WMI_TLV_PDEV_SET_REGDOMAIN_CMD, (uint16_t)sizeof(cmd), &cmd);
+	HIF_LOG("WMI: send PDEV_SET_REGDOMAIN (world)");
+	return hif_wmi_command(WMI_PDEV_SET_REGDOMAIN_CMDID, tlv, (uint32_t)(p - tlv));
+}
+
 static int
 hif_send_vdev_create(void)
 {
@@ -666,14 +692,42 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 	if (len < 4) return;
 	event_id = hif_le32(payload);
 	switch (event_id) {
-	case WMI_SERVICE_READY_EVENTID:
+	case WMI_SERVICE_READY_EVENTID: {
+		/* wmi-tlv.h: struct wmi_tlv_svc_rdy_ev starts with fw_build_vers
+		 * then the six ABI words; num_mem_reqs sits at +72 and
+		 * max_num_scan_chans at +76.  Printing them tells us whether the
+		 * firmware wants host memory chunks before WMI INIT. */
+		const uint8_t *p = payload + 4;
+		uint32_t left = len - 4;
 		HIF_LOG("WMI: SERVICE_READY (0x%x, %u bytes)", event_id, len);
-		if (g_state == HIF_SETUP_SENT) {
-			if (hif_send_wmi_init() == 0) g_state = HIF_INIT_SENT;
+		while (left >= 4) {
+			uint32_t tl = hif_le16(p);
+			if (4 + tl > left) break;
+			if (tl >= 84) {
+				HIF_LOG("WMI: SERVICE_READY fw %u abi %08x/%u/%08x/%08x "
+				    "mem_reqs %u scan_chans %u bd %u",
+				    hif_le32(p + 4), hif_le32(p + 8), hif_le32(p + 12),
+				    hif_le32(p + 16), hif_le32(p + 20),
+				    hif_le32(p + 4 + 72), hif_le32(p + 4 + 76),
+				    hif_le32(p + 4 + 80));
+				break;
+			}
+			p += 4 + ((tl + 3) & ~3u);
+			left -= 4 + ((tl + 3) & ~3u);
+		}
+		if (!g_init_sent) {
+			if (hif_send_wmi_init() == 0) {
+				g_init_sent = true;
+				g_state = HIF_INIT_SENT;
+			}
 		}
 		break;
+	}
 	case WMI_READY_EVENTID:
 		HIF_LOG("WMI: READY (0x%x) - WMI is up, creating the scan vdev", event_id);
+		/* ath10k sets the regdomain during core start, and a scan can be
+		 * refused while no regdomain is in place.  No response event. */
+		hif_send_pdev_regdomain();
 		/* START_SCAN carries a vdev_id, so the vdev must exist first. */
 		if (hif_send_vdev_create() == 0) {
 			g_state = HIF_READY;
