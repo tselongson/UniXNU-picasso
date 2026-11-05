@@ -5162,21 +5162,20 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 				LOG("wlan smmu: cannot map 0x15000000");
 			}
 		} else {
-			/* Read-only look at the entry that owns stream 0x20.  The CE
-			 * DMA target has to be writable through this bank, so knowing
-			 * whether CB 0x3d is enabled (and whether its CBAR points at a
-			 * real table) decides whether plain physical addresses can
-			 * work for the rings at all. */
-			vm_offset_t smmu = ml_io_map(0x15000000, 0x100000);
+			/* Read-only look at the entry that owns stream 0x20.  Only the
+			 * stream-match registers are touched: reading a context bank
+			 * past the implemented count (CBAR at 0x8000 + n*0x1000) hung
+			 * the interconnect in v341, which itself says the bank S2CR[6]
+			 * names is probably not implemented. */
+			vm_offset_t smmu = ml_io_map(0x15000000, 0x2000);
 			if (smmu != 0) {
 				volatile uint32_t *r = (volatile uint32_t *)smmu;
 				uint32_t s2cr6 = r[(0xc00 >> 2) + 6];
 				uint32_t smr6 = r[(0x800 >> 2) + 6];
-				uint32_t cbndx = s2cr6 & 0xffu;
-				uint32_t cbar = r[((0x8000u + cbndx * 0x1000u) >> 2)];
-				uint32_t cbacr = r[((0x8000u + cbndx * 0x1000u + 4) >> 2)];
-				LOG("wlan smmu: SMR[6]=%08x S2CR[6]=%08x cb=%u cbar=%08x acr=%08x valid=%u",
-				    smr6, s2cr6, cbndx, cbar, cbacr, cbar & 1u);
+				LOG("wlan smmu: SMR[6]=%08x S2CR[6]=%08x cb=%u type=%u",
+				    smr6, s2cr6, s2cr6 & 0xffu, (s2cr6 >> 16) & 3u);
+			} else {
+				LOG("wlan smmu: cannot map 0x15000000");
 			}
 		}
 	}
@@ -5273,6 +5272,40 @@ done:
 	LOG("done");
 
 	thread_terminate(current_thread());
+}
+
+/*
+ * Optional early bypass of the WLAN stream, called from the first line of
+ * bsd_init.  At that point neither the root UFS nor USB has started DMA, so
+ * rewriting the stream-match entry cannot disturb an in-flight transfer - which
+ * is why the very same store hangs when the modem thread does it minutes later
+ * (v336 wrote S2CR[6], v338 wrote SMR[6], both froze the interconnect).
+ * Off by default; enable with wlan_smmu_early=1 while validating.
+ */
+extern "C" void
+picasso_wlan_smmu_early(void)
+{
+	uint32_t on = 0;
+	(void)PE_parse_boot_argn("wlan_smmu_early", &on, sizeof(on));
+	if (!on) return;
+
+	vm_offset_t smmu = ml_io_map(0x15000000, 0x2000);
+	if (smmu == 0) {
+		LOG("wlan smmu early: cannot map 0x15000000");
+		return;
+	}
+	volatile uint32_t *r = (volatile uint32_t *)smmu;
+	uint32_t s2 = r[(0xc00 >> 2) + 6];
+	uint32_t type = (s2 >> 16) & 3u;
+	LOG("wlan smmu early: SMR[6]=%08x S2CR[6]=%08x type=%u",
+	    r[(0x800 >> 2) + 6], s2, type);
+	if (type == 1u) {
+		LOG("wlan smmu early: stream 0x20 is already bypassed");
+		return;
+	}
+	r[(0xc00 >> 2) + 6] = (s2 & ~(3u << 16)) | (1u << 16);
+	__asm__ volatile ("dsb sy" ::: "memory");
+	LOG("wlan smmu early: S2CR[6] -> bypass (%08x)", r[(0xc00 >> 2) + 6]);
 }
 
 extern "C" void

@@ -29,6 +29,7 @@
 extern "C" int native_ufs_raw_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst);
 extern "C" uint32_t native_ufs_raw_max_blocks(void);
 extern "C" void native_ufs_raw_diag(uint32_t *out);
+extern "C" void picasso_wlan_smmu_early(void);
 
 /* LUN 0 alone carries 64 used entries on this device and the firmware LUNs
  * follow it, so the table has to hold several LUNs' worth. */
@@ -392,6 +393,10 @@ picasso_wlan_boot_thread(void *arg, wait_result_t wr)
 extern "C" void
 picasso_wlan_deferred_start(void)
 {
+	/* Must happen before the deferred thread: the stream-match rewrite is only
+	 * safe while no other master is doing DMA, i.e. at the top of bsd_init. */
+	picasso_wlan_smmu_early();
+
 	thread_t thread;
 	if (kernel_thread_start(picasso_wlan_boot_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
