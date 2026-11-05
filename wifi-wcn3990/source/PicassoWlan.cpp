@@ -5051,8 +5051,16 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 							if (free_idx < 0) free_idx = (int)i;
 							continue;
 						}
-						uint32_t mask = (smr >> 16) & 0x7fffu;
-						if (((smr ^ want) & 0x7fffu & ~mask) == 0) {
+						/* SMMU-500 SMR: [31] VALID, [30:16] SID,
+						 * [15:0] MASK (1 = ignore that SID bit).
+						 * The previous code read the two halves the
+						 * other way round, so it never matched the
+						 * entry already covering 0x20 and appended a
+						 * second, lower-priority one - the stream kept
+						 * using the old translation S2CR. */
+						uint32_t mask = smr & 0xffffu;
+						uint32_t smr_sid = (smr >> 16) & 0x7fffu;
+						if (((smr_sid ^ want) & ~mask & 0x7fffu) == 0) {
 							match_idx = (int)i;
 							break;
 						}
@@ -5069,7 +5077,11 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 							LOG("wlan smmu: S2CR[%d] -> bypass (%08x)", match_idx, s2);
 						}
 					} else if (wlansmmu >= 2 && free_idx >= 0) {
-						r[(0x800 >> 2) + free_idx] = (1u << 31) | want;
+						/* Exact match: SID in [30:16], MASK 0 in [15:0].
+						 * Writing (1 << 31) | sid put the SID in the
+						 * MASK field instead, which both matched stream
+						 * 0x00 and left 0x20 uncovered. */
+						r[(0x800 >> 2) + free_idx] = (1u << 31) | (want << 16);
 						r[(0xc00 >> 2) + free_idx] = (1u << 16);
 						__asm__ volatile ("dsb sy" ::: "memory");
 						LOG("wlan smmu: SID %x allocated SMR[%d] S2CR=bypass",
