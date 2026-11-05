@@ -4119,6 +4119,13 @@ picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out, uint32_t assign_level
 		LOG("CE dma: pa %llx size %llx NOT assigned (boot-arg)", pa, size);
 		return (void *)va;
 	}
+	if (assign_level == 3) {
+		static const uint32_t vm_mss[1] = { VMID_MSS_MSA };
+		r = hyp_assign(pa, size, vm_mss, 1);
+		LOG("CE dma: pa %llx size %llx assign MSS_MSA rc %lld",
+		    pa, size, (long long)r);
+		return r == 0 ? (void *)va : NULL;
+	}
 
 	{
 		static const uint32_t vm_two[2] = { VMID_WLAN_CE, VMID_WLAN };
@@ -5000,58 +5007,76 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 		}
 	}
 	{
-		/* The WLAN MAC at 0x18800000 is a master on the apps SMMU with
-		 * stream id 0xc0 (DT iommus = <&apps_smmu 0xc0 0x1>). Linux's icnss
-		 * attaches that device to the iommu at probe, long before the modem
-		 * boots; if the stream is left faulting the WLAN core cannot DMA
-		 * and its firmware never registers wlan_pd. modem_wlansmmu=1 only
-		 * reports, 2 sets the stream to bypass.
+		/* picasso's own device tree says:
+		 *   qcom,icnss@18800000 { iommus = <&apps_smmu 0x20 0x1>;
+		 *                         qcom,iommu-dma-addr-pool = <0xa0000000 0x10000000>; }
+		 * The WLAN master is stream 0x20, NOT 0xc0 (that value came from a
+		 * different platform).  Leaving 0x20 in translation mode with no
+		 * context bank for our CE rings makes the first CE DMA fault and stall
+		 * the interconnect - exactly the 30 s watchdog hang in v331/v333/v334b.
+		 * Linux attaches icnss to the IOMMU at probe; here we set the stream to
+		 * bypass so the CE can use plain physical addresses.
 		 *
 		 * Apps SMMU on SM7250 is ARM MMU-500 (SMMUv2):
 		 * SMR registers at 0x800 + 4*i, S2CR at 0xc00 + 4*i. */
 		uint32_t wlansmmu = 2;
+		uint32_t sid = 0x20;                 /* decimal 32 if overridden */
+		uint32_t sid2 = 0xc0;               /* legacy platform, best-effort */
 		(void)PE_parse_boot_argn("modem_wlansmmu", &wlansmmu, sizeof(wlansmmu));
+		(void)PE_parse_boot_argn("modem_wlansmmu_sid", &sid, sizeof(sid));
 		if (wlansmmu) {
 			vm_offset_t smmu = ml_io_map(0x15000000, 0x2000);
 			if (smmu != 0) {
 				volatile uint32_t *r = (volatile uint32_t *)smmu;
 				uint32_t idr0 = r[0x20 >> 2];
 				uint32_t num_smr = idr0 & 0xffu;
-				int match_idx = -1;
-				int free_idx = -1;
 
+				/* Report every live stream once: this is how we found the
+				 * 0xc0 / 0x20 mismatch, keep it for future board bring-up. */
 				for (uint32_t i = 0; i < num_smr && i < 128; i++) {
 					uint32_t smr = r[(0x800 >> 2) + i];
-					if (!(smr & (1u << 31))) {
-						if (free_idx < 0) free_idx = (int)i;
-						continue;
-					}
-					uint32_t mask = (smr >> 16) & 0x7fffu;
-					if (((smr ^ 0xc0u) & 0x7fffu & ~mask) == 0) {
-						match_idx = (int)i;
-						break;
+					if (smr & (1u << 31)) {
+						LOG("wlan smmu: SMR[%u]=%08x S2CR=%08x", i, smr,
+						    r[(0xc00 >> 2) + i]);
 					}
 				}
 
-				if (match_idx >= 0) {
-					uint32_t s2 = r[(0xc00 >> 2) + match_idx];
-					uint32_t type = (s2 >> 16) & 3u;
-					LOG("wlan smmu: match at SMR[%d]=%08x S2CR=%08x (type=%u)",
-					    match_idx, r[(0x800 >> 2) + match_idx], s2, type);
-					if (wlansmmu >= 2 && type != 1u) {
-						s2 = (s2 & ~(3u << 16)) | (1u << 16);
-						r[(0xc00 >> 2) + match_idx] = s2;
-						__asm__ volatile ("dsb sy" ::: "memory");
-						LOG("wlan smmu: S2CR[%d] set to bypass (%08x)", match_idx, s2);
+				uint32_t targets[2] = { sid & 0x7fffu, sid2 & 0x7fffu };
+				for (unsigned t = 0; t < (wlansmmu >= 3 ? 2u : 1u); t++) {
+					uint32_t want = targets[t];
+					int match_idx = -1, free_idx = -1;
+					for (uint32_t i = 0; i < num_smr && i < 128; i++) {
+						uint32_t smr = r[(0x800 >> 2) + i];
+						if (!(smr & (1u << 31))) {
+							if (free_idx < 0) free_idx = (int)i;
+							continue;
+						}
+						uint32_t mask = (smr >> 16) & 0x7fffu;
+						if (((smr ^ want) & 0x7fffu & ~mask) == 0) {
+							match_idx = (int)i;
+							break;
+						}
 					}
-				} else if (wlansmmu >= 2 && free_idx >= 0) {
-					r[(0x800 >> 2) + free_idx] = (1u << 31) | 0xc0u;
-					r[(0xc00 >> 2) + free_idx] = (1u << 16); /* bypass */
-					__asm__ volatile ("dsb sy" ::: "memory");
-					LOG("wlan smmu: allocated SMR[%d]=%08x S2CR=bypass",
-					    free_idx, (1u << 31) | 0xc0u);
-				} else {
-					LOG("wlan smmu: no match found for stream 0xc0 (free_idx=%d)", free_idx);
+					if (match_idx >= 0) {
+						uint32_t s2 = r[(0xc00 >> 2) + match_idx];
+						uint32_t type = (s2 >> 16) & 3u;
+						LOG("wlan smmu: SID %x matched SMR[%d] S2CR=%08x type=%u",
+						    want, match_idx, s2, type);
+						if (wlansmmu >= 2 && type != 1u) {
+							s2 = (s2 & ~(3u << 16)) | (1u << 16);
+							r[(0xc00 >> 2) + match_idx] = s2;
+							__asm__ volatile ("dsb sy" ::: "memory");
+							LOG("wlan smmu: S2CR[%d] -> bypass (%08x)", match_idx, s2);
+						}
+					} else if (wlansmmu >= 2 && free_idx >= 0) {
+						r[(0x800 >> 2) + free_idx] = (1u << 31) | want;
+						r[(0xc00 >> 2) + free_idx] = (1u << 16);
+						__asm__ volatile ("dsb sy" ::: "memory");
+						LOG("wlan smmu: SID %x allocated SMR[%d] S2CR=bypass",
+						    want, free_idx);
+					} else {
+						LOG("wlan smmu: SID %x no SMR slot (free=%d)", want, free_idx);
+					}
 				}
 			} else {
 				LOG("wlan smmu: cannot map 0x15000000");

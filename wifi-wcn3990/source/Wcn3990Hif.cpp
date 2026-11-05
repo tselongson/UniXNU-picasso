@@ -869,11 +869,14 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_post_count = v;
 	}
 
-	/* wcn3990-hif-assign: 0 = leave the pages HLOS-only (the v333 behaviour),
-	 * 1 = VMID_WLAN_CE only, 2 (default) = VMID_WLAN_CE + VMID_WLAN. */
-	uint32_t assign_level = 2;
+	/* wcn3990-hif-assign: 0 (default) = plain HLOS pages; the real gate for
+	 * the WLAN CE master is the apps-SMMU stream, not a VMID assignment.
+	 * 1 = VMID_WLAN_CE, 2 = VMID_WLAN_CE + VMID_WLAN, 3 = VMID_MSS_MSA.
+	 * TZ rejects 24/25 on this platform (ret=-2 res=86), so those levels
+	 * leave the HIF inert on purpose rather than starting a doomed DMA. */
+	uint32_t assign_level = 0;
 	v = 0;
-	if (PE_parse_boot_argn("wcn3990-hif-assign", &v, sizeof(v)) && v <= 2) {
+	if (PE_parse_boot_argn("wcn3990-hif-assign", &v, sizeof(v)) && v <= 3) {
 		assign_level = v;
 	}
 	{
