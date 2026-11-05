@@ -604,6 +604,7 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 	} __attribute__((packed)) cmd;
 	uint32_t i, nch = (uint32_t)(sizeof(g_scan_freqs) / sizeof(g_scan_freqs[0]));
 	uint8_t chans[256];
+	uint8_t bssid[6];
 
 	if (nch * 4 > sizeof(chans)) nch = sizeof(chans) / 4;
 	if (dwell_ms == 0 || dwell_ms > 300) dwell_ms = 40;
@@ -624,23 +625,28 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 	/* 39 channels x (dwell + rest) needs about 4 s; the previous 3000 ms
 	 * cut every full-band scan short. */
 	cmd.common[12] = 20000;                  /* max_scan_time */
-	cmd.common[13] = 0;                      /* probe_delay */
-	/* ath10k's TLV path XORs WMI_SCAN_FILTER_PROBE_REQ into the flags.  We
-	 * emit the post-XOR value directly: report beacons/probe responses only. */
+	cmd.common[13] = 5;                      /* probe_delay (ath10k: 5) */
+	/* ath10k's TLV path XORs WMI_SCAN_FILTER_PROBE_REQ into the flags, so
+	 * this is the post-XOR value of "no scan flags" - report beacons and
+	 * probe responses, nothing else. */
 	cmd.common[14] = WMI_SCAN_FILTER_PROBE_REQ;
 	cmd.burst_duration_ms = dwell_ms;
 	cmd.num_channels = nch;
-	cmd.num_bssids = 0;
+	cmd.num_bssids = 1;
 	cmd.num_ssids = 0;
 	cmd.ie_len = 0;
 	cmd.num_probes = 3;
+
+	/* ath10k_wmi_start_scan_init() always asks for one broadcast BSSID;
+	 * without it the firmware does not send broadcast probe requests. */
+	for (i = 0; i < 6; i++) bssid[i] = 0xff;
 
 	for (i = 0; i < nch; i++) hif_put32(chans + i * 4, g_scan_freqs[i]);
 
 	p = hif_put_tlv(p, WMI_TLV_START_SCAN_CMD, (uint16_t)sizeof(cmd), &cmd);
 	p = hif_put_tlv(p, WMI_TLV_ARRAY_UINT32, (uint16_t)(nch * 4), chans);
 	p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT, 0, NULL);  /* ssids */
-	p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT, 0, NULL);  /* bssids */
+	p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT, (uint16_t)sizeof(bssid), bssid);
 	p = hif_put_tlv(p, WMI_TLV_ARRAY_BYTE, 0, NULL);          /* ie */
 
 	HIF_LOG("WMI: send START_SCAN (scan_id 0x1000, %u channels, %u ms dwell, %u TLV bytes)",

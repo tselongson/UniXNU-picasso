@@ -145,6 +145,25 @@ extern "C" uint64_t sweet_log_position(void) { return 0; }
 #define MODEM_CARVEOUT      0x8C000000ull
 #define MODEM_CARVEOUT_SIZE 0x0F800000ull
 
+/* Apps SMMU (MMU-500).  SMR: [31] VALID, [30:16] SID, [15:0] MASK where a 1
+ * means "ignore this SID bit".  S2CR: [17:16] TYPE (0 translation, 1 bypass,
+ * 2 fault), [7:0] CBNDX.  Stream 0x20 is the WLAN copy engine. */
+#define WLAN_SMMU_PA                0x15000000ull
+#define WLAN_SMMU_SID               0x20u
+#define WLAN_SMMU_SMR_VALID         (1u << 31)
+#define WLAN_SMMU_S2CR_BYPASS       (1u << 16)
+
+static bool
+wlan_smmu_smr_matches(uint32_t smr, uint32_t sid)
+{
+	uint32_t mask, entry_sid;
+
+	if (!(smr & WLAN_SMMU_SMR_VALID)) return false;
+	mask = smr & 0xffffu;
+	entry_sid = (smr >> 16) & 0x7fffu;
+	return ((entry_sid ^ sid) & ~mask & 0x7fffu) == 0;
+}
+
 /* qcom,smp2p-mpss: qcom,smem = <0x1b3 0x1ac> -> in 435, out 428 */
 #define ITEM_SMP2P_OUT      428
 #define ITEM_SMP2P_IN       435
@@ -5286,24 +5305,6 @@ done:
 	LOG("done");
 
 	thread_terminate(current_thread());
-}
-
-/* MMU-500 SMR: [31] VALID, [30:16] SID, [15:0] MASK (1 = ignore that SID bit).
- * S2CR: [17:16] TYPE (0 = translation, 1 = bypass, 2 = fault), [7:0] CBNDX. */
-#define WLAN_SMMU_PA                0x15000000ull
-#define WLAN_SMMU_SID               0x20u
-#define WLAN_SMMU_SMR_VALID         (1u << 31)
-#define WLAN_SMMU_S2CR_BYPASS       (1u << 16)
-
-static bool
-wlan_smmu_smr_matches(uint32_t smr, uint32_t sid)
-{
-	uint32_t mask, entry_sid;
-
-	if (!(smr & WLAN_SMMU_SMR_VALID)) return false;
-	mask = smr & 0xffffu;
-	entry_sid = (smr >> 16) & 0x7fffu;
-	return ((entry_sid ^ sid) & ~mask & 0x7fffu) == 0;
 }
 
 /*
