@@ -502,7 +502,10 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 	uint8_t tlv[768];
 	uint8_t *p = tlv;
 	struct {
-		uint32_t common[16];
+		/* wmi.h: struct wmi_start_scan_common is exactly 15 __le32 fields
+		 * (60 bytes).  An extra word here shifted burst_duration_ms and
+		 * every following field by 4 bytes. */
+		uint32_t common[15];
 		uint32_t burst_duration_ms;
 		uint32_t num_channels;
 		uint32_t num_bssids;
