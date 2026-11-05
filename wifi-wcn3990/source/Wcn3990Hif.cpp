@@ -422,9 +422,12 @@ hif_send_connect_service(void)
 	} __attribute__((packed)) req;
 
 	req.service_id = HTC_SVC_WMI_CONTROL;
-	/* htc.c: only WMI_CONTROL keeps credit flow control enabled; the others
-	 * set DISABLE_CREDIT_FLOW_CTRL.  Zero flags is exactly that case. */
-	req.flags = 0;
+	/* htc.c: ath10k_htc_get_credit_allocation() hands the WMI control
+	 * service every credit advertised in HTC READY and passes the count in
+	 * ATH10K_HTC_CONN_FLAGS_RECV_ALLOC (bits 8-15).  Sending zero - which
+	 * this driver did - tells the target to allocate no receive credit at
+	 * all, so it never delivers a single WMI event. */
+	req.flags = (uint16_t)(((g_credit_count ? g_credit_count : 1) & 0xffu) << 8);
 	req.pad[0] = req.pad[1] = 0;
 
 	HIF_LOG("HTC: send CONNECT_SERVICE svc=0x%04x", HTC_SVC_WMI_CONTROL);
