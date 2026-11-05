@@ -4112,8 +4112,22 @@ picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out, uint32_t assign_level
 	uint64_t pa, r;
 	kern_return_t kr;
 
-	kr = kmem_alloc_contig(kernel_map, &va, (vm_size_t)size, PAGE_MASK, 0, 0,
+	/* The DT gives icnss `qcom,iommu-dma-addr-pool = <0xa0000000 0x10000000>`,
+	 * i.e. the firmware and its CE are expected to DMA inside that window.
+	 * A block allocated anywhere else can still be reachable when the SMMU
+	 * bypasses the stream, but this board's stream 0x20 is translated by CB
+	 * 0x3d, so stay inside the advertised pool first and fall back only if
+	 * it is already taken. */
+	kr = kmem_alloc_contig(kernel_map, &va, (vm_size_t)size, PAGE_MASK,
+	    0xa0000000ull, 0xb0000000ull,
 	    (kma_flags_t)(KMA_DATA | KMA_ZERO | KMA_PERMANENT), VM_KERN_MEMORY_IOKIT);
+	if (kr == KERN_SUCCESS) {
+		LOG("CE dma: allocated inside the 0xa0000000 iommu-dma-addr-pool");
+	} else {
+		LOG("CE dma: pool 0xa0000000 unavailable kr=%d, retrying unrestricted", kr);
+		kr = kmem_alloc_contig(kernel_map, &va, (vm_size_t)size, PAGE_MASK, 0, 0,
+		    (kma_flags_t)(KMA_DATA | KMA_ZERO | KMA_PERMANENT), VM_KERN_MEMORY_IOKIT);
+	}
 	if (kr != KERN_SUCCESS || va == 0) {
 		LOG("CE dma: kmem_alloc_contig(%llx) failed kr=%d", size, kr);
 		return NULL;
@@ -5044,11 +5058,23 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 		(void)PE_parse_boot_argn("modem_wlansmmu", &wlansmmu, sizeof(wlansmmu));
 		(void)PE_parse_boot_argn("modem_wlansmmu_sid", &sid, sizeof(sid));
 		if (wlansmmu) {
-			vm_offset_t smmu = ml_io_map(0x15000000, 0x2000);
+			/* 1 MiB covers the context-bank window as well (CB n lives at
+			 * 0x8000 + n*0x1000 on an MMU-500), which is what tells us
+			 * whether CB 0x3d - the bank SMR[6] points stream 0x20 at -
+			 * is actually enabled and where its page table is. */
+			vm_offset_t smmu = ml_io_map(0x15000000, 0x100000);
 			if (smmu != 0) {
 				volatile uint32_t *r = (volatile uint32_t *)smmu;
 				uint32_t idr0 = r[0x20 >> 2];
 				uint32_t num_smr = idr0 & 0xffu;
+				{
+					uint32_t s2cr6 = r[(0xc00 >> 2) + 6];
+					uint32_t cbndx = s2cr6 & 0xffu;
+					uint32_t cbar = r[((0x8000u + cbndx * 0x1000u) >> 2)];
+					uint32_t cbacr = r[((0x8000u + cbndx * 0x1000u + 4) >> 2)];
+					LOG("wlan smmu: S2CR[6]=%08x cb=%u cbar=%08x acr=%08x (valid=%u)",
+					    s2cr6, cbndx, cbar, cbacr, cbar & 1u);
+				}
 
 				/* Report every live stream once: this is how we found the
 				 * 0xc0 / 0x20 mismatch, keep it for future board bring-up. */
@@ -5134,6 +5160,23 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 				}
 			} else {
 				LOG("wlan smmu: cannot map 0x15000000");
+			}
+		} else {
+			/* Read-only look at the entry that owns stream 0x20.  The CE
+			 * DMA target has to be writable through this bank, so knowing
+			 * whether CB 0x3d is enabled (and whether its CBAR points at a
+			 * real table) decides whether plain physical addresses can
+			 * work for the rings at all. */
+			vm_offset_t smmu = ml_io_map(0x15000000, 0x100000);
+			if (smmu != 0) {
+				volatile uint32_t *r = (volatile uint32_t *)smmu;
+				uint32_t s2cr6 = r[(0xc00 >> 2) + 6];
+				uint32_t smr6 = r[(0x800 >> 2) + 6];
+				uint32_t cbndx = s2cr6 & 0xffu;
+				uint32_t cbar = r[((0x8000u + cbndx * 0x1000u) >> 2)];
+				uint32_t cbacr = r[((0x8000u + cbndx * 0x1000u + 4) >> 2)];
+				LOG("wlan smmu: SMR[6]=%08x S2CR[6]=%08x cb=%u cbar=%08x acr=%08x valid=%u",
+				    smr6, s2cr6, cbndx, cbar, cbacr, cbar & 1u);
 			}
 		}
 	}

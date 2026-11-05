@@ -378,7 +378,7 @@ picasso_wlan_boot_thread(void *arg, wait_result_t wr)
 	 * from ever starting. Five seconds is past the root publication.
 	 * wlan_delay_ms moves the whole bring-up later, which keeps the ~30 MiB
 	 * firmware pull off the UFS host while init is still exec'ing launchd. */
-	uint32_t delay_ms = 5000;
+	uint32_t delay_ms = 70000;
 	PE_parse_boot_argn("wlan_delay_ms", &delay_ms, sizeof(delay_ms));
 	if (delay_ms < 1000) delay_ms = 1000;
 	IOSleep(delay_ms);
