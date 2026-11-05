@@ -374,6 +374,7 @@ enum hif_state {
 static enum hif_state g_state = HIF_OFF;
 static bool g_init_sent;
 static uint8_t g_wmi_eid = 1;
+static uint8_t g_tx_seq;
 static uint16_t g_credit_count, g_credit_size;
 static uint32_t g_polls;
 static uint32_t g_rx_packets;
@@ -417,8 +418,15 @@ hif_wmi_command(uint32_t cmd_id, const uint8_t *tlvs, uint32_t len)
 	if (total > CE_BUF_BYTES) return -1;
 	memset(b, 0, total);
 	b[0] = g_wmi_eid;
-	b[1] = 0;
+	/* htc.c: ath10k_htc_tx_complete_skb()/ath10k_htc_build_tx_skb sets
+	 * NEED_CREDIT_UPDATE on every message of an endpoint whose transmit
+	 * credit flow control is on (WMI is the only such service), and stamps
+	 * a per-endpoint sequence number in control_byte1.  Without the flag
+	 * the target has no reason to hand credits back in a trailer and the
+	 * pipe dries up after the initial READY allocation. */
+	b[1] = 0x01;                 /* ATH10K_HTC_FLAG_NEED_CREDIT_UPDATE */
 	hif_put16(b + 2, (uint16_t)(4 + len));
+	b[5] = g_tx_seq++;
 	hif_put32(b + 8, cmd_id);
 	if (len && tlvs) memcpy(b + 12, tlvs, len);
 
