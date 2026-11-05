@@ -940,8 +940,7 @@ index 0000000..2237fb2
 +			continue;
 +		}
 +		uint32_t mask = smr & 0xffffu;
-+		uint32_t smr_sid = (smr >> 16) & 0x7fffu;
-+		if (((smr_sid ^ USB_STREAM_ID) & ~mask & 0x7fffu) != 0) {
++		if ((((smr >> 16) & 0x7fffu) ^ USB_STREAM_ID) & ~mask & 0x7fffu) {
 +			continue;
 +		}
 +		matches++;
