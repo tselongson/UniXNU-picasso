@@ -179,7 +179,7 @@ hif_ce_send(uint32_t ce, uint8_t *buf, uint32_t len)
 	uint32_t idx;
 	uint64_t pa;
 
-	if (!g_regs_live || len == 0 || len > CE_BUF_BYTES) return -1;
+	if (!g_regs_live || g_stage < 3 || len == 0 || len > CE_BUF_BYTES) return -1;
 
 	switch (ce) {
 	case 0:  ring = s_src0; entries = CE0_ENTRIES; wr = &g_wr0; break;
@@ -244,18 +244,17 @@ hif_ce2_repost(uint32_t idx)
 static void
 hif_dump_regs(const char *why)
 {
-	HIF_LOG("regs (%s): CE0 sr_base=%x sr_size=%x srri=%x wr=%x | "
+	HIF_LOG("regs (%s): stage=%d CE0 sr_base=%x sr_size=%x srri=%x wr=%x | "
 	    "CE2 dr_base=%x dr_size=%x drri=%x wr=%x desc0.nbytes=%u | "
-	    "CE3 sr_base=%x sr_size=%x srri=%x wr=%x | shadow0=%x shadow3=%x",
-	    why,
+	    "CE3 sr_base=%x sr_size=%x srri=%x wr=%x",
+	    why, g_stage,
 	    hif_reg_read(0, CE_SR_BASE_LO), hif_reg_read(0, CE_SR_SIZE),
 	    hif_reg_read(0, CE_CURRENT_SRRI), hif_reg_read(0, CE_SR_WR_INDEX),
 	    hif_reg_read(2, CE_DR_BASE_LO), hif_reg_read(2, CE_DR_SIZE),
 	    hif_reg_read(2, CE_CURRENT_DRRI), hif_reg_read(2, CE_DST_WR_INDEX),
 	    (unsigned)s_dst2[0].nbytes,
 	    hif_reg_read(3, CE_SR_BASE_LO), hif_reg_read(3, CE_SR_SIZE),
-	    hif_reg_read(3, CE_CURRENT_SRRI), hif_reg_read(3, CE_SR_WR_INDEX),
-	    hif_shadow_read(CE0_SHADOW_SR_WR), hif_shadow_read(CE3_SHADOW_SR_WR));
+	    hif_reg_read(3, CE_CURRENT_SRRI), hif_reg_read(3, CE_SR_WR_INDEX));
 }
 
 /* ------------------------------------------------------------------- HTC/WMI */
@@ -306,6 +305,15 @@ enum hif_state {
 };
 
 static enum hif_state g_state = HIF_OFF;
+/* Bring-up stages: 1 = descriptors only (no CE register writes),
+ * 2 = program CE base/size but leave DST_WR_INDEX at 0 (no DMA),
+ * 3 = post the receive buffers and start the CE.  Default is auto: the poll
+ * thread advances one stage every ~3 s, with a heartbeat before each step, so
+ * a single boot shows exactly which step hangs the SoC.  wcn3990-hif=0..3
+ * pins a stage (0 disables the HIF completely). */
+static int g_stage = 1;
+static int g_hif_mode = 0;
+static bool g_bases_programmed;
 static uint8_t g_wmi_eid = 1;
 static uint16_t g_credit_count, g_credit_size;
 static uint32_t g_polls;
@@ -671,6 +679,10 @@ hif_handle_rx(const uint8_t *buf, uint32_t nbytes)
 	}
 }
 
+/* Defined in the init section below, but the poll ladder must see them. */
+static void hif_program_bases(void);
+static void hif_post_buffers(void);
+
 extern "C" void
 wcn3990_hif_poll(void)
 {
@@ -678,28 +690,41 @@ wcn3990_hif_poll(void)
 
 	if (!g_regs_live) return;
 	g_polls++;
-	if (g_scan_active) g_scan_polls++;
 
-	/* Print registers periodically until the first packet arrives, then only
-	 * rarely.  This is what makes a silent CE diagnosable from the console. */
-	if ((g_rx_packets == 0 && (g_polls % 2000) == 0) || (g_polls == 1)) {
-		hif_dump_regs(g_rx_packets ? "post-rx" : "waiting for HTC READY");
-		HIF_LOG("state=%d polls=%u rx=%u beacons=%u", (int)g_state,
-		    g_polls, g_rx_packets, g_beacons);
+	/* Heartbeat every ~1000 polls, and advance the staged ladder.  This is
+	 * deliberately cheap: no cache flushes and no CE register access until
+	 * the corresponding stage is entered. */
+	if ((g_polls % 1000) == 0) {
+		HIF_LOG("heartbeat polls=%u stage=%d state=%d rx=%u beacons=%u desc0.nbytes=%u drri=%x",
+		    g_polls, g_stage, (int)g_state, g_rx_packets, g_beacons,
+		    (unsigned)s_dst2[0].nbytes,
+		    g_bases_programmed ? hif_reg_read(2, CE_CURRENT_DRRI) : 0);
+		if (g_hif_mode >= 4) {
+			if (g_stage == 1 && g_polls >= 3000) {
+				g_stage = 2;
+				hif_program_bases();
+			} else if (g_stage == 2 && g_polls >= 6000) {
+				g_stage = 3;
+				hif_post_buffers();
+			}
+		}
 	}
 
-	/* ce.c: _ath10k_ce_revoke_recv_next_64() / _ce_completed_recv_next_64():
-	 * a non-zero nbytes in the current descriptor means the CE has filled it. */
+	if (g_stage < 3) return;
+	if (g_scan_active) g_scan_polls++;
+
 	while (budget-- > 0) {
 		struct wcn_ce_desc_64 *d = &s_dst2[g_sw2];
 		uint32_t nbytes;
 		uint32_t idx = g_sw2;
 
-		flush_dcache64((addr64_t)kvtophys((vm_offset_t)d), 64, TRUE);
+		/* Only touch the cache on a completed descriptor; doing it on
+		 * every idle poll is what the earlier build did 1000x/s. */
 		nbytes = d->nbytes;
 		if (nbytes == 0) break;
 		if (nbytes > CE_BUF_BYTES) nbytes = CE_BUF_BYTES;
 
+		flush_dcache64((addr64_t)kvtophys((vm_offset_t)d), 64, TRUE);
 		flush_dcache64((addr64_t)(g_rx2_pa + (uint64_t)idx * CE_BUF_BYTES),
 		    nbytes, TRUE);
 		hif_handle_rx(s_rx2[idx], nbytes);
@@ -710,8 +735,6 @@ wcn3990_hif_poll(void)
 		hif_ce2_repost(idx);
 	}
 
-	/* If the firmware never volunteers HTC READY, nudge it once every ~2 s by
-	 * re-asserting the CE2 dest write index (the ring is already posted). */
 	if (g_state == HIF_CE_UP && (g_polls % 2000) == 0) {
 		hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
 	}
@@ -719,25 +742,70 @@ wcn3990_hif_poll(void)
 
 /* --------------------------------------------------------------------- init */
 
+/* Stage 2: program the CE ring registers but do not post any receive buffer.
+ * ce.c: ath10k_ce_set_dest_ring_base_addr_hi() preserves the non-address bits
+ * of dr_base_addr_hi, so use a read-modify-write with CE_DESC_ADDR_HI_MASK. */
+static void
+hif_program_bases(void)
+{
+	uint32_t hi;
+
+	hif_reg_write(0, CE_SR_BASE_LO, (uint32_t)g_src0_pa);
+	hif_reg_write(0, CE_SR_BASE_HI, (uint32_t)(g_src0_pa >> 32) & 0x1f);
+	hif_reg_write(0, CE_SR_SIZE, CE0_ENTRIES);
+	hif_reg_write(0, CE_HOST_IE, 0);
+	hif_reg_write(0, CE_MISC_IE, 0);
+
+	hif_reg_write(3, CE_SR_BASE_LO, (uint32_t)g_src3_pa);
+	hif_reg_write(3, CE_SR_BASE_HI, (uint32_t)(g_src3_pa >> 32) & 0x1f);
+	hif_reg_write(3, CE_SR_SIZE, CE3_ENTRIES);
+	hif_reg_write(3, CE_HOST_IE, 0);
+	hif_reg_write(3, CE_MISC_IE, 0);
+
+	hif_reg_write(2, CE_DR_BASE_LO, (uint32_t)g_dst2_pa);
+	hi = hif_reg_read(2, CE_DR_BASE_HI);
+	hi = (hi & ~0x1fu) | ((uint32_t)(g_dst2_pa >> 32) & 0x1fu);
+	hif_reg_write(2, CE_DR_BASE_HI, hi);
+	hif_reg_write(2, CE_DR_SIZE, CE2_ENTRIES);
+	hif_reg_write(2, CE_HOST_IE, 0);
+	hif_reg_write(2, CE_MISC_IE, 0);
+
+	g_bases_programmed = true;
+	hif_dump_regs("stage 2: CE bases programmed, no buffers posted");
+}
+
+/* Stage 3: hand CE2_ENTRIES-1 buffers to the copy engine. */
+static void
+hif_post_buffers(void)
+{
+	g_post2 = CE2_ENTRIES - 1;
+	hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
+	hif_dump_regs("stage 3: receive buffers posted");
+}
+
+extern "C" void
+wcn3990_hif_poll(void);
+
 extern "C" void
 wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 {
-	uint32_t off = 0;
-	uint32_t v = 1;
+	uint32_t v = 0;
 	uint32_t i;
 
 	if (!ce_va || g_regs_live) return;
 
-	/* Emergency off-switch for bring-up: wcn3990-hif=0 leaves the old
-	 * inert behaviour without rebuilding. */
-	if (PE_parse_boot_argn("wcn3990-hif", &v, sizeof(v)) && v == 0) {
+	/* wcn3990-hif=0..3 pins a stage; absent (or 4+) runs the auto ladder. */
+	g_hif_mode = 4;
+	if (PE_parse_boot_argn("wcn3990-hif", &v, sizeof(v)) && v <= 3) {
+		g_hif_mode = (int)v;
+	}
+	if (g_hif_mode == 0) {
 		HIF_LOG("disabled by wcn3990-hif=0");
 		return;
 	}
 
 	g_ce_va = ce_va;
 	(void)ce_pa;
-	(void)off;
 
 	memset(s_src0, 0, sizeof(s_src0));
 	memset(s_dst2, 0, sizeof(s_dst2));
@@ -752,25 +820,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		HIF_LOG("cannot resolve ring physical addresses");
 		return;
 	}
-	HIF_LOG("rings: src0=%llx dst2=%llx rx2=%llx src3=%llx",
+	HIF_LOG("rings: src0=%llx dst2=%llx rx2=%llx src3=%llx mode=%d",
 	    (unsigned long long)g_src0_pa, (unsigned long long)g_dst2_pa,
-	    (unsigned long long)g_rx2_pa, (unsigned long long)g_src3_pa);
+	    (unsigned long long)g_rx2_pa, (unsigned long long)g_src3_pa, g_hif_mode);
 
-	/* CE0: HTC control, host -> target (source ring) */
-	hif_reg_write(0, CE_SR_BASE_LO, (uint32_t)g_src0_pa);
-	hif_reg_write(0, CE_SR_BASE_HI, (uint32_t)(g_src0_pa >> 32));
-	hif_reg_write(0, CE_SR_SIZE, CE0_ENTRIES);
-	hif_reg_write(0, CE_HOST_IE, 0);
-	hif_reg_write(0, CE_MISC_IE, 0);
-
-	/* CE3: WMI commands, host -> target (source ring) */
-	hif_reg_write(3, CE_SR_BASE_LO, (uint32_t)g_src3_pa);
-	hif_reg_write(3, CE_SR_BASE_HI, (uint32_t)(g_src3_pa >> 32));
-	hif_reg_write(3, CE_SR_SIZE, CE3_ENTRIES);
-	hif_reg_write(3, CE_HOST_IE, 0);
-	hif_reg_write(3, CE_MISC_IE, 0);
-
-	/* CE2: HTC control + WMI events, target -> host (destination ring) */
 	for (i = 0; i < CE2_ENTRIES; i++) {
 		s_dst2[i].addr = (g_rx2_pa + (uint64_t)i * CE_BUF_BYTES) & CE_DESC_ADDR_MASK;
 		s_dst2[i].nbytes = 0;
@@ -780,25 +833,22 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	hif_mb();
 	flush_dcache64((addr64_t)g_dst2_pa, (unsigned int)sizeof(s_dst2), TRUE);
 
-	hif_reg_write(2, CE_DR_BASE_LO, (uint32_t)g_dst2_pa);
-	hif_reg_write(2, CE_DR_BASE_HI, (uint32_t)(g_dst2_pa >> 32));
-	hif_reg_write(2, CE_DR_SIZE, CE2_ENTRIES);
-	hif_reg_write(2, CE_HOST_IE, 0);
-	hif_reg_write(2, CE_MISC_IE, 0);
-
-	/* Post CE2_ENTRIES-1 buffers: ath10k keeps one ring slot free. */
 	g_sw2 = 0;
-	g_post2 = CE2_ENTRIES - 1;
+	g_post2 = 0;
 	g_wr0 = g_wr3 = 0;
-	hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
-	hif_reg_write(0, CE_SR_WR_INDEX, 0);
-	hif_reg_write(3, CE_SR_WR_INDEX, 0);
-
-	g_regs_live = true;
-	g_state = HIF_CE_UP;
 	g_polls = 0;
 	g_rx_packets = 0;
 	g_beacons = 0;
-	hif_dump_regs("after CE programming");
-	HIF_LOG("CE0/CE2/CE3 programmed; waiting for HTC READY on CE2");
+	g_bases_programmed = false;
+	g_stage = (g_hif_mode >= 1 && g_hif_mode <= 3) ? g_hif_mode : 1;
+	g_state = HIF_CE_UP;
+	g_regs_live = true;
+
+	HIF_LOG("stage 1: descriptors in DDR, no CE register writes yet (mode %d)", g_hif_mode);
+	if (g_hif_mode == 2) hif_program_bases();
+	if (g_hif_mode == 3) {
+		hif_program_bases();
+		hif_post_buffers();
+	}
 }
+
