@@ -58,7 +58,10 @@ extern "C" void flush_dcache64(addr64_t pa, unsigned int len, boolean_t phys);
 static inline void
 hif_mb(void)
 {
-	mb();
+	/* PicassoWlan.cpp defines its own mb(); this file must not depend on a
+	 * definition in another translation unit.  Full-system DMB covers both
+	 * the CE descriptor (CPU -> device) and the completion (device -> CPU). */
+	__asm__ __volatile__("dmb sy" ::: "memory");
 }
 
 static inline uint16_t
