@@ -1049,6 +1049,14 @@ hif_post_buffers(void)
 	    cur, g_post2, hif_reg_read(2, CE_DR_BASE_LO),
 	    (unsigned long long)s_dst2[0].addr);
 	IOSleep(30);
+	/* Warm the fault-record mapping now: the post-doorbell watch must not
+	 * spend its first microseconds in ml_io_map(). */
+	{
+		uint32_t f[4];
+
+		picasso_wlan_smmu_fault_read(f);
+		HIF_LOG("stage 3 warm: gfsr=%08x gfsynr1=%08x", f[0], f[2]);
+	}
 	hif_reg_write(2, CE_DST_WR_INDEX, cur);
 	HIF_LOG("stage 3: doorbell no-op write ok (reads %u)",
 	    hif_reg_read(2, CE_DST_WR_INDEX));
@@ -1056,15 +1064,12 @@ hif_post_buffers(void)
 	hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
 	HIF_LOG("stage 3: posted %u receive buffers (desc.addr=%llx wr=%u)",
 	    n, (unsigned long long)s_dst2[0].addr, g_post2);
-	/* Same reason as in hif_ce_ctrl1(): if the target's first write into
-	 * these buffers faults in the SMMU, this line must already be out. */
-	IOSleep(50);
 
-	/* Watch what the doorbell kicked off, read-only: DRRI moving means the
-	 * copy engine fetched the descriptors; a fault record naming a stream
-	 * means a translation was refused.  Each line is printed before the
-	 * next sleep, so a machine that dies mid-watch still reports how long
-	 * it lived and what the last state was. */
+	/* Watch what the doorbell kicked off, read-only, starting with NO sleep:
+	 * the machine has been dying within tens of milliseconds of the real
+	 * doorbell write, so watch 0 is the only read guaranteed to land.  DRRI
+	 * moving = the copy engine fetched the descriptors; a fault record
+	 * naming a stream = the SMMU refused one. */
 	{
 		uint32_t f[4];
 		int k;
