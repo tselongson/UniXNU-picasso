@@ -1025,6 +1025,64 @@ hif_program_bases(void)
 	hif_dump_regs("stage 2: CE bases programmed, no buffers posted");
 }
 
+/* ---------------------------------------------------------------- SMMU trace */
+/* v356..v363 assumed the CE dies because stream 0x20 has no SMR entry.  That
+ * was never confirmed: sGFSR read zero before the doorbell, and the device-tree
+ * says the WLAN node uses iommus = <apps_smmu 0xc0 0x1> with a 0xa0000000 IOVA
+ * pool and "stall-disable, non-fatal" faults.  Read the fault record and the CE
+ * ring state AFTER the doorbell so the failing stream (sGFSYNR1) and whether a
+ * DMA was issued at all are observations rather than guesses. */
+extern "C" vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+
+static volatile uint32_t *
+hif_smmu_gr0(void)
+{
+	static volatile uint32_t *gr0;
+
+	/* 4 KiB only: v357 panicked in kmem_alloc() with a 0xd0000-byte map. */
+	if (!gr0) gr0 = (volatile uint32_t *)ml_io_map(0x15000000ull, 0x1000);
+	return gr0;
+}
+
+static void
+hif_ce_snapshot(const char *tag)
+{
+	static volatile uint32_t *cb;
+	volatile uint32_t *g = hif_smmu_gr0();
+	uint32_t idr1, cb_off;
+
+	if (!g) {
+		HIF_LOG("%s SMMU map failed", tag);
+		return;
+	}
+	idr1 = g[0x024 >> 2];
+	cb_off = ((1u << (((idr1 >> 28) & 7u) + 1u)) + 61u) * 4096u;
+	if (!cb) cb = (volatile uint32_t *)ml_io_map(0x15000000ull + cb_off, 0x1000);
+
+	HIF_LOG("%s SMMU scr0=%08x gfsr=%08x synr0=%08x synr1=%08x synr2=%08x",
+	    tag, g[0], g[0x048 >> 2], g[0x050 >> 2], g[0x054 >> 2],
+	    g[0x058 >> 2]);
+	HIF_LOG("%s SMR[0..7]=%08x %08x %08x %08x %08x %08x %08x %08x",
+	    tag, g[0x800 >> 2], g[0x804 >> 2], g[0x808 >> 2], g[0x80c >> 2],
+	    g[0x810 >> 2], g[0x814 >> 2], g[0x818 >> 2], g[0x81c >> 2]);
+	HIF_LOG("%s S2CR[0..7]=%08x %08x %08x %08x %08x %08x %08x %08x",
+	    tag, g[0xc00 >> 2], g[0xc04 >> 2], g[0xc08 >> 2], g[0xc0c >> 2],
+	    g[0xc10 >> 2], g[0xc14 >> 2], g[0xc18 >> 2], g[0xc1c >> 2]);
+	if (cb) {
+		HIF_LOG("%s CB61 off=%06x sctlr=%08x fsr=%08x far=%08x/%08x fsynr0=%08x",
+		    tag, cb_off, cb[0], cb[0x058 >> 2], cb[0x060 >> 2],
+		    cb[0x064 >> 2], cb[0x068 >> 2]);
+	}
+	HIF_LOG("%s CE2 wr=%08x drri=%08x dr_base=%08x size=%08x ctrl1=%08x ie=%08x/%08x wm=%08x",
+	    tag, hif_reg_read(2, CE_DST_WR_INDEX), hif_reg_read(2, CE_CURRENT_DRRI),
+	    hif_reg_read(2, CE_DR_BASE_LO), hif_reg_read(2, CE_DR_SIZE),
+	    hif_reg_read(2, CE_CTRL1), hif_reg_read(2, CE_HOST_IE),
+	    hif_reg_read(2, CE_MISC_IE), hif_reg_read(2, CE_DST_WM));
+	HIF_LOG("%s desc0.addr=%llx nbytes=%u rri0=%08x ring_pa=%llx",
+	    tag, (unsigned long long)s_dst2[0].addr, (unsigned)s_dst2[0].nbytes,
+	    s_rri[0], (unsigned long long)g_dst2_pa);
+}
+
 /* Stage 3: hand CE2_ENTRIES-1 buffers to the copy engine. */
 static void
 hif_post_buffers(void)
@@ -1033,6 +1091,25 @@ hif_post_buffers(void)
 	 * nentries-1, and __ath10k_ce_rx_post_buf_64() posts on top of
 	 * whatever the register already holds.  Keep one slot free so the
 	 * ring can never look full to the target. */
+	/* Opt-in: a few Qualcomm SMMUs fall back to indexing S2CR directly by
+	 * stream ID when no SMR matches.  SID 0x20 is 32 decimal; cover the
+	 * decimal-20 reading of the same label too.  S2CR is the one register
+	 * array on this SMMU that reliably accepts writes. */
+	{
+		uint32_t probe = 0;
+
+		if (PE_parse_boot_argn("wcn3990-hif-s2cr", &probe,
+		    sizeof(probe)) && probe) {
+			volatile uint32_t *g = hif_smmu_gr0();
+
+			if (g) {
+				g[(0xc00 >> 2) + 20] = 61;
+				g[(0xc00 >> 2) + 32] = 61;
+				HIF_LOG("S2CR direct-index probe: [20]=%08x [32]=%08x",
+				    g[(0xc00 >> 2) + 20], g[(0xc00 >> 2) + 32]);
+			}
+		}
+	}
 	uint32_t cur = hif_reg_read(2, CE_DST_WR_INDEX) & (CE2_ENTRIES - 1);
 	uint32_t n = (g_post_count > 0 && g_post_count < CE2_ENTRIES) ?
 	    g_post_count : (CE2_ENTRIES - 1);
@@ -1058,6 +1135,15 @@ hif_post_buffers(void)
 	/* Same reason as in hif_ce_ctrl1(): if the target's first write into
 	 * these buffers faults in the SMMU, this line must already be out. */
 	IOSleep(50);
+	/* Three read-only snapshots: the fault record names the stream that the
+	 * SMMU refused, and a moving DRRI / CB FSR says the CE did start its
+	 * DMA.  A completely still ring with a clean fault record means the CE
+	 * never issued a transaction and this is not an SMMU problem at all. */
+	hif_ce_snapshot("post-CE t+50ms");
+	IOSleep(200);
+	hif_ce_snapshot("post-CE t+250ms");
+	IOSleep(1000);
+	hif_ce_snapshot("post-CE t+1.25s");
 }
 
 extern "C" void
