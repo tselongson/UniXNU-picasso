@@ -145,13 +145,23 @@ extern "C" uint64_t sweet_log_position(void) { return 0; }
 #define MODEM_CARVEOUT      0x8C000000ull
 #define MODEM_CARVEOUT_SIZE 0x0F800000ull
 
-/* Apps SMMU (MMU-500).  SMR: [31] VALID, [30:16] SID, [15:0] MASK where a 1
- * means "ignore this SID bit".  S2CR: [17:16] TYPE (0 translation, 1 bypass,
- * 2 fault), [7:0] CBNDX.  Stream 0x20 is the WLAN copy engine. */
+/* Apps SMMU (MMU-500).  SMR: [31] VALID, [30:16] MASK (1 = ignore that ID
+ * bit), [14:0] ID - the layout arm-smmu.c uses (SMR_ID_SHIFT 0,
+ * SMR_MASK_SHIFT 16).  S2CR: [17:16] TYPE (0 translation, 1 bypass, 2 fault),
+ * [7:0] CBNDX.  Stream 0x20 is the WLAN copy engine.
+ *
+ * TESTING NOTE: TYPE=1 (bypass) is not permitted on this SMMU - the store
+ * reads back as TYPE=2 (fault).  v345 lost its USB console that way, and every
+ * "S2CR=bypass" write in v335-v353 read back as 00020000.  Passthrough has to
+ * go through a context bank whose SCTLR.M is 0 instead; bank 61 on this device
+ * has CBAR=0, CBACR=0 and SCTLR.M=0, which is exactly what the USB console
+ * driver uses for its own stream. */
 #define WLAN_SMMU_PA                0x15000000ull
 #define WLAN_SMMU_SID               0x20u
 #define WLAN_SMMU_SMR_VALID         (1u << 31)
+#define WLAN_SMMU_SMR_MASK_SHIFT    16
 #define WLAN_SMMU_S2CR_BYPASS       (1u << 16)
+#define WLAN_SMMU_PASSTHRU_BANK     61u
 
 static bool
 wlan_smmu_smr_matches(uint32_t smr, uint32_t sid)
@@ -159,8 +169,8 @@ wlan_smmu_smr_matches(uint32_t smr, uint32_t sid)
 	uint32_t mask, entry_sid;
 
 	if (!(smr & WLAN_SMMU_SMR_VALID)) return false;
-	mask = smr & 0xffffu;
-	entry_sid = (smr >> 16) & 0x7fffu;
+	mask = (smr >> WLAN_SMMU_SMR_MASK_SHIFT) & 0x7fffu;
+	entry_sid = smr & 0x7fffu;
 	return ((entry_sid ^ sid) & ~mask & 0x7fffu) == 0;
 }
 
@@ -5189,64 +5199,86 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 			 * slots), and stage 2 - programming CE0/2/3 and their
 			 * CTRL1 - survives while stage 3 (handing the first
 			 * receive buffer to the target) still wedges the SoC.
-			 * That is stream 0x20 faulting in CB 61.
 			 *
-			 * By now the SMMU is fully clocked and writable, but the
-			 * USB driver owns slot 6 with SMR=800000e0 (sid 0, mask
-			 * 0xe0) - a mask entry that also covers 0x20 and cannot be
-			 * rewritten while the console is streaming.  Its patch
-			 * therefore leaves the lowest free slot alone and takes the
-			 * next one, so 0x20 can be claimed here at a lower index.
-			 * Only a free slot is ever written. */
+			 * By now the SMMU is clocked and writable.  What the
+			 * console driver's own log shows is that it owns slot 6/7
+			 * with SMR=800000e0, which under the real field layout is
+			 * ID 0xe0 / MASK 0 - an exact single-stream entry, not the
+			 * mask entry it was mistaken for - and that its S2CR points
+			 * at CB 61, a bank with SCTLR.M=0 that passes addresses
+			 * through.  This block mirrors that recipe for 0x20 and
+			 * dumps the whole table so the next run says what really
+			 * covers the WLAN stream. */
 			vm_offset_t smmu = ml_io_map(WLAN_SMMU_PA, 0x1000);
 			if (smmu != 0) {
 				volatile uint32_t *r = (volatile uint32_t *)smmu;
 				uint32_t count = r[0x20 >> 2] & 0xffu;
 				uint32_t i;
-				int owner = -1, free_slot = -1;
+				int exact = -1, first = -1, free_slot = -1;
 
 				if (count == 0 || count > 128) count = 128;
+				LOG("wlan smmu: scr0=%08x idr0=%08x smr=%u",
+				    r[0], r[0x20 >> 2], count);
 				for (i = 0; i < count; i++) {
 					uint32_t smr = r[(0x800 >> 2) + i];
+					uint32_t s2 = r[(0xc00 >> 2) + i];
 
 					if (!(smr & WLAN_SMMU_SMR_VALID)) {
 						if (free_slot < 0) free_slot = (int)i;
-					} else if (owner < 0 &&
-					    wlan_smmu_smr_matches(smr, WLAN_SMMU_SID)) {
-						owner = (int)i;
+						continue;
+					}
+					if (i < 16) {
+						LOG("wlan smmu: SMR[%u] id=%03x mask=%03x s2cr=%08x type=%u cb=%u",
+						    i, smr & 0x7fffu,
+						    (smr >> WLAN_SMMU_SMR_MASK_SHIFT) & 0x7fffu,
+						    s2, (s2 >> 16) & 3u, s2 & 0xffu);
+					}
+					if (!wlan_smmu_smr_matches(smr, WLAN_SMMU_SID)) continue;
+					if (first < 0) first = (int)i;
+					if ((smr & 0x7fffu) == WLAN_SMMU_SID &&
+					    ((smr >> WLAN_SMMU_SMR_MASK_SHIFT) & 0x7fffu) == 0) {
+						exact = (int)i;
 					}
 				}
-				if (owner >= 0 &&
-				    r[(0x800 >> 2) + owner] ==
-				    (WLAN_SMMU_SMR_VALID | (WLAN_SMMU_SID << 16))) {
-					uint32_t s2 = r[(0xc00 >> 2) + owner];
-					LOG("wlan smmu: SID 20 exact entry SMR[%d] type=%u cb=%u",
-					    owner, (s2 >> 16) & 3u, s2 & 0xffu);
+				LOG("wlan smmu: 0x20 exact=%d first=%d free=%d", exact,
+				    first, free_slot);
+				if (exact >= 0) {
+					uint32_t s2 = r[(0xc00 >> 2) + exact];
+					LOG("wlan smmu: 0x20 already exact in SMR[%d] type=%u cb=%u",
+					    exact, (s2 >> 16) & 3u, s2 & 0xffu);
 				} else if (free_slot >= 0 &&
-				    (owner < 0 || free_slot < owner)) {
+				    (first < 0 || free_slot < first)) {
 					/* Order matters: the USB console driver
 					 * writes S2CR first and SMR second, and its
 					 * readback passes.  Writing SMR first (what
 					 * every earlier build did) left both
 					 * registers reading back as 0 / 00020000,
-					 * i.e. the pair was dropped. */
-					r[(0xc00 >> 2) + free_slot] = WLAN_SMMU_S2CR_BYPASS;
+					 * i.e. the pair was dropped.
+					 *
+					 * The S2CR value is a *translation* entry
+					 * aimed at a context bank with SCTLR.M=0,
+					 * which passes addresses through.  TYPE=1
+					 * (bypass) is coerced to TYPE=2 (fault) on
+					 * this SMMU, which is why every earlier
+					 * attempt came back as 00020000. */
+					r[(0xc00 >> 2) + free_slot] =
+					    WLAN_SMMU_PASSTHRU_BANK;
 					__asm__ volatile ("dsb sy" ::: "memory");
 					r[(0x800 >> 2) + free_slot] =
-					    WLAN_SMMU_SMR_VALID | (WLAN_SMMU_SID << 16);
+					    WLAN_SMMU_SMR_VALID | WLAN_SMMU_SID;
 					__asm__ volatile ("dsb sy" ::: "memory");
-					LOG("wlan smmu: SID 20 -> SMR[%d]=%08x S2CR[%d]=%08x (want %08x/%08x, previous owner %d)",
+					LOG("wlan smmu: 0x20 -> SMR[%d]=%08x S2CR[%d]=%08x (want %08x/%08x, first %d)",
 					    free_slot, r[(0x800 >> 2) + free_slot], free_slot,
 					    r[(0xc00 >> 2) + free_slot],
-					    WLAN_SMMU_SMR_VALID | (WLAN_SMMU_SID << 16),
-					    WLAN_SMMU_S2CR_BYPASS, owner);
-				} else if (owner >= 0) {
-					/* A mask entry (the USB console's 800000e0)
-					 * covers 0x20 from a lower index and we have
-					 * nothing free below it: rewriting it would
-					 * move a live master, so leave it alone. */
-					LOG("wlan smmu: SID 20 shadowed by mask SMR[%d], no lower free slot",
-					    owner);
+					    WLAN_SMMU_SMR_VALID | WLAN_SMMU_SID,
+					    WLAN_SMMU_PASSTHRU_BANK, first);
+				} else if (first >= 0) {
+					/* A live entry covers 0x20 from a lower
+					 * index and nothing is free below it:
+					 * rewriting it would move a master that is
+					 * already doing DMA, so leave it alone. */
+					LOG("wlan smmu: 0x20 shadowed by SMR[%d], no lower free slot",
+					    first);
 				} else {
 					LOG("wlan smmu: no free SMR slot for SID 20");
 				}

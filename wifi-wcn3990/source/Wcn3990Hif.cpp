@@ -1016,6 +1016,20 @@ hif_post_buffers(void)
 	    g_post_count : (CE2_ENTRIES - 1);
 
 	g_post2 = (cur + n) & (CE2_ENTRIES - 1);
+	/* Bisect the doorbell.  Writing the value that is already there is a
+	 * no-op for the CE, so if the SoC dies on that store the register
+	 * itself is the trigger; if it survives and the real advance kills it,
+	 * the descriptor fetch the doorbell kicks off is what stalls the
+	 * interconnect.  Every line gets its own sleep so it is on the wire
+	 * before the next step. */
+	HIF_LOG("stage 3: doorbell cur=%u target=%u dr_base=%08x desc.addr=%llx",
+	    cur, g_post2, hif_reg_read(2, CE_DR_BASE_LO),
+	    (unsigned long long)s_dst2[0].addr);
+	IOSleep(30);
+	hif_reg_write(2, CE_DST_WR_INDEX, cur);
+	HIF_LOG("stage 3: doorbell no-op write ok (reads %u)",
+	    hif_reg_read(2, CE_DST_WR_INDEX));
+	IOSleep(30);
 	hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
 	HIF_LOG("stage 3: posted %u receive buffers (desc.addr=%llx wr=%u)",
 	    n, (unsigned long long)s_dst2[0].addr, g_post2);
