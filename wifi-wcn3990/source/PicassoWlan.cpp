@@ -5224,10 +5224,16 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 					    owner, (s2 >> 16) & 3u, s2 & 0xffu);
 				} else if (free_slot >= 0 &&
 				    (owner < 0 || free_slot < owner)) {
+					/* Order matters: the USB console driver
+					 * writes S2CR first and SMR second, and its
+					 * readback passes.  Writing SMR first (what
+					 * every earlier build did) left both
+					 * registers reading back as 0 / 00020000,
+					 * i.e. the pair was dropped. */
+					r[(0xc00 >> 2) + free_slot] = WLAN_SMMU_S2CR_BYPASS;
+					__asm__ volatile ("dsb sy" ::: "memory");
 					r[(0x800 >> 2) + free_slot] =
 					    WLAN_SMMU_SMR_VALID | (WLAN_SMMU_SID << 16);
-					__asm__ volatile ("dsb sy" ::: "memory");
-					r[(0xc00 >> 2) + free_slot] = WLAN_SMMU_S2CR_BYPASS;
 					__asm__ volatile ("dsb sy" ::: "memory");
 					LOG("wlan smmu: SID 20 -> SMR[%d]=%08x S2CR[%d]=%08x (want %08x/%08x, previous owner %d)",
 					    free_slot, r[(0x800 >> 2) + free_slot], free_slot,
@@ -5423,10 +5429,11 @@ picasso_wlan_smmu_early(void)
 		return;
 	}
 
+	/* S2CR before SMR: see the comment at the modem-time claim. */
+	r[(0xc00 >> 2) + free_slot] = WLAN_SMMU_S2CR_BYPASS;
+	__asm__ volatile ("dsb sy" ::: "memory");
 	r[(0x800 >> 2) + free_slot] = WLAN_SMMU_SMR_VALID |
 	    (WLAN_SMMU_SID << 16);
-	__asm__ volatile ("dsb sy" ::: "memory");
-	r[(0xc00 >> 2) + free_slot] = WLAN_SMMU_S2CR_BYPASS;
 	__asm__ volatile ("dsb sy" ::: "memory");
 
 	LOG("wlan smmu early: SMR[%d]=%08x S2CR[%d]=%08x (bypass)",
