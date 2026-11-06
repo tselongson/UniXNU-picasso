@@ -1280,19 +1280,19 @@ index 0000000000000000000000000000000000000000..b0cb022b7bf788160665d262e9105498
 ++		return false;
 ++	}
 ++
-++	picasso_usb_smmu_write(smmu, 0xc00u + 4u * plan->slot, plan->bank | (1u << 16));
-++	if (usb_rd(smmu, 0xc00u + 4u * plan->slot) != (plan->bank | (1u << 16))) {
+++	picasso_usb_smmu_write(smmu, 0xc00u + 4u * plan->slot, plan->bank);
+++	if (usb_rd(smmu, 0xc00u + 4u * plan->slot) != plan->bank) {
 ++		printf("PICASSO USB: SMMU bind S2CR readback FAIL\n");
 ++		return false;
 ++	}
 ++	picasso_usb_smmu_write(smmu, 0x800u + 4u * plan->slot,
-++	    0x80000000u | (USB_STREAM_ID << 16));
+++	    0x80000000u | USB_STREAM_ID);
 ++	uint32_t smr = usb_rd(smmu, 0x800u + 4u * plan->slot);
 ++	uint32_t s2cr = usb_rd(smmu, 0xc00u + 4u * plan->slot);
 ++	printf("PICASSO USB: SMMU bind route slot=%u smr=%08x s2cr=%08x bank=%u cbar=%08x cba2r=%08x sctlr=%08x\n",
 ++	    plan->slot, smr, s2cr, plan->bank, plan->cbar, plan->cba2r,
 ++	    plan->sctlr);
-++	if (smr != (0x80000000u | (USB_STREAM_ID << 16)) || s2cr != (plan->bank | (1u << 16))) {
+++	if (smr != (0x80000000u | USB_STREAM_ID) || s2cr != plan->bank) {
 ++		printf("PICASSO USB: SMMU bind route readback FAIL\n");
 ++		return false;
 ++	}
@@ -1335,8 +1335,8 @@ index 0000000000000000000000000000000000000000..b0cb022b7bf788160665d262e9105498
 ++		if (!(smr & (1u << 31))) {
 ++			continue;
 ++		}
-++		uint32_t mask = smr & 0xffffu;
-++		if ((((smr >> 16) & 0x7fffu) ^ USB_STREAM_ID) & ~mask & 0x7fffu) {
+++		uint32_t mask = (smr >> 16) & 0x7fffu;
+++		if (((smr ^ USB_STREAM_ID) & 0xffffu & ~mask) != 0) {
 ++			continue;
 ++		}
 ++		matches++;
