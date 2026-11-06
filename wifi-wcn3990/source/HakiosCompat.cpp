@@ -368,12 +368,27 @@ picasso_usb_reboot_fastboot(void)
 /* hakios.net.c initialises the virtio link it knows; this tree has its own. */
 extern "C" void hakios_net_init(void);
 extern "C" void picasso_modem_init(void);
+extern "C" int picasso_wlan_smmu_claim(void);
 
 static void
 picasso_wlan_boot_thread(void *arg, wait_result_t wr)
 {
 	(void)arg;
 	(void)wr;
+	uint32_t tries;
+
+	/* Claim stream 0x20 while the Apps SMMU still accepts stream-match
+	 * writes.  The window opens when the console driver brings the SMMU up
+	 * a few hundred milliseconds into boot and is closed again long before
+	 * the modem comes up, so retry instead of guessing a time. */
+	for (tries = 0; tries < 240; tries++) {
+		if (picasso_wlan_smmu_claim() == 0) break;
+		IOSleep(50);
+	}
+	if (tries == 240) {
+		printf("PICASSO_WLAN: wlan smmu: SID 20 never accepted a claim\n");
+	}
+
 	/* Leave bsd_init alone: ifnet_allocate_extended needs the network stack
 	 * settled, and a blocking WCN3990 bring-up here would keep the CDC console
 	 * from ever starting. Five seconds is past the root publication.

@@ -174,6 +174,74 @@ wlan_smmu_smr_matches(uint32_t smr, uint32_t sid)
 	return ((entry_sid ^ sid) & ~mask & 0x7fffu) == 0;
 }
 
+/*
+ * Claim stream 0x20 for the WLAN copy engines.
+ *
+ * This SMMU accepts stream-match writes only during a short window.  v356
+ * measured both ends on one image: the console driver's own bind (which also
+ * brings the SMMU up) writes SMR[7]=800000e0 and reads it back, while the very
+ * same two stores issued from the modem thread later - and from a build with
+ * wlan_delay_ms=8000 just as well - read back as 0 / 0000003d, i.e. the S2CR
+ * landed and the SMR did not.  So the claim has to be retried from a thread
+ * that runs while the SMMU is alive, not issued once at a guessed time.
+ *
+ * Returns 0 once the table holds an exact entry for the WLAN stream.
+ */
+extern "C" int
+picasso_wlan_smmu_claim(void)
+{
+	vm_offset_t smmu = ml_io_map(WLAN_SMMU_PA, 0xd0000);
+	volatile uint32_t *r;
+	uint32_t count, i;
+	int exact = -1, first = -1, free_slot = -1;
+
+	if (smmu == 0) return -1;
+	r = (volatile uint32_t *)smmu;
+
+	/* Until the console driver has brought the SMMU up the whole page reads
+	 * back as zero. */
+	if (r[0x800 >> 2] == 0 && r[0xc00 >> 2] == 0) return -1;
+
+	count = r[0x20 >> 2] & 0xffu;
+	if (count == 0 || count > 128) count = 128;
+	for (i = 0; i < count; i++) {
+		uint32_t smr = r[(0x800 >> 2) + i];
+		uint32_t s2;
+
+		if (!(smr & WLAN_SMMU_SMR_VALID)) {
+			if (free_slot < 0) free_slot = (int)i;
+			continue;
+		}
+		if (!wlan_smmu_smr_matches(smr, WLAN_SMMU_SID)) continue;
+		if (first < 0) first = (int)i;
+		s2 = r[(0xc00 >> 2) + i];
+		if ((smr & 0x7fffu) == WLAN_SMMU_SID &&
+		    ((smr >> WLAN_SMMU_SMR_MASK_SHIFT) & 0x7fffu) == 0 &&
+		    ((s2 >> 16) & 3u) == 0) {
+			exact = (int)i;
+		}
+	}
+	if (exact >= 0) return 0;
+	if (free_slot < 0 || (first >= 0 && first < free_slot)) return -1;
+
+	/* S2CR first: the console driver writes the pair in this order and its
+	 * readback passes, while every build that wrote SMR first got both
+	 * registers back as 0 / 00020000.  The S2CR value is a translation
+	 * entry aimed at a bank with SCTLR.M=0, which passes addresses
+	 * through - TYPE=1 (bypass) is coerced to TYPE=2 (fault) here. */
+	r[(0xc00 >> 2) + free_slot] = WLAN_SMMU_PASSTHRU_BANK;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	r[(0x800 >> 2) + free_slot] = WLAN_SMMU_SMR_VALID | WLAN_SMMU_SID;
+	__asm__ volatile ("dsb sy" ::: "memory");
+
+	if ((r[(0x800 >> 2) + free_slot] & 0x7fffu) != WLAN_SMMU_SID) return -1;
+
+	LOG("wlan smmu: SID 20 claimed SMR[%d]=%08x S2CR=%08x",
+	    free_slot, r[(0x800 >> 2) + free_slot],
+	    r[(0xc00 >> 2) + free_slot]);
+	return 0;
+}
+
 /* qcom,smp2p-mpss: qcom,smem = <0x1b3 0x1ac> -> in 435, out 428 */
 #define ITEM_SMP2P_OUT      428
 #define ITEM_SMP2P_IN       435

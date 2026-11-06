@@ -114,6 +114,12 @@ hif_put32(uint8_t *p, uint32_t v)
 #define CE_DST_WR_INDEX          0x40   /* WCN3990_DST_WR_IDX_OFFSET */
 #define CE_CURRENT_SRRI          0x44
 #define CE_CURRENT_DRRI          0x48
+/* hw.c: wcn3990_wm_dst_ring - high watermark in [15:0], low in [31:16].
+ * ce.c: ath10k_ce_init_dest_ring() sets low 0 and high nentries; both reset
+ * to 0, so without this the ring claims zero usable buffers. */
+#define CE_DST_WM                0x50
+#define CE_DST_WM_HIGH_MASK      0x0000ffffu
+#define CE_DST_WM_LOW_MASK       0xffff0000u
 /* hw.c: wcn3990_ce_regs.ce_rri_low/high live in the CE wrapper at 0x24C000,
  * not inside a per-CE window.  ce.c: ath10k_ce_alloc_rri() stores the DDR
  * address of the read-index array there and then sets bit 19 in every CE's
@@ -832,10 +838,17 @@ hif_handle_rx(const uint8_t *buf, uint32_t nbytes)
 	eid = buf[0];
 	flags = buf[1];
 	htc_len = hif_le16(buf + 2);
-	trailer_len = buf[4];
 	if (htc_len > nbytes - HTC_HDR_BYTES) htc_len = (uint16_t)(nbytes - HTC_HDR_BYTES);
+	/* htc.c: ath10k_htc_rx_completion_handler() takes the trailer length
+	 * from the *last payload byte* and then drops exactly that one byte
+	 * from the payload - it is not htc_hdr.seq_no as an earlier version of
+	 * this driver assumed. */
+	trailer_len = 0;
 	payload_len = htc_len;
-	if ((flags & 0x02) && trailer_len <= payload_len) payload_len -= trailer_len;
+	if ((flags & 0x02) && htc_len > 0) {
+		trailer_len = buf[HTC_HDR_BYTES + htc_len - 1];
+		payload_len = (uint32_t)htc_len - 1;
+	}
 
 	g_rx_packets++;
 	if (g_rx_packets <= 8) {
@@ -992,6 +1005,15 @@ hif_program_bases(void)
 	hi = (hi & ~0x1fu) | ((uint32_t)(g_dst2_pa >> 32) & 0x1fu);
 	hif_reg_write(2, CE_DR_BASE_HI, hi);
 	hif_reg_write(2, CE_DR_SIZE, CE2_ENTRIES);
+	{
+		/* ce.c: low watermark 0, high watermark nentries. */
+		uint32_t wm = hif_reg_read(2, CE_DST_WM);
+		uint32_t nw = (wm & CE_DST_WM_LOW_MASK) |
+		    ((uint32_t)CE2_ENTRIES & CE_DST_WM_HIGH_MASK);
+		hif_reg_write(2, CE_DST_WM, nw);
+		HIF_LOG("CE2 dst watermark %08x -> %08x", wm,
+		    hif_reg_read(2, CE_DST_WM));
+	}
 	hif_reg_write(2, CE_HOST_IE, 0);
 	hif_reg_write(2, CE_MISC_IE, 0);
 
