@@ -238,6 +238,11 @@ picasso_wlan_smmu_claim(void)
 		return -1;
 	}
 
+	/* If the console driver managed to clear sCR0.USFCFG in the one window
+	 * where global registers accept writes, unmatched streams already bypass
+	 * translation and SID 20 needs no table entry at all. */
+	if (r[0] != 0 && ((r[0] >> 10) & 1u) == 0) return 0;
+
 	count = r[0x20 >> 2] & 0xffu;
 	if (count == 0 || count > 128) count = 128;
 	for (i = 0; i < count; i++) {
