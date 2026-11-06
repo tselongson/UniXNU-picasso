@@ -2803,3 +2803,29 @@ void NativeUfs::stop (IOService *provider)
   fMap.reset ();
   IOService::stop (provider);
 }
+
+// ---- wifi-wcn3990 integration: read-only raw block access -------------------
+// Additive only: no existing path calls these. hostRead4k already serialises
+// against the root I/O path under gHost.lock and bounds each request to
+// kDataMax bytes, so the Wi-Fi package can read the modem GPT partition without
+// owning the controller.
+extern "C" uint32_t native_ufs_raw_max_blocks (void)
+{
+  return kDataMax / 4096U;
+}
+
+extern "C" int native_ufs_raw_read (uint32_t lun, uint64_t lba, uint32_t blocks, void *dst)
+{
+  if (lun > 0xffU) return -1;
+  return hostRead4k (static_cast<uint8_t> (lun), lba, blocks, dst) == kIOReturnSuccess ? 0 : -1;
+}
+
+extern "C" void native_ufs_raw_diag (uint32_t *out)
+{
+  if (!out) return;
+  out[0] = gHost.ready ? 1U : 0U;
+  out[1] = gRootDiagnostic.scsi;
+  out[2] = gRootDiagnostic.protocol;
+  out[3] = gRootDiagnostic.ocs;
+  out[4] = gRootDiagnostic.command;
+}
