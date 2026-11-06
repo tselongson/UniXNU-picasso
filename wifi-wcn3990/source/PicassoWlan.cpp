@@ -5216,21 +5216,31 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 						owner = (int)i;
 					}
 				}
-				if (owner >= 0) {
+				if (owner >= 0 &&
+				    r[(0x800 >> 2) + owner] ==
+				    (WLAN_SMMU_SMR_VALID | (WLAN_SMMU_SID << 16))) {
 					uint32_t s2 = r[(0xc00 >> 2) + owner];
-					LOG("wlan smmu: SID 20 already owned by SMR[%d] type=%u cb=%u",
+					LOG("wlan smmu: SID 20 exact entry SMR[%d] type=%u cb=%u",
 					    owner, (s2 >> 16) & 3u, s2 & 0xffu);
-				} else if (free_slot >= 0) {
+				} else if (free_slot >= 0 &&
+				    (owner < 0 || free_slot < owner)) {
 					r[(0x800 >> 2) + free_slot] =
 					    WLAN_SMMU_SMR_VALID | (WLAN_SMMU_SID << 16);
 					__asm__ volatile ("dsb sy" ::: "memory");
 					r[(0xc00 >> 2) + free_slot] = WLAN_SMMU_S2CR_BYPASS;
 					__asm__ volatile ("dsb sy" ::: "memory");
-					LOG("wlan smmu: SID 20 -> SMR[%d]=%08x S2CR[%d]=%08x (want %08x/%08x)",
+					LOG("wlan smmu: SID 20 -> SMR[%d]=%08x S2CR[%d]=%08x (want %08x/%08x, previous owner %d)",
 					    free_slot, r[(0x800 >> 2) + free_slot], free_slot,
 					    r[(0xc00 >> 2) + free_slot],
 					    WLAN_SMMU_SMR_VALID | (WLAN_SMMU_SID << 16),
-					    WLAN_SMMU_S2CR_BYPASS);
+					    WLAN_SMMU_S2CR_BYPASS, owner);
+				} else if (owner >= 0) {
+					/* A mask entry (the USB console's 800000e0)
+					 * covers 0x20 from a lower index and we have
+					 * nothing free below it: rewriting it would
+					 * move a live master, so leave it alone. */
+					LOG("wlan smmu: SID 20 shadowed by mask SMR[%d], no lower free slot",
+					    owner);
 				} else {
 					LOG("wlan smmu: no free SMR slot for SID 20");
 				}
