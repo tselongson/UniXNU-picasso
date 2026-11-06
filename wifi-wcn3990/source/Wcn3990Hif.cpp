@@ -306,7 +306,7 @@ hif_ce2_repost(uint32_t idx)
 
 	(void)idx;
 	d->addr = (g_rx2_pa + (uint64_t)slot * CE_BUF_BYTES) & CE_DESC_ADDR_MASK;
-	d->nbytes = 0;
+	d->nbytes = CE_BUF_BYTES;   /* the target fills it up to nbytes_max */
 	d->flags = 0;
 	d->toeplitz = 0;
 	hif_mb();
@@ -878,6 +878,22 @@ hif_handle_rx(const uint8_t *buf, uint32_t nbytes)
 static void hif_program_bases(void);
 static void hif_post_buffers(void);
 
+/* Clean+invalidate by VA: the RX direction needs the CPU's stale lines gone
+ * before a read (the target updates descriptors, buffers and the DDR RRI
+ * behind our back), and a plain flush would either hide the new data behind
+ * a still-valid line or, on a dirty line, push the CPU's stale bytes right
+ * over what the target just wrote. */
+static void
+hif_inv_dcache_va(vm_offset_t va, uint32_t len)
+{
+	vm_offset_t line, end = va + len;
+
+	for (line = va & ~63ull; line < end; line += 64) {
+		__asm__ volatile ("dc civac, %0" : : "r" (line));
+	}
+	__asm__ volatile ("dsb ish" ::: "memory");
+}
+
 extern "C" void
 wcn3990_hif_poll(void)
 {
@@ -908,32 +924,29 @@ wcn3990_hif_poll(void)
 	if (g_stage < 3) return;
 	if (g_scan_active) g_scan_polls++;
 
-	/* The CE updates nbytes behind the CPU's back.  A cache line that still
-	 * holds the zero from the initial memset will keep reporting "empty"
-	 * forever, so invalidate the destination ring before sampling it.  One
-	 * kilobyte per poll is cheap next to losing every receive. */
-	flush_dcache64((addr64_t)g_dst2_pa, (unsigned)sizeof(s_dst2), TRUE);
+	/* wcn3990 publishes the per-CE read indices in DDR: the target bumps
+	 * s_rri[2] every time it consumes one of our descriptors.  Invalidate
+	 * before reading - a stale zero line hides completed descriptors
+	 * forever, and a clean would overwrite the target's value. */
+	hif_inv_dcache_va((vm_offset_t)&s_rri[2], sizeof(s_rri[2]));
+	{
+		uint32_t drri = s_rri[2] & (CE2_ENTRIES - 1);
 
-	while (budget-- > 0) {
-		struct wcn_ce_desc_64 *d = &s_dst2[g_sw2];
-		uint32_t nbytes;
-		uint32_t idx = g_sw2;
+		while (budget-- > 0 && drri != g_sw2) {
+			struct wcn_ce_desc_64 *d = &s_dst2[g_sw2];
+			uint32_t idx = g_sw2, nbytes;
 
-		/* Only touch the cache on a completed descriptor; doing it on
-		 * every idle poll is what the earlier build did 1000x/s. */
-		nbytes = d->nbytes;
-		if (nbytes == 0) break;
-		if (nbytes > CE_BUF_BYTES) nbytes = CE_BUF_BYTES;
+			/* The target wrote the received length into nbytes. */
+			hif_inv_dcache_va((vm_offset_t)d, sizeof(*d));
+			nbytes = d->nbytes;
+			if (nbytes == 0 || nbytes > CE_BUF_BYTES) nbytes = CE_BUF_BYTES;
 
-		flush_dcache64((addr64_t)kvtophys((vm_offset_t)d), 64, TRUE);
-		flush_dcache64((addr64_t)(g_rx2_pa + (uint64_t)idx * CE_BUF_BYTES),
-		    (nbytes + 63u) & ~63u, TRUE);
-		hif_handle_rx(s_rx2[idx], nbytes);
+			hif_inv_dcache_va((vm_offset_t)&s_rx2[idx][0], CE_BUF_BYTES);
+			hif_handle_rx(s_rx2[idx], nbytes);
 
-		d->nbytes = 0;
-		hif_mb();
-		g_sw2 = (g_sw2 + 1) & (CE2_ENTRIES - 1);
-		hif_ce2_repost(idx);
+			hif_ce2_repost(idx);
+			g_sw2 = (g_sw2 + 1) & (CE2_ENTRIES - 1);
+		}
 	}
 
 	if (g_state == HIF_CE_UP && (g_polls % 2000) == 0) {
@@ -1223,6 +1236,11 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	}
 	hif_mb();
 	flush_dcache64((addr64_t)g_dst2_pa, (unsigned int)sizeof(s_dst2), TRUE);
+	/* The receive buffers were zeroed through the cache: clean them once so
+	 * no dirty line can write the zeros back over the target's DMA while
+	 * the buffers are in flight. */
+	flush_dcache64((addr64_t)kvtophys((vm_offset_t)s_rx2),
+	    (unsigned int)sizeof(s_rx2), TRUE);
 
 	g_sw2 = 0;
 	g_post2 = 0;
