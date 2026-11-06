@@ -1084,9 +1084,21 @@ hif_post_buffers(void)
 	HIF_LOG("stage 3: doorbell no-op write ok (reads %u)",
 	    hif_reg_read(2, CE_DST_WR_INDEX));
 	IOSleep(30);
-	hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
-	HIF_LOG("stage 3: posted %u receive buffers (desc.addr=%llx wr=%u)",
-	    n, (unsigned long long)s_dst2[0].addr, g_post2);
+	/* wcn3990-hif-noopdoor=1 skips the real doorbell: if the machine then
+	 * lives through the heartbeat the reset is caused by the fetch itself
+	 * (or what follows it), not by any of the surrounding setup. */
+	{
+		uint32_t noop = 0;
+
+		PE_parse_boot_argn("wcn3990-hif-noopdoor", &noop, sizeof(noop));
+		if (noop) {
+			HIF_LOG("stage 3: noopdoor - skipping the real doorbell");
+		} else {
+			hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
+			HIF_LOG("stage 3: posted %u receive buffers (desc.addr=%llx wr=%u)",
+			    n, (unsigned long long)s_dst2[0].addr, g_post2);
+		}
+	}
 
 	/* Watch what the doorbell kicked off, read-only, starting with NO sleep:
 	 * the machine has been dying within tens of milliseconds of the real

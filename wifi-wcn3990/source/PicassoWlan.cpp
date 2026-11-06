@@ -202,7 +202,7 @@ picasso_wlan_smmu_fault_read(uint32_t * out)
 	uint32_t id1, page_shift, num_page;
 
 	if (smmu == NULL) {
-		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x40000);
+		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x100000u);
 
 		if (va == 0) {
 			va = ml_io_map(WLAN_SMMU_PA, 0x1000);
@@ -216,7 +216,7 @@ picasso_wlan_smmu_fault_read(uint32_t * out)
 		page_shift = (id1 & (1u << 31)) ? 16u : 12u;
 		num_page = 1u << (((id1 >> 28) & 0x7u) + 1u);
 		/* (NumPage + 61) << PageShift + CB_FSR(0x58), inside the map? */
-		if (page_shift == 12u && ((num_page + 62u) << 12u) <= 0x40000u)
+		if (page_shift == 12u && ((num_page + 62u) << 12u) <= 0x100000u)
 			cb61_off = ((num_page + 61u) << 12u) + 0x58u;
 	}
 	out[0] = smmu[0x048 >> 2];      /* sGFSR */
