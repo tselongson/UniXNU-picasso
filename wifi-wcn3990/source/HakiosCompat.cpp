@@ -381,11 +381,11 @@ picasso_wlan_boot_thread(void *arg, wait_result_t wr)
 	 * writes.  The window opens when the console driver brings the SMMU up
 	 * a few hundred milliseconds into boot and is closed again long before
 	 * the modem comes up, so retry instead of guessing a time. */
-	for (tries = 0; tries < 240; tries++) {
+	for (tries = 0; tries < 1200; tries++) {
 		if (picasso_wlan_smmu_claim() == 0) break;
-		IOSleep(50);
+		IOSleep(10);
 	}
-	if (tries == 240) {
+	if (tries == 1200) {
 		printf("PICASSO_WLAN: wlan smmu: SID 20 never accepted a claim\n");
 	}
 

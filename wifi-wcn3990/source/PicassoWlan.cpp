@@ -190,13 +190,21 @@ wlan_smmu_smr_matches(uint32_t smr, uint32_t sid)
 extern "C" int
 picasso_wlan_smmu_claim(void)
 {
-	vm_offset_t smmu = ml_io_map(WLAN_SMMU_PA, 0xd0000);
+	/* Map once and reuse: ml_io_map() panics when kmem_alloc cannot find
+	 * the VA range, and the console driver's 0xd0000-byte mapping is not
+	 * available to us at this point (v357 died in kmem_alloc there).  The
+	 * stream-match and S2CR arrays both live in the first 4 KiB. */
+	static volatile uint32_t *smmu;
 	volatile uint32_t *r;
 	uint32_t count, i;
 	int exact = -1, first = -1, free_slot = -1;
 
-	if (smmu == 0) return -1;
-	r = (volatile uint32_t *)smmu;
+	if (smmu == NULL) {
+		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x1000);
+		if (va == 0) return -1;
+		smmu = (volatile uint32_t *)va;
+	}
+	r = smmu;
 
 	/* Until the console driver has brought the SMMU up the whole page reads
 	 * back as zero. */
@@ -234,12 +242,35 @@ picasso_wlan_smmu_claim(void)
 	r[(0x800 >> 2) + free_slot] = WLAN_SMMU_SMR_VALID | WLAN_SMMU_SID;
 	__asm__ volatile ("dsb sy" ::: "memory");
 
-	if ((r[(0x800 >> 2) + free_slot] & 0x7fffu) != WLAN_SMMU_SID) return -1;
+	if ((r[(0x800 >> 2) + free_slot] & 0x7fffu) == WLAN_SMMU_SID) {
+		LOG("wlan smmu: SID 20 claimed SMR[%d]=%08x S2CR=%08x",
+		    free_slot, r[(0x800 >> 2) + free_slot],
+		    r[(0xc00 >> 2) + free_slot]);
+		return 0;
+	}
 
-	LOG("wlan smmu: SID 20 claimed SMR[%d]=%08x S2CR=%08x",
-	    free_slot, r[(0x800 >> 2) + free_slot],
-	    r[(0xc00 >> 2) + free_slot]);
-	return 0;
+	/* The SMR store was refused.  If this window also accepts sCR0, the
+	 * other way to let the CE reach memory is to stop denying unmatched
+	 * streams (arm-smmu calls the bit disable_bypass).  Opt-in: it applies
+	 * to every master without a stream entry. */
+	{
+		uint32_t allow = 0;
+
+		(void)PE_parse_boot_argn("wlan_smmu_unmatched_bypass", &allow,
+		    sizeof(allow));
+		if (allow) {
+			uint32_t scr0 = r[0];
+
+			r[0] = scr0 & ~(1u << 10);
+			__asm__ volatile ("dsb sy" ::: "memory");
+			if (((r[0] >> 10) & 1u) == 0) {
+				LOG("wlan smmu: USFCFG cleared (%08x -> %08x), unmatched streams bypass",
+				    scr0, r[0]);
+				return 0;
+			}
+		}
+	}
+	return -1;
 }
 
 /* qcom,smp2p-mpss: qcom,smem = <0x1b3 0x1ac> -> in 435, out 428 */
