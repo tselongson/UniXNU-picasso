@@ -204,6 +204,7 @@ static bool g_bases_programmed;
 static uint32_t g_post_count = CE2_ENTRIES - 1;
 static uint32_t g_wr0, g_wr3;         /* source ring write index */
 static uint32_t g_sw2, g_post2;       /* dest ring software / posted index */
+static volatile bool g_watch_done;    /* the post-doorbell watch has ended */
 static uint64_t g_rx2_pa, g_dst2_pa, g_src0_pa, g_src3_pa;
 
 static inline volatile uint32_t *
@@ -924,6 +925,13 @@ wcn3990_hif_poll(void)
 	if (g_stage < 3) return;
 	if (g_scan_active) g_scan_polls++;
 
+	/* The first seconds after the doorbell are delicate: 425/426/427 died
+	 * in that window with the poller sniffing, 428 - which stayed out of
+	 * the target's way - lived through it and received.  Do not touch the
+	 * rings until the posting thread has finished its watch. */
+	if (!g_watch_done) return;
+	if (g_scan_active) g_scan_polls++;
+
 	/* wcn3990 publishes the per-CE read indices in DDR: the target bumps
 	 * s_rri[2] every time it consumes one of our descriptors.  Invalidate
 	 * before reading - a stale zero line hides completed descriptors
@@ -1142,6 +1150,7 @@ hif_post_buffers(void)
 			    (picasso_wlan_smmu_fault_read(f), f[0]));
 		}
 	}
+	g_watch_done = true;
 }
 
 extern "C" void
@@ -1245,6 +1254,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	g_sw2 = 0;
 	g_post2 = 0;
 	g_wr0 = g_wr3 = 0;
+	g_watch_done = false;
 	g_polls = 0;
 	g_rx_packets = 0;
 	g_beacons = 0;
