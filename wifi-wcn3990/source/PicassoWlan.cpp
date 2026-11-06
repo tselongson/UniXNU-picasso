@@ -5282,6 +5282,26 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 				} else {
 					LOG("wlan smmu: no free SMR slot for SID 20");
 				}
+				/* sCR0.USFCFG=1 means *deny* unmatched streams (arm-smmu
+				 * names the flag disable_bypass).  It is set on this
+				 * device, so a stream with no SMR entry is faulted -
+				 * which is the other way the CE's first DMA can die.
+				 * Clearing it makes unmatched streams bypass instead;
+				 * that is a global change, so it is opt-in. */
+				{
+					uint32_t allow = 0;
+
+					(void)PE_parse_boot_argn("wlan_smmu_unmatched_bypass",
+					    &allow, sizeof(allow));
+					if (allow) {
+						uint32_t scr0 = r[0];
+						r[0] = scr0 & ~(1u << 10);
+						__asm__ volatile ("dsb sy" ::: "memory");
+						LOG("wlan smmu: USFCFG %u -> %u (scr0 %08x -> %08x)",
+						    (scr0 >> 10) & 1u, (r[0] >> 10) & 1u,
+						    scr0, r[0]);
+					}
+				}
 			} else {
 				LOG("wlan smmu: cannot map 0x15000000");
 			}
