@@ -64,12 +64,13 @@ if [ ! -f "$PATCH_STAMP" ] || [ "$(cat "$PATCH_STAMP")" != "$PATCH_FINGERPRINT" 
 fi
 export XNU_AVAILABILITY_PL=$ROOT/.cache/fakeroot/usr/local/libexec/availability.pl
 python3 scripts/prepare-xnu-source.py
-# wifi-wcn3990: one init hook. The stack delays itself 5 s so bsd_init and the
+# wifi-wcn3990: two init hooks.  The stack delays itself 5 s so bsd_init and the
 # CDC console are up before en0 attaches and the modem boots.
 python3 - <<'PY_WLAN_INIT'
 from pathlib import Path
 p = Path('.cache/xnu-work/bsd/kern/bsd_init.c')
 s = p.read_text()
+changed = False
 old = '\tprintf(copyright);\n'
 add = ('\t{\n'
        '\t\textern void picasso_wlan_deferred_start(void);\n'
@@ -77,8 +78,25 @@ add = ('\t{\n'
        '\t}\n')
 if 'picasso_wlan_deferred_start' not in s and old in s:
     s = s.replace(old, old + add, 1)
-    p.write_text(s)
+    changed = True
     print('picasso-wlan: init hook inserted into bsd_init.c')
+
+# The Apps SMMU accepts stream-match writes only for the first few hundred
+# milliseconds of boot: the CDC driver's own SMMU bind is the last store known
+# to stick, and the same store issued from a kernel thread - even one that
+# starts before it - reads back as zero.  Claim the WLAN stream (0x20) right
+# after the console driver's bind returns, while the window is still open.
+old2 = '\t\tpicasso_usb_console_start();\n'
+add2 = ('\t\t{\n'
+        '\t\t\textern int picasso_wlan_smmu_claim(void);\n'
+        '\t\t\t(void)picasso_wlan_smmu_claim();\n'
+        '\t\t}\n')
+if 'picasso_wlan_smmu_claim' not in s and old2 in s:
+    s = s.replace(old2, old2 + add2, 1)
+    changed = True
+    print('picasso-wlan: SMMU claim hooked after the CDC bind')
+if changed:
+    p.write_text(s)
 PY_WLAN_INIT
 # The first pass of a new tree (XNU_BOOTSTRAP=1, set by the unixnu driver) only has to leave the compile records and
 # link.filelist for the archive builders that run after it, so it links without their archives.
