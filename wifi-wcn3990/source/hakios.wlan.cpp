@@ -74,7 +74,7 @@ say_class_presence(void)
 	unsigned i;
 
 	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-		OSSymbol * symbol = OSSymbol::withCString(names[i]);
+		const OSSymbol * symbol = OSSymbol::withCString(names[i]);
 		const OSMetaClass * meta = symbol != NULL ?
 		    OSMetaClass::getMetaClassWithName(symbol) : NULL;
 
