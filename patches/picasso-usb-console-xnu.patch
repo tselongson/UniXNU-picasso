@@ -15,7 +15,7 @@ new file mode 100644
 index 0000000..2237fb2
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3145 @@
+@@ -0,0 +1,3122 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -863,59 +863,6 @@ index 0000000..2237fb2
 +	return false;
 +}
 +
-+/*
-+ * Claim the WLAN copy-engine stream (0x20) from inside the only sequence on
-+ * this SMMU that is known to be able to write an SMR: the console driver's
-+ * own bind.  The planner above deliberately skips the first free slot, and
-+ * every attempt the wlan kext made at that slot from a kernel thread read
-+ * back zero while S2CR landed.  Probe all the other free slots here, on the
-+ * same CPU and with the same mapping, and keep the first one that sticks.
-+ * The bank is the disabled-bypass bank the console uses, so CE DMA reaches
-+ * DDR without translation.
-+ */
-+static void
-+picasso_usb_smmu_claim_wlan(vm_offset_t smmu, unsigned skip, unsigned bank)
-+{
-+	unsigned slots = usb_rd(smmu, 0x020u) & 0xffu;
-+	unsigned claimed = 0;
-+	uint32_t want = 0x80000000u | 0x0020u;
-+
-+	if (slots == 0 || slots > 128) slots = 128;
-+	printf("PICASSO USB: wlan claim scr0=%08x gfsr=%08x slots=%u bank=%u\n",
-+	    usb_rd(smmu, 0x000), usb_rd(smmu, 0x048), slots, bank);
-+	for (unsigned i = 0; i < slots && i < 24; i++) {
-+		uint32_t smr, s2cr;
-+
-+		if (i == skip) continue;
-+		smr = usb_rd(smmu, 0x800u + 4u * i);
-+		if (smr & (1u << 31)) continue;
-+		picasso_usb_smmu_write(smmu, 0xc00u + 4u * i, bank);
-+		picasso_usb_smmu_write(smmu, 0x800u + 4u * i, want);
-+		s2cr = usb_rd(smmu, 0xc00u + 4u * i);
-+		smr = usb_rd(smmu, 0x800u + 4u * i);
-+		printf("PICASSO USB: wlan claim slot=%u smr=%08x s2cr=%08x\n",
-+		    i, smr, s2cr);
-+		if (smr == want) {
-+			claimed = 1;
-+			break;
-+		}
-+	}
-+	printf("PICASSO USB: wlan claim %s gfsr=%08x\n",
-+	    claimed ? "OK" : "REFUSED", usb_rd(smmu, 0x048));
-+	if (!claimed) {
-+		/* No stream-match register accepted a non-secure store.  The
-+		 * other way out is sCR0.USFCFG: with the bit clear the SMMU
-+		 * bypasses unmatched streams instead of faulting them, so the
-+		 * CE needs no table entry at all.  Try it in this same window,
-+		 * where the console's own global-register store just worked. */
-+		uint32_t scr0 = usb_rd(smmu, 0x000);
-+
-+		picasso_usb_smmu_write(smmu, 0x000, scr0 & ~0x400u);
-+		printf("PICASSO USB: wlan claim USFCFG %08x -> %08x\n",
-+		    scr0, usb_rd(smmu, 0x000));
-+	}
-+}
-+
 +static bool
 +picasso_usb_smmu_apply_bind(vm_offset_t smmu,
 +    const struct picasso_usb_smmu_bind *plan)
@@ -942,18 +889,46 @@ index 0000000..2237fb2
 +		printf("PICASSO USB: SMMU bind S2CR readback FAIL\n");
 +		return false;
 +	}
-+	picasso_usb_smmu_write(smmu, 0x800u + 4u * plan->slot,
-+	    0x80000000u | USB_STREAM_ID);
-+	uint32_t smr = usb_rd(smmu, 0x800u + 4u * plan->slot);
-+	uint32_t s2cr = usb_rd(smmu, 0xc00u + 4u * plan->slot);
++	/* v361 wrote a second stream-match entry into every free slot 0..23 from
++	 * inside this function: all of them read back zero, while this one store
++	 * sticks.  So give the WLAN CE stream (0x20) a share of it instead.
++	 * MASK=0xc0 ignores the two bits in which 0xe0 and 0x20 differ, so both
++	 * streams select this slot and its disabled-bypass context bank.  Keep
++	 * the exact console entry if the masked value is refused. */
++	uint32_t exact = 0x80000000u | USB_STREAM_ID;
++	uint32_t shared = exact | (0x00c0u << 16);
++	uint32_t smr, s2cr;
++
++	picasso_usb_smmu_write(smmu, 0x800u + 4u * plan->slot, exact);
++	uint32_t smr_exact = usb_rd(smmu, 0x800u + 4u * plan->slot);
++	picasso_usb_smmu_write(smmu, 0x800u + 4u * plan->slot, shared);
++	smr = usb_rd(smmu, 0x800u + 4u * plan->slot);
++	printf("PICASSO USB: SMMU bind shared exact=%08x->%08x want=%08x got=%08x\n",
++	    exact, smr_exact, shared, smr);
++	if (smr != shared) {
++		/* Was it the masked value, or any second write at all?  Try the
++		 * WLAN SID alone in the same slot, then restore the console. */
++		uint32_t wlan = 0x80000000u | 0x0020u;
++
++		picasso_usb_smmu_write(smmu, 0x800u + 4u * plan->slot, wlan);
++		printf("PICASSO USB: SMMU bind wlan-only probe %08x -> %08x\n",
++		    wlan, usb_rd(smmu, 0x800u + 4u * plan->slot));
++		picasso_usb_smmu_write(smmu, 0x800u + 4u * plan->slot, exact);
++		smr = usb_rd(smmu, 0x800u + 4u * plan->slot);
++		printf("PICASSO USB: SMMU bind console entry restored -> %08x\n",
++		    smr);
++	} else {
++		printf("PICASSO USB: SMMU bind shared OK: SID 20 and e0 share slot %u\n",
++		    plan->slot);
++	}
++	s2cr = usb_rd(smmu, 0xc00u + 4u * plan->slot);
 +	printf("PICASSO USB: SMMU bind route slot=%u smr=%08x s2cr=%08x bank=%u cbar=%08x cba2r=%08x sctlr=%08x\n",
 +	    plan->slot, smr, s2cr, plan->bank, plan->cbar, plan->cba2r,
 +	    plan->sctlr);
-+	if (smr != (0x80000000u | USB_STREAM_ID) || s2cr != plan->bank) {
++	if ((smr != exact && smr != shared) || s2cr != plan->bank) {
 +		printf("PICASSO USB: SMMU bind route readback FAIL\n");
 +		return false;
 +	}
-+	picasso_usb_smmu_claim_wlan(smmu, plan->slot, plan->bank);
 +	return true;
 +}
 +
@@ -1014,8 +989,10 @@ index 0000000..2237fb2
 +		    matches);
 +		return false;
 +	}
-+	if (match_mask != 0) {
-+		printf("PICASSO USB: SID e0 guard FAIL: non-exact mask=%04x\n",
++	/* 0xc0 is the mask the console slot carries when it also routes
++	 * the WLAN CE stream (0x20); 0xe0 still selects exactly one entry. */
++	if (match_mask != 0 && match_mask != 0x00c0u) {
++		printf("PICASSO USB: SID e0 guard FAIL: unexpected mask=%04x\n",
 +		    match_mask);
 +		return false;
 +	}

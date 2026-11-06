@@ -256,9 +256,12 @@ picasso_wlan_smmu_claim(void)
 		if (!wlan_smmu_smr_matches(smr, WLAN_SMMU_SID)) continue;
 		if (first < 0) first = (int)i;
 		s2 = r[(0xc00 >> 2) + i];
-		if ((smr & 0x7fffu) == WLAN_SMMU_SID &&
-		    ((smr >> WLAN_SMMU_SMR_MASK_SHIFT) & 0x7fffu) == 0 &&
-		    ((s2 >> 16) & 3u) == 0) {
+		/* The console slot carries MASK=0xc0 so that 0xe0 and 0x20 share
+		 * one entry.  Accept any matching translation route to the
+		 * disabled-bypass bank; an exact id/mask is not required. */
+		if (wlan_smmu_smr_matches(smr, WLAN_SMMU_SID) &&
+		    ((s2 >> 16) & 3u) == 0 &&
+		    (s2 & 0xffu) == WLAN_SMMU_PASSTHRU_BANK) {
 			exact = (int)i;
 		}
 	}
