@@ -52,8 +52,125 @@
 
 extern "C" uint64_t kvtophys(vm_offset_t va);
 extern "C" void flush_dcache64(addr64_t pa, unsigned int len, boolean_t phys);
+extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 
 #define HIF_LOG(fmt, ...)   printf("WCN3990-HIF: " fmt "\n", ##__VA_ARGS__)
+
+/* ----------------------------------------------------------- IMEM black box */
+
+/* Qualcomm's always-on IMEM survives a warm reset, so it is the only place a
+ * record of the last moments can outlive the very reset it is documenting.
+ * The msm-imem page is 0x146AA000: the DT's pil@0x94c crash record ends at
+ * 0xA14 and nothing claims 0xA20..0xFFF, so the box starts there.  Each
+ * record is 20 bytes (magic, sequence, tag, two args); the sequence is
+ * seeded from the highest one already in IMEM so consecutive boots form one
+ * uninterrupted stream.  wcn3990_hif_init() prints the previous boot's tail
+ * and the reset-reason words before touching the CE, so even a machine that
+ * dies inside stage 3 tells the next boot exactly where it got to. */
+#define WLAN_IMEM_PA      0x146AA000ull
+#define WLAN_COOKIE_PA    0x146AB000ull
+#define WLAN_BB_PA        (WLAN_IMEM_PA + 0xA20)
+#define WLAN_BB_MAGIC     0x574C414Eu              /* "WLAN" */
+#define WLAN_BB_MAX       72u
+#define WLAN_RR_COOKIE    ((WLAN_COOKIE_PA + 0x65C) / 4)  /* XNU panic arm */
+#define WLAN_RR_DT        ((WLAN_IMEM_PA + 0x65C) / 4)    /* msm-imem restart_reason */
+#define WLAN_PIL_OFF      (0x94C / 4)                     /* msm-imem pil@94c */
+#define WLAN_PIL_WORDS    (0xC8 / 4)
+
+/* tags */
+#define BB_INIT_ENTRY     1
+#define BB_BASES_DONE     2
+#define BB_DOOR_NOOP      3
+#define BB_DOOR_REAL      4
+#define BB_WATCH          5
+#define BB_WATCH_DONE     6
+#define BB_RX             7
+#define BB_REPOST         8
+
+static volatile uint32_t *g_bb;       /* first record slot */
+static volatile uint32_t *g_imem;     /* page base: restart reason + pil */
+static volatile uint32_t *g_cookie;   /* shared-IMEM page: panic reason */
+static uint32_t g_bb_seq;
+
+static void
+hif_bb_init(void)
+{
+	g_imem = (volatile uint32_t *)ml_io_map(WLAN_IMEM_PA, 0x1000);
+	g_cookie = (volatile uint32_t *)ml_io_map(WLAN_COOKIE_PA, 0x1000);
+	if (!g_imem) return;
+	g_bb = g_imem + ((WLAN_BB_PA - WLAN_IMEM_PA) / 4);
+	/* Continue the previous boots' sequence; a fresh IMEM starts at 1. */
+	for (uint32_t i = 0; i < WLAN_BB_MAX; i++) {
+		uint32_t s = g_bb[i * 5 + 1];
+
+		if (g_bb[i * 5 + 0] == WLAN_BB_MAGIC && s > g_bb_seq && s < 0xffffff00u)
+			g_bb_seq = s;
+	}
+}
+
+static void
+hif_bb(uint32_t tag, uint32_t a1, uint32_t a2)
+{
+	uint32_t idx;
+
+	if (!g_bb) return;
+	idx = g_bb_seq % WLAN_BB_MAX;
+	g_bb[idx * 5 + 0] = WLAN_BB_MAGIC;
+	g_bb[idx * 5 + 1] = ++g_bb_seq;
+	g_bb[idx * 5 + 2] = tag;
+	g_bb[idx * 5 + 3] = a1;
+	g_bb[idx * 5 + 4] = a2;
+	__asm__ __volatile__("dmb sy" ::: "memory");
+}
+
+/* Print the previous boot's last records, the reset reasons and the PIL
+ * subsystem-crash record.  Called once, at the very top of hif init, before
+ * any CE register is touched. */
+static void
+hif_bb_dump(void)
+{
+	uint32_t hi = g_bb_seq, tail;
+	uint32_t i, k;
+
+	if (!g_bb) {
+		HIF_LOG("blackbox: IMEM map failed");
+		return;
+	}
+	HIF_LOG("blackbox: reset reason cookie=%08x dt=%08x",
+	    g_cookie ? g_cookie[0x65C / 4] : 0xdeadbeef,
+	    g_imem[0x65C / 4]);
+
+	{
+		/* The PIL record holds one entry per subsystem that crashed:
+		 * short name plus reason bytes.  Modem/WLAN assert text starts
+		 * here, if the subsystem ever got to write it. */
+		char pil[0xC9];
+
+		for (i = 0; i < WLAN_PIL_WORDS; i++) {
+			uint32_t w = g_imem[WLAN_PIL_OFF + i];
+
+			pil[i * 4 + 0] = (char)(w);
+			pil[i * 4 + 1] = (char)(w >> 8);
+			pil[i * 4 + 2] = (char)(w >> 16);
+			pil[i * 4 + 3] = (char)(w >> 24);
+		}
+		pil[0xC8] = 0;
+		HIF_LOG("blackbox: pil imem: %s", pil);
+	}
+
+	/* The previous boot's records are the 20 below the highest sequence
+	 * found before this boot started writing. */
+	tail = (hi >= 20) ? hi - 20 : 0;
+	for (k = 0; k < 20 && tail + k < hi; k++) {
+		uint32_t s = tail + k;
+		uint32_t idx = (s - 1) % WLAN_BB_MAX;
+		uint32_t *r = (uint32_t *)(uintptr_t)(g_bb + idx * 5);
+
+		if (r[0] != WLAN_BB_MAGIC) continue;
+		HIF_LOG("blackbox: seq=%u tag=%u a1=%08x a2=%08x",
+		    s, r[2], r[3], r[4]);
+	}
+}
 
 static inline void
 hif_mb(void)
@@ -950,6 +1067,7 @@ wcn3990_hif_poll(void)
 			if (nbytes == 0 || nbytes > CE_BUF_BYTES) nbytes = CE_BUF_BYTES;
 
 			hif_inv_dcache_va((vm_offset_t)&s_rx2[idx][0], CE_BUF_BYTES);
+			if (g_rx_packets < 16) hif_bb(BB_RX, idx, nbytes);
 			hif_handle_rx(s_rx2[idx], nbytes);
 
 			hif_ce2_repost(idx);
@@ -1067,6 +1185,7 @@ hif_program_bases(void)
 		picasso_wlan_smmu_s2cr_set(0xc0, WLAN_SMMU_PASSTHRU_BANK, &rb);
 		HIF_LOG("stage 2.5: S2CR[0xc0]=%08x", rb);
 	}
+	hif_bb(BB_BASES_DONE, 0, 0);
 }
 
 /* Stage 3: hand CE2_ENTRIES-1 buffers to the copy engine. */
@@ -1091,6 +1210,7 @@ hif_post_buffers(void)
 	HIF_LOG("stage 3: doorbell cur=%u target=%u dr_base=%08x desc.addr=%llx",
 	    cur, g_post2, hif_reg_read(2, CE_DR_BASE_LO),
 	    (unsigned long long)s_dst2[0].addr);
+	hif_bb(BB_DOOR_NOOP, cur, g_post2);
 	IOSleep(30);
 	/* Warm the fault-record mapping now: the post-doorbell watch must not
 	 * spend its first microseconds in ml_io_map(). */
@@ -1115,6 +1235,7 @@ hif_post_buffers(void)
 		if (noop) {
 			HIF_LOG("stage 3: noopdoor - skipping the real doorbell");
 		} else {
+			hif_bb(BB_DOOR_REAL, g_post2, n);
 			hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
 			HIF_LOG("stage 3: posted %u receive buffers (desc.addr=%llx wr=%u)",
 			    n, (unsigned long long)s_dst2[0].addr, g_post2);
@@ -1140,6 +1261,7 @@ hif_post_buffers(void)
 			    k, hif_reg_read(2, CE_CURRENT_DRRI),
 			    hif_reg_read(2, CE_DST_WR_INDEX), f[0], f[1], f[2],
 			    f[4], f[5], f[7]);
+			hif_bb(BB_WATCH, k, hif_reg_read(2, CE_CURRENT_DRRI));
 			IOSleep(10);
 		}
 		for (k = 0; k < 24; k++) {
@@ -1148,9 +1270,11 @@ hif_post_buffers(void)
 			    k, hif_reg_read(2, CE_CURRENT_DRRI),
 			    hif_reg_read(2, CE_DST_WR_INDEX),
 			    (picasso_wlan_smmu_fault_read(f), f[0]));
+			hif_bb(BB_WATCH, 100 + k, hif_reg_read(2, CE_CURRENT_DRRI));
 		}
 	}
 	g_watch_done = true;
+	hif_bb(BB_WATCH_DONE, 0, 0);
 }
 
 extern "C" void
@@ -1161,6 +1285,11 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 {
 	uint32_t v = 0;
 	uint32_t i;
+
+	/* Black box first: print whatever the previous boot managed to write
+	 * into IMEM before its reset, then start recording this boot. */
+	hif_bb_init();
+	hif_bb_dump();
 
 	if (!ce_va || g_regs_live) return;
 
@@ -1264,6 +1393,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	g_regs_live = true;
 
 	HIF_LOG("descriptors ready, mode %d stage %d", g_hif_mode, g_stage);
+	hif_bb(BB_INIT_ENTRY, (uint32_t)g_hif_mode, (uint32_t)g_post_count);
 	if (g_hif_mode == 2) hif_program_bases();
 	if (g_hif_mode == 3) {
 		hif_program_bases();

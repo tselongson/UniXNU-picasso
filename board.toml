@@ -252,6 +252,10 @@ kernel_args = [
   "sheng-pmgr=2",
   # WCN3990 package (wifi-wcn3990/): set wifi=0 for a stock boot.
   "wifi=1",
+  # Stage-3 experiment: hand the copy engine exactly one receive buffer and
+  # ring the doorbell.  If the machine still resets the fetch itself is the
+  # trigger; if it lives, the batch of 63 descriptors is.
+  "wcn3990-hif-post=1",
   # NativeUfs defaults already wait 5 s for USB and use timebase/yield waits.
   # Omit these two redundant overrides to stay within the boot-argument budget.
   # Verbose UFS tracing uses its disabled default.
