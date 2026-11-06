@@ -1212,7 +1212,12 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 
 	for (i = 0; i < CE2_ENTRIES; i++) {
 		s_dst2[i].addr = (g_rx2_pa + (uint64_t)i * CE_BUF_BYTES) & CE_DESC_ADDR_MASK;
-		s_dst2[i].nbytes = 0;
+		/* Receive descriptors must carry the buffer size: the target
+		 * rejects (and its firmware asserts on) a zero-length buffer,
+		 * which took the whole modem down right after the doorbell
+		 * (425-427: drri=1 then a silent PSHOLD, independent of the
+		 * SMMU mapping and of any VMID assignment). */
+		s_dst2[i].nbytes = CE_BUF_BYTES;
 		s_dst2[i].flags = 0;
 		s_dst2[i].toeplitz = 0;
 	}
