@@ -196,6 +196,7 @@ picasso_wlan_smmu_claim(void)
 	 * stream-match and S2CR arrays both live in the first 4 KiB. */
 	static volatile uint32_t *smmu;
 	static uint32_t attempts;
+	static bool map_failed;
 	volatile uint32_t *r;
 	uint32_t count, i, smr_val, probe;
 	bool trace;
@@ -203,7 +204,17 @@ picasso_wlan_smmu_claim(void)
 
 	if (smmu == NULL) {
 		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x1000);
-		if (va == 0) return -1;
+		if (va == 0) {
+			/* v360: the bsd_init hook never emitted a line.  It was
+			 * compiled in (the link map shows _bsd_init referencing
+			 * this symbol) so the only silent exit is this one. */
+			if (!map_failed) {
+				map_failed = true;
+				LOG("wlan smmu: ml_io_map(4K) failed (attempt %u)",
+				    attempts + 1);
+			}
+			return -1;
+		}
 		smmu = (volatile uint32_t *)va;
 	}
 	r = smmu;
@@ -248,6 +259,22 @@ picasso_wlan_smmu_claim(void)
 	}
 	if (exact >= 0) return 0;
 	if (free_slot < 0 || (first >= 0 && first < free_slot)) return -1;
+
+	/* The console planner skips the first free slot on purpose - its SMR
+	 * refuses non-secure stores - and writes the next one successfully.
+	 * Mirror that here, with an explicit override for one-boot probes. */
+	{
+		int forced = -1;
+
+		(void)PE_parse_boot_argn("wlan_smmu_slot", &forced,
+		    sizeof(forced));
+		if (forced >= 0 && forced < (int)count) {
+			free_slot = forced;
+		} else if (free_slot + 1 < (int)count &&
+		    !(r[(0x800 >> 2) + free_slot + 1] & WLAN_SMMU_SMR_VALID)) {
+			free_slot++;
+		}
+	}
 
 	/* S2CR first: the console driver writes the pair in this order and its
 	 * readback passes, while every build that wrote SMR first got both
