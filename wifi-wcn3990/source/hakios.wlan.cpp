@@ -77,12 +77,21 @@ say_class_presence(void)
 		const OSSymbol * symbol = OSSymbol::withCString(names[i]);
 		const OSMetaClass * meta = symbol != NULL ?
 		    OSMetaClass::getMetaClassWithName(symbol) : NULL;
+		OSObject * instance = meta != NULL ?
+		    OSMetaClass::allocClassWithName(names[i]) : NULL;
+		IOService * service = OSDynamicCast(IOService, instance);
 
+		if (instance != NULL && service == NULL) {
+			instance->release();
+		} else if (service != NULL) {
+			service->release();
+		}
 		if (symbol != NULL) {
 			symbol->release();
 		}
-		IOLog("HakiosWLAN: class %s is %s\n", names[i],
-		    meta != NULL ? "loaded" : "absent");
+		IOLog("HakiosWLAN: class %s is %s alloc %s\n", names[i],
+		    meta != NULL ? "loaded" : "absent",
+		    service != NULL ? "ok" : "NULL");
 	}
 }
 

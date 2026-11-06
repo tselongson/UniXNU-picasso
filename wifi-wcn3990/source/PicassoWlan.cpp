@@ -210,6 +210,28 @@ picasso_wlan_smmu_fault_read(uint32_t * out)
 	out[3] = smmu[0x058 >> 2];      /* sGFSYNR2 */
 }
 
+/* Write one S2CR and return the readback: the only register family this SMMU
+ * still accepts (v361-v363).  Used for the SMMUv2 direct-index fallback, where
+ * an unmatched stream takes S2CR[StreamID] when sCR0.USFCFG is clear. */
+extern "C" int
+picasso_wlan_smmu_s2cr_set(uint32_t index, uint32_t value, uint32_t * readback)
+{
+	static volatile uint32_t *smmu;
+
+	if (smmu == NULL) {
+		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x1000);
+
+		if (va == 0) {
+			return -1;
+		}
+		smmu = (volatile uint32_t *)va;
+	}
+	smmu[(0xc00 >> 2) + index] = value;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	*readback = smmu[(0xc00 >> 2) + index];
+	return 0;
+}
+
 extern "C" int
 picasso_wlan_smmu_claim(void)
 {
