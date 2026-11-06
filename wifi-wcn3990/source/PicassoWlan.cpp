@@ -195,8 +195,10 @@ picasso_wlan_smmu_claim(void)
 	 * available to us at this point (v357 died in kmem_alloc there).  The
 	 * stream-match and S2CR arrays both live in the first 4 KiB. */
 	static volatile uint32_t *smmu;
+	static uint32_t attempts;
 	volatile uint32_t *r;
-	uint32_t count, i;
+	uint32_t count, i, smr_val, probe;
+	bool trace;
 	int exact = -1, first = -1, free_slot = -1;
 
 	if (smmu == NULL) {
@@ -205,10 +207,25 @@ picasso_wlan_smmu_claim(void)
 		smmu = (volatile uint32_t *)va;
 	}
 	r = smmu;
+	attempts++;
+
+	/* wlan_smmu_probe_val replaces the value written to the stream-match
+	 * register, which is how the "is it the SID or the store that the
+	 * hardware refuses" question gets answered without another guess. */
+	probe = 0;
+	(void)PE_parse_boot_argn("wlan_smmu_probe_val", &probe, sizeof(probe));
+	smr_val = probe ? probe : (WLAN_SMMU_SMR_VALID | WLAN_SMMU_SID);
+	trace = (attempts <= 6) || ((attempts % 300) == 0);
 
 	/* Until the console driver has brought the SMMU up the whole page reads
 	 * back as zero. */
-	if (r[0x800 >> 2] == 0 && r[0xc00 >> 2] == 0) return -1;
+	if (r[0x800 >> 2] == 0 && r[0xc00 >> 2] == 0) {
+		if (trace) {
+			LOG("wlan smmu: claim #%u: scr0=%08x smr0=%08x s2cr0=%08x (not up)",
+			    attempts, r[0], r[0x800 >> 2], r[0xc00 >> 2]);
+		}
+		return -1;
+	}
 
 	count = r[0x20 >> 2] & 0xffu;
 	if (count == 0 || count > 128) count = 128;
@@ -239,13 +256,19 @@ picasso_wlan_smmu_claim(void)
 	 * through - TYPE=1 (bypass) is coerced to TYPE=2 (fault) here. */
 	r[(0xc00 >> 2) + free_slot] = WLAN_SMMU_PASSTHRU_BANK;
 	__asm__ volatile ("dsb sy" ::: "memory");
-	r[(0x800 >> 2) + free_slot] = WLAN_SMMU_SMR_VALID | WLAN_SMMU_SID;
+	r[(0x800 >> 2) + free_slot] = smr_val;
 	__asm__ volatile ("dsb sy" ::: "memory");
 
-	if ((r[(0x800 >> 2) + free_slot] & 0x7fffu) == WLAN_SMMU_SID) {
-		LOG("wlan smmu: SID 20 claimed SMR[%d]=%08x S2CR=%08x",
-		    free_slot, r[(0x800 >> 2) + free_slot],
+	if (trace) {
+		LOG("wlan smmu: claim #%u: slot %d smr %08x -> %08x, s2cr -> %08x",
+		    attempts, free_slot, smr_val, r[(0x800 >> 2) + free_slot],
 		    r[(0xc00 >> 2) + free_slot]);
+	}
+
+	if ((r[(0x800 >> 2) + free_slot] & 0x7fffu) == (smr_val & 0x7fffu)) {
+		LOG("wlan smmu: SID 20 claimed SMR[%d]=%08x S2CR=%08x (attempt %u)",
+		    free_slot, r[(0x800 >> 2) + free_slot],
+		    r[(0xc00 >> 2) + free_slot], attempts);
 		return 0;
 	}
 
@@ -5318,6 +5341,13 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 				if (count == 0 || count > 128) count = 128;
 				LOG("wlan smmu: scr0=%08x idr0=%08x smr=%u",
 				    r[0], r[0x20 >> 2], count);
+				/* Read-only fault record: sGFSR/sGFSYNR1 name the last
+				 * stream the SMMU refused.  The firmware has been
+				 * running for seconds by now, so this says whether its
+				 * own DMA is reaching memory. */
+				LOG("wlan smmu: gfsr=%08x gfsynr0=%08x gfsynr1=%08x gfsynr2=%08x",
+				    r[0x48 >> 2], r[0x50 >> 2], r[0x54 >> 2],
+				    r[0x58 >> 2]);
 				for (i = 0; i < count; i++) {
 					uint32_t smr = r[(0x800 >> 2) + i];
 					uint32_t s2 = r[(0xc00 >> 2) + i];
