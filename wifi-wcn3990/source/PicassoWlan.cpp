@@ -5181,22 +5181,34 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 				LOG("wlan smmu: cannot map 0x15000000");
 			}
 		} else {
-			/* Read-only.  Reading a context bank past the implemented
-			 * count (CBAR at 0x8000 + n*0x1000) hung the interconnect
-			 * in v341, so only the stream-match half is inspected.
-			 * This dump answers one question: did the entry that
-			 * picasso_wlan_smmu_early() took at bsd_init survive? */
+			/* Claim a stream-match slot for the WLAN copy engines.
+			 *
+			 * v351 proved two things: the SMMU writes issued from the
+			 * first line of bsd_init are silently dropped (the entry
+			 * read back as 0 and the USB driver still saw 6 active
+			 * slots), and stage 2 - programming CE0/2/3 and their
+			 * CTRL1 - survives while stage 3 (handing the first
+			 * receive buffer to the target) still wedges the SoC.
+			 * That is stream 0x20 faulting in CB 61.
+			 *
+			 * By now the SMMU is fully clocked and writable, but the
+			 * USB driver owns slot 6 with SMR=800000e0 (sid 0, mask
+			 * 0xe0) - a mask entry that also covers 0x20 and cannot be
+			 * rewritten while the console is streaming.  Its patch
+			 * therefore leaves the lowest free slot alone and takes the
+			 * next one, so 0x20 can be claimed here at a lower index.
+			 * Only a free slot is ever written. */
 			vm_offset_t smmu = ml_io_map(WLAN_SMMU_PA, 0x1000);
 			if (smmu != 0) {
 				volatile uint32_t *r = (volatile uint32_t *)smmu;
+				uint32_t count = r[0x20 >> 2] & 0xffu;
 				uint32_t i;
 				int owner = -1, free_slot = -1;
 
-				for (i = 0; i < 8; i++) {
+				if (count == 0 || count > 128) count = 128;
+				for (i = 0; i < count; i++) {
 					uint32_t smr = r[(0x800 >> 2) + i];
-					uint32_t s2 = r[(0xc00 >> 2) + i];
-					LOG("wlan smmu: SMR[%u]=%08x S2CR[%u]=%08x cb=%u type=%u",
-					    i, smr, i, s2, s2 & 0xffu, (s2 >> 16) & 3u);
+
 					if (!(smr & WLAN_SMMU_SMR_VALID)) {
 						if (free_slot < 0) free_slot = (int)i;
 					} else if (owner < 0 &&
@@ -5204,9 +5216,24 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 						owner = (int)i;
 					}
 				}
-				LOG("wlan smmu: stream 0x20 owner=%d type=%u free=%d",
-				    owner, owner >= 0 ?
-				    (r[(0xc00 >> 2) + owner] >> 16) & 3u : 0, free_slot);
+				if (owner >= 0) {
+					uint32_t s2 = r[(0xc00 >> 2) + owner];
+					LOG("wlan smmu: SID 20 already owned by SMR[%d] type=%u cb=%u",
+					    owner, (s2 >> 16) & 3u, s2 & 0xffu);
+				} else if (free_slot >= 0) {
+					r[(0x800 >> 2) + free_slot] =
+					    WLAN_SMMU_SMR_VALID | (WLAN_SMMU_SID << 16);
+					__asm__ volatile ("dsb sy" ::: "memory");
+					r[(0xc00 >> 2) + free_slot] = WLAN_SMMU_S2CR_BYPASS;
+					__asm__ volatile ("dsb sy" ::: "memory");
+					LOG("wlan smmu: SID 20 -> SMR[%d]=%08x S2CR[%d]=%08x (want %08x/%08x)",
+					    free_slot, r[(0x800 >> 2) + free_slot], free_slot,
+					    r[(0xc00 >> 2) + free_slot],
+					    WLAN_SMMU_SMR_VALID | (WLAN_SMMU_SID << 16),
+					    WLAN_SMMU_S2CR_BYPASS);
+				} else {
+					LOG("wlan smmu: no free SMR slot for SID 20");
+				}
 			} else {
 				LOG("wlan smmu: cannot map 0x15000000");
 			}
@@ -5325,16 +5352,18 @@ done:
 extern "C" void
 picasso_wlan_smmu_early(void)
 {
-	uint32_t on = 1;
+	uint32_t on = 0;
 	uint32_t idr0, count, i;
 	int free_slot = -1, match = -1;
 	vm_offset_t smmu;
 	volatile uint32_t *r;
 
-	if (PE_parse_boot_argn("wlan_smmu_early", &on, sizeof(on)) && on == 0) {
-		LOG("wlan smmu early: disabled by boot-arg");
-		return;
-	}
+	/* v351 showed that writes issued from the very first line of bsd_init
+	 * are dropped: the entry read back as 0 and the USB driver still found
+	 * only six active slots.  The SMMU is not writable yet, so this path is
+	 * opt-in and the claim now happens in the modem thread instead. */
+	PE_parse_boot_argn("wlan_smmu_early", &on, sizeof(on));
+	if (!on) return;
 
 	smmu = ml_io_map(WLAN_SMMU_PA, 0x1000);
 	if (smmu == 0) {

@@ -849,7 +849,7 @@ index 0000000..2237fb2
 +			continue;
 +		}
 +
-+		plan->slot = free_slot;
++		plan->slot = (free_slot + 1 < slots && !(smrs[free_slot + 1] & (1u << 31))) ? free_slot + 1 : free_slot;
 +		plan->bank = bank;
 +		plan->cbar = cbar;
 +		plan->cba2r = cba2r | 1u;
