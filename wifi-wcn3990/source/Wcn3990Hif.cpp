@@ -1074,10 +1074,11 @@ hif_post_buffers(void)
 	/* Warm the fault-record mapping now: the post-doorbell watch must not
 	 * spend its first microseconds in ml_io_map(). */
 	{
-		uint32_t f[4];
+		uint32_t f[8];
 
 		picasso_wlan_smmu_fault_read(f);
-		HIF_LOG("stage 3 warm: gfsr=%08x gfsynr1=%08x", f[0], f[2]);
+		HIF_LOG("stage 3 warm: gfsr=%08x gfsynr1=%08x scr0=%08x smr4=%08x s2cr4=%08x cb61fsr=%08x",
+		    f[0], f[2], f[4], f[5], f[6], f[7]);
 	}
 	hif_reg_write(2, CE_DST_WR_INDEX, cur);
 	HIF_LOG("stage 3: doorbell no-op write ok (reads %u)",
@@ -1091,17 +1092,29 @@ hif_post_buffers(void)
 	 * the machine has been dying within tens of milliseconds of the real
 	 * doorbell write, so watch 0 is the only read guaranteed to land.  DRRI
 	 * moving = the copy engine fetched the descriptors; a fault record
-	 * naming a stream = the SMMU refused one. */
+	 * naming a stream = the SMMU refused one.  425 taught us the first fetch
+	 * SUCCEEDS (drri=1, clean fault record) and death lands within the next
+	 * 100 ms, so watch at 10 ms and also carry the pre-bind entry (SMR[4])
+	 * and the bypass bank's own FSR - a context-bank fault does not appear
+	 * in the global record. */
 	{
-		uint32_t f[4];
+		uint32_t f[8];
 		int k;
 
-		for (k = 0; k < 5; k++) {
+		for (k = 0; k < 10; k++) {
 			picasso_wlan_smmu_fault_read(f);
-			HIF_LOG("stage 3 watch %d: drri=%u wr=%u gfsr=%08x gfsynr0=%08x gfsynr1=%08x",
+			HIF_LOG("stage 3 watch %d: drri=%u wr=%u gfsr=%08x gfsynr0=%08x gfsynr1=%08x scr0=%08x smr4=%08x cb61fsr=%08x",
 			    k, hif_reg_read(2, CE_CURRENT_DRRI),
-			    hif_reg_read(2, CE_DST_WR_INDEX), f[0], f[1], f[2]);
-			IOSleep(100);
+			    hif_reg_read(2, CE_DST_WR_INDEX), f[0], f[1], f[2],
+			    f[4], f[5], f[7]);
+			IOSleep(10);
+		}
+		for (k = 0; k < 24; k++) {
+			IOSleep(250);
+			HIF_LOG("stage 3 alive %d: drri=%u wr=%u gfsr=%08x",
+			    k, hif_reg_read(2, CE_CURRENT_DRRI),
+			    hif_reg_read(2, CE_DST_WR_INDEX),
+			    (picasso_wlan_smmu_fault_read(f), f[0]));
 		}
 	}
 }

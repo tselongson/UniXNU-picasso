@@ -187,27 +187,46 @@ wlan_smmu_smr_matches(uint32_t smr, uint32_t sid)
  *
  * Returns 0 once the table holds an exact entry for the WLAN stream.
  */
-/* Read-only view of the global fault record, for the copy engine's post-doorbell
- * watch: a CE transaction the SMMU refused leaves the faulting stream in
- * sGFSYNR1 (0x0 / 0xffffffff means "no record" / "no mapping"). */
+/* Read-only view of the SMMU around the copy engine's first DMA: the global
+ * fault record, the console entry, the pre-bind entry the SEC firmware left
+ * in SMR[4], and the bypass bank's own context-fault status.  Called only
+ * from the late wlan thread, so the wider 256 KiB mapping (context-bank
+ * pages) is safe to take here; the early claim still uses 4 KiB.
+ * out[0]=sGFSR [1]=sGFSYNR0 [2]=sGFSYNR1 [3]=sGFSYNR2 [4]=sCR0
+ * out[5]=SMR[4] [6]=S2CR[4] [7]=CB61.FSR (0xffffffff = page unmapped). */
 extern "C" void
 picasso_wlan_smmu_fault_read(uint32_t * out)
 {
 	static volatile uint32_t *smmu;
+	static uint32_t cb61_off = 0xffffffffu;
+	uint32_t id1, page_shift, num_page;
 
 	if (smmu == NULL) {
-		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x1000);
+		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x40000);
 
 		if (va == 0) {
-			out[0] = 0xffffffffu;
-			return;
+			va = ml_io_map(WLAN_SMMU_PA, 0x1000);
+			if (va == 0) {
+				out[0] = 0xffffffffu;
+				return;
+			}
 		}
 		smmu = (volatile uint32_t *)va;
+		id1 = smmu[0x024 >> 2];
+		page_shift = (id1 & (1u << 31)) ? 16u : 12u;
+		num_page = 1u << (((id1 >> 28) & 0x7u) + 1u);
+		/* (NumPage + 61) << PageShift + CB_FSR(0x58), inside the map? */
+		if (page_shift == 12u && ((num_page + 62u) << 12u) <= 0x40000u)
+			cb61_off = ((num_page + 61u) << 12u) + 0x58u;
 	}
 	out[0] = smmu[0x048 >> 2];      /* sGFSR */
 	out[1] = smmu[0x050 >> 2];      /* sGFSYNR0 */
 	out[2] = smmu[0x054 >> 2];      /* sGFSYNR1: the faulting stream */
 	out[3] = smmu[0x058 >> 2];      /* sGFSYNR2 */
+	out[4] = smmu[0x000 >> 2];      /* sCR0 */
+	out[5] = smmu[(0x800 >> 2) + 4];/* SMR[4]: the SEC pre-bind entry */
+	out[6] = smmu[(0xc00 >> 2) + 4];/* S2CR[4]: its route */
+	out[7] = (cb61_off != 0xffffffffu) ? smmu[cb61_off >> 2] : 0xffffffffu;
 }
 
 /* Write one S2CR and return the readback: the only register family this SMMU
