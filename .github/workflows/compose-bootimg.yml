@@ -151,7 +151,8 @@ jobs:
           name: picasso-userdata-${{ github.run_number }}
           path: device/out/picasso/userdata/userdata-root.sparse.img
           retention-days: 7
-          compression-level: 0
+          # The sparse image is almost all zero blocks; the default deflate
+          # level ships a ~200 MB artifact instead of a 7.4 GB stored one.
           if-no-files-found: error
 
       # The original static and System trust caches are extracted from the pinned
