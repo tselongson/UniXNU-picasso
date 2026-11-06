@@ -181,6 +181,7 @@ static struct hif_dma_block *g_dma;
 
 extern "C" void *picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out,
     uint32_t assign_level);
+extern "C" void picasso_wlan_smmu_fault_read(uint32_t * out);
 
 static volatile uint8_t *g_ce_va;
 static bool g_regs_live;
@@ -1059,6 +1060,23 @@ hif_post_buffers(void)
 	 * these buffers faults in the SMMU, this line must already be out. */
 	IOSleep(50);
 
+	/* Watch what the doorbell kicked off, read-only: DRRI moving means the
+	 * copy engine fetched the descriptors; a fault record naming a stream
+	 * means a translation was refused.  Each line is printed before the
+	 * next sleep, so a machine that dies mid-watch still reports how long
+	 * it lived and what the last state was. */
+	{
+		uint32_t f[4];
+		int k;
+
+		for (k = 0; k < 5; k++) {
+			picasso_wlan_smmu_fault_read(f);
+			HIF_LOG("stage 3 watch %d: drri=%u wr=%u gfsr=%08x gfsynr0=%08x gfsynr1=%08x",
+			    k, hif_reg_read(2, CE_CURRENT_DRRI),
+			    hif_reg_read(2, CE_DST_WR_INDEX), f[0], f[1], f[2]);
+			IOSleep(100);
+		}
+	}
 }
 
 extern "C" void

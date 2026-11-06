@@ -49,6 +49,7 @@
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSMetaClass.h>
 #include <libkern/c++/OSNumber.h>
+#include <libkern/c++/OSSymbol.h>
 
 extern "C" void HakiosWLANStart(const char * interface, const uint8_t * address);
 
@@ -58,6 +59,32 @@ class IO80211Controller : public IOService
 };
 
 OSDefineMetaClassAndStructors(IO80211Controller, IOService);
+
+/* Which of the names the userspace lookups need are actually registered: the
+ * family is prelinked (board.toml roots) yet the first allocClassWithName
+ * returned nothing, and "kext not started" vs "wrong name" is otherwise
+ * indistinguishable.  Read-only, once per radio. */
+static void
+say_class_presence(void)
+{
+	static const char * const names[] = {
+		"IOService", "IONetworkController", "IOEthernetController",
+		"IONetworkInterface", "IO80211Controller",
+	};
+	unsigned i;
+
+	for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+		OSSymbol * symbol = OSSymbol::withCString(names[i]);
+		const OSMetaClass * meta = symbol != NULL ?
+		    OSMetaClass::getMetaClassWithName(symbol) : NULL;
+
+		if (symbol != NULL) {
+			symbol->release();
+		}
+		IOLog("HakiosWLAN: class %s is %s\n", names[i],
+		    meta != NULL ? "loaded" : "absent");
+	}
+}
 
 /* Allocate one instance of a class owned by a loaded kext (+1 retained), or NULL when the
  * family that owns the name is not prelinked. */
@@ -103,6 +130,7 @@ HakiosWLANStart(const char * interface, const uint8_t * address)
 	OSData * mac;
 	OSNumber * number;
 
+	say_class_presence();
 	if (platform == NULL || controller == NULL || !controller->init()) {
 		OSSafeReleaseNULL(controller);
 		OSSafeReleaseNULL(node);

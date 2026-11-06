@@ -187,6 +187,29 @@ wlan_smmu_smr_matches(uint32_t smr, uint32_t sid)
  *
  * Returns 0 once the table holds an exact entry for the WLAN stream.
  */
+/* Read-only view of the global fault record, for the copy engine's post-doorbell
+ * watch: a CE transaction the SMMU refused leaves the faulting stream in
+ * sGFSYNR1 (0x0 / 0xffffffff means "no record" / "no mapping"). */
+extern "C" void
+picasso_wlan_smmu_fault_read(uint32_t * out)
+{
+	static volatile uint32_t *smmu;
+
+	if (smmu == NULL) {
+		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x1000);
+
+		if (va == 0) {
+			out[0] = 0xffffffffu;
+			return;
+		}
+		smmu = (volatile uint32_t *)va;
+	}
+	out[0] = smmu[0x048 >> 2];      /* sGFSR */
+	out[1] = smmu[0x050 >> 2];      /* sGFSYNR0 */
+	out[2] = smmu[0x054 >> 2];      /* sGFSYNR1: the faulting stream */
+	out[3] = smmu[0x058 >> 2];      /* sGFSYNR2 */
+}
+
 extern "C" int
 picasso_wlan_smmu_claim(void)
 {

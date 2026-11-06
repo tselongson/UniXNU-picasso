@@ -22,6 +22,10 @@ on:
         description: Create the first 20 GiB seed if none is reusable (changes Data identity)
         type: boolean
         default: false
+      build_userdata:
+        description: Also build and upload the userdata root image (sparse, for fastboot flash userdata)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -127,6 +131,28 @@ jobs:
           python3 scripts/check-picasso-target.py --ipsw "$IPSW"
           ls -lh "$IPSW"
           echo "UNIXNU_IPSW=$PWD/$IPSW" >> "$GITHUB_ENV"
+
+      # The root volume the ADT's root-matching UUID selects comes from the
+      # unchanged OS/SystemOS windows of the target IPSW (docs/guide/userdata).
+      # Built here, converted to Android sparse (fastboot's streaming path),
+      # and uploaded once; flashing it is a manual, deliberate step.
+      - name: Build the userdata root image
+        if: ${{ inputs.build_userdata }}
+        run: |
+          python3 ./unixnu build userdata --ipsw "$UNIXNU_IPSW"
+          find out -name 'userdata-root*.img' -o -name 'userdata-root*.json' | xargs ls -l
+          python3 scripts/make-android-sparse.py out/picasso/userdata/userdata-root.img out/picasso/userdata/userdata-root.sparse.img
+          ls -lh out/picasso/userdata/userdata-root.sparse.img
+
+      - name: Upload the userdata root image
+        if: ${{ inputs.build_userdata }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: picasso-userdata-${{ github.run_number }}
+          path: device/out/picasso/userdata/userdata-root.sparse.img
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
 
       # The original static and System trust caches are extracted from the pinned
       # IPSW here rather than committed; board.toml pins the accepted bundle hash.
