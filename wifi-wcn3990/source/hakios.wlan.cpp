@@ -8,8 +8,7 @@
  *     "Infrastructure", and IO80211.framework binds to an interface through a service whose
  *     IOInterfaceName is the interface's name. The service has no user client, on purpose:
  *     the framework's attempt to open one fails, it says "Falling back to IOCTL path", and
- *     from then on every request is an ioctl on a socket, which drivers/wifi/hakios.apple80211.c
- *     answers.
+ *     from then on every request is an ioctl on a socket, which the BSD en0 answers.
  *   - SystemConfiguration (SCNetworkInterfaceCopyAll) lists the network interfaces it finds as
  *     objects of the class IONetworkInterface, and calls one a Wi-Fi interface when its parent
  *     is of the class IO80211Controller; type, unit, name and built-in-ness are properties of
@@ -26,71 +25,52 @@
  *     SpringBoard waiting. (Found by the ios-sapphire port, patches 0157 and 0158, which carries
  *     this file on: github.com/Angelpro09xd/ios-sapphire, APSL 2.0.)
  *
- * So: a controller of the class IO80211Controller -- an IOEthernetController and so an
- * IONetworkController, as in IO80211Family -- under the "wlan" node (the platform when there is
- * none), the radio's address on that node as local-mac-address, and below the controller one
- * object that is both, an IONetworkInterface with wifid's properties. The classes are ours, named
- * as IO80211Family and IONetworkingFamily name theirs; none has anything but properties.
+ * iOS 16 note (2026-11-06): the board now prelinks the real
+ * com.apple.iokit.IONetworkingFamily (board.toml roots: "InterfaceNamer needs the original
+ * IOBSD-matched stack"), so this file must not define the family's class names any more -- the
+ * first ios16-wifi boot panicked at OSMetaClass.cpp:896 with "Kext
+ * com.apple.iokit.IONetworkingFamily class IOEthernetController is a duplicate; kext __kernel__
+ * already has a class by that name" while the family's own registration ran.  The interface
+ * service is therefore an instance of the family's real IONetworkInterface, allocated by name
+ * through OSMetaClass::allocClassWithName(), and only IOService's own state is initialised:
+ * these objects are property carriers, not driven hardware.  A bare real IONetworkController is
+ * deliberately not published: it is the family's abstract driver base, and InterfaceNamer
+ * attaches to every IONetworkController that registers.  MobileGestalt keeps its first lookup
+ * (the wlan node's local-mac-address, which is set here); the IONetworkController-class
+ * fallback is left for a later round, if the 5 s waits ever show up.  IO80211Controller is
+ * still defined here because IO80211Family is not in the board's prelink roots, so no loaded
+ * kext owns that name, and configd needs it as the interface's parent class to call the
+ * service Wi-Fi.
  */
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOService.h>
-#include <IOKit/IOUserClient.h>
 #include <libkern/c++/OSData.h>
+#include <libkern/c++/OSMetaClass.h>
 #include <libkern/c++/OSNumber.h>
 
 extern "C" void HakiosWLANStart(const char * interface, const uint8_t * address);
 
-class IONetworkController : public IOService
-{
-	OSDeclareDefaultStructors(IONetworkController);
-};
-
-OSDefineMetaClassAndStructors(IONetworkController, IOService);
-
-class IOEthernetController : public IONetworkController
-{
-	OSDeclareDefaultStructors(IOEthernetController);
-};
-
-OSDefineMetaClassAndStructors(IOEthernetController, IONetworkController);
-
-class IO80211Controller : public IOEthernetController
+class IO80211Controller : public IOService
 {
 	OSDeclareDefaultStructors(IO80211Controller);
 };
 
-OSDefineMetaClassAndStructors(IO80211Controller, IOEthernetController);
+OSDefineMetaClassAndStructors(IO80211Controller, IOService);
 
-class IONetworkInterface : public IOService
+/* Allocate one instance of a class owned by a loaded kext (+1 retained), or NULL when the
+ * family that owns the name is not prelinked. */
+static IOService *
+alloc_service(const char * name)
 {
-	OSDeclareDefaultStructors(IONetworkInterface);
-};
+	OSObject * object = OSMetaClass::allocClassWithName(name);
+	IOService * service = OSDynamicCast(IOService, object);
 
-OSDefineMetaClassAndStructors(IONetworkInterface, IOService);
-
-class HakiosWLAN : public IONetworkInterface
-{
-	OSDeclareDefaultStructors(HakiosWLAN);
-
-public:
-	virtual IOReturn newUserClient(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties,
-	    IOUserClient ** handler) APPLE_KEXT_OVERRIDE;
-};
-
-OSDefineMetaClassAndStructors(HakiosWLAN, IONetworkInterface);
-
-/* There is none (see the top); that somebody asked shows that the service was found. */
-IOReturn
-HakiosWLAN::newUserClient(task_t owningTask, void * securityID, UInt32 type, OSDictionary * properties, IOUserClient ** handler)
-{
-	static unsigned said;
-
-	if (said++ < 8) {
-		IOLog("HakiosWLAN: a user client of type %u is asked for: there is none\n", (unsigned) type);
+	if (object != NULL && service == NULL) {
+		object->release();
 	}
-	return kIOReturnUnsupported;
+	return service;
 }
 
 /* attach, start, register: the service, or NULL */
@@ -119,16 +99,15 @@ HakiosWLANStart(const char * interface, const uint8_t * address)
 	OSDictionary * match = IOService::nameMatching("wlan");
 	IOService * node = match != NULL ? IOService::copyMatchingService(match) : NULL;   /* the device tree's */
 	IO80211Controller * controller = OSTypeAlloc(IO80211Controller);
-	HakiosWLAN * wlan = OSTypeAlloc(HakiosWLAN);
+	IOService * wlan;
 	OSData * mac;
 	OSNumber * number;
 
-	if (platform == NULL || controller == NULL || wlan == NULL || !controller->init() || !wlan->init()) {
+	if (platform == NULL || controller == NULL || !controller->init()) {
 		OSSafeReleaseNULL(controller);
-		OSSafeReleaseNULL(wlan);
 		OSSafeReleaseNULL(node);
 		OSSafeReleaseNULL(match);
-		IOLog("HakiosWLAN: cannot create the services\n");
+		IOLog("HakiosWLAN: cannot create the controller\n");
 		return;
 	}
 	if ((mac = OSData::withBytes(address, 6)) != NULL) {
@@ -143,11 +122,24 @@ HakiosWLANStart(const char * interface, const uint8_t * address)
 	controller = (IO80211Controller *) publish(controller, node != NULL ? node : platform, "HakiosWLANController");
 	OSSafeReleaseNULL(node);
 	if (controller == NULL) {
-		wlan->release();
 		IOLog("HakiosWLAN: the controller did not start\n");
 		return;
 	}
 
+	wlan = alloc_service("IONetworkInterface");
+	if (wlan == NULL) {
+		controller->release();
+		IOLog("HakiosWLAN: no IONetworkInterface class is loaded\n");
+		return;
+	}
+	/* init() is called on IOService only: the family's own init() overrides expect their
+	 * driver context, which a property carrier does not have. */
+	if (!wlan->IOService::init()) {
+		wlan->release();
+		controller->release();
+		IOLog("HakiosWLAN: the interface cannot be initialised\n");
+		return;
+	}
 	wlan->setProperty("IOInterfaceName", interface);
 	wlan->setProperty("BSD Name", interface);
 	wlan->setProperty("IOInterfaceNamePrefix", "en");
@@ -168,4 +160,6 @@ HakiosWLANStart(const char * interface, const uint8_t * address)
 		wlan->release();
 	}
 	controller->release();
+	IOLog("HakiosWLAN: published HakiosWLANController + HakiosWLAN(%s) on the prelinked family's classes\n",
+	    interface);
 }
