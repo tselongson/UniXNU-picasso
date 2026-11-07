@@ -1288,13 +1288,14 @@ hif_ce_post_ring(uint32_t ce)
 		ring[i].flags = 0;
 		ring[i].toeplitz = 0;
 	}
+	/* No bulk clean of the receive buffers here.  428 (2aae2b3) survived
+	 * the doorbell and received 8 descriptors; 429 added a whole-buffer
+	 * clean at init and died within 100 ms of the first fetch, 3/3 vs
+	 * 0/3 on retest.  The RX loop invalidates each buffer before use, so
+	 * dirty lines cannot hide the target's data - and the bulk clean is
+	 * the only change that runs outside the gated poller. */
 	hif_mb();
 	flush_dcache64((addr64_t)g_dr_pa[ce], (unsigned)(n * 16), TRUE);
-	/* The receive buffers were zeroed through the cache: clean them once
-	 * so no dirty line can write the zeros back over the target's DMA
-	 * while the buffers are in flight. */
-	flush_dcache64((addr64_t)g_buf_pa[ce],
-	    (unsigned)((uint64_t)n * sh->buf_sz), TRUE);
 
 	/* Keep one slot free so the ring can never look full to the target. */
 	hif_reg_write(ce, CE_DST_WR_INDEX, n - 1);
@@ -1569,11 +1570,9 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	}
 	hif_mb();
 	flush_dcache64((addr64_t)g_dst2_pa, (unsigned int)sizeof(s_dst2), TRUE);
-	/* The receive buffers were zeroed through the cache: clean them once so
-	 * no dirty line can write the zeros back over the target's DMA while
-	 * the buffers are in flight. */
-	flush_dcache64((addr64_t)g_rx2_pa,
-	    (unsigned int)sizeof(s_rx2), TRUE);
+	/* The 429-era whole-rx2 clean deliberately stays out: see the note in
+	 * hif_ce_post_ring() - it is the only post-428 change that runs before
+	 * the doorbell, and 429/430 both die in the fetch window with it. */
 
 	g_sw2 = 0;
 	g_post2 = 0;
