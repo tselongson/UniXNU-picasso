@@ -401,6 +401,12 @@ static uint32_t g_ce_limit = 12, g_ce_step_ms = 0;
 /* wcn3990-hif-trace=1 records every CE register access in the black box, so a
  * reset names the store that hung the bus instead of the function it was in. */
 static int g_ce_trace;
+/* wcn3990-hif-pace=US inserts a delay around every CE register access.  Build
+ * 439, the only one that ever survived the whole programming loop, had a
+ * 30 ms IOSleep between engines; later builds removed it and started dying at
+ * whichever access came too soon after the previous one.  That is what a block
+ * that needs time to wake on first touch looks like. */
+static uint32_t g_ce_pace_us;
 
 /* CoachZ wc_ring (sw/write) and wc.pending: one software consume index and
  * one posted index per destination ring, plus the per-engine interrupt state.
@@ -432,13 +438,19 @@ hif_reg(uint32_t ce, uint32_t off)
 static inline uint32_t
 hif_reg_read(uint32_t ce, uint32_t off)
 {
+	uint32_t v;
+
+	if (g_ce_pace_us) IODelay(g_ce_pace_us);
 	if (g_ce_trace) hif_bb(BB_CE_ACCESS, 0x80000000u | (ce << 16) | (off & 0xffffu), 0);
-	return *hif_reg(ce, off);
+	v = *hif_reg(ce, off);
+	if (g_ce_pace_us) IODelay(g_ce_pace_us);
+	return v;
 }
 
 static inline void
 hif_reg_write(uint32_t ce, uint32_t off, uint32_t value)
 {
+	if (g_ce_pace_us) IODelay(g_ce_pace_us);
 	if (g_ce_trace) hif_bb(BB_CE_ACCESS, (ce << 16) | (off & 0xffffu), value);
 	*hif_reg(ce, off) = value;
 	hif_mb();
@@ -1553,8 +1565,12 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("wcn3990-hif-trace", &v, sizeof(v)) && v) {
 		g_ce_trace = 1;
 	}
-	HIF_LOG("ce bisect: limit=%u step=%u ms trace=%d",
-	    g_ce_limit, g_ce_step_ms, g_ce_trace);
+	v = 0;
+	if (PE_parse_boot_argn("wcn3990-hif-pace", &v, sizeof(v)) && v <= 100000) {
+		g_ce_pace_us = v;
+	}
+	HIF_LOG("ce bisect: limit=%u step=%u ms trace=%d pace=%u us",
+	    g_ce_limit, g_ce_step_ms, g_ce_trace, g_ce_pace_us);
 
 	/* wcn3990-hif-assign: 0 (default) = plain HLOS pages; the real gate for
 	 * the WLAN CE master is the apps-SMMU stream, not a VMID assignment.

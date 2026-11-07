@@ -1150,6 +1150,11 @@ static uint32_t wlfw_node, wlfw_port;
 static bool wlfw_probe, wlfw_probed, wlfw_assigned;
 static unsigned wlfw_state, wlfw_tries, wlfw_last;
 static bool wlfw_ready;   /* FW_READY_IND seen: ath10k sends CFG+MODE only after it */
+/* wcn3990-wlan-at=SEC holds the whole WLFW attach until the given second of
+ * boot.  Everything the WLAN bring-up needs - the CX/MSS corners, the XO, the
+ * interconnect path to 0x18800000 - is then in the state the rest of the
+ * system settles into, instead of the state early boot leaves it in. */
+static uint32_t g_wlan_at_ms, wlfw_wait_note;
 static bool pdr_sent;
 static bool pdr_nolen_done;
 static uint32_t pdr_instance;
@@ -1730,8 +1735,13 @@ glink_poll(struct smem_part_hdr *part, unsigned ms)
 		}
 	}
 	if (wlfw_probe && !wlfw_probed) {
-		wlfw_probed = true;
-		wlfw_start();
+		if (ms >= g_wlan_at_ms) {
+			wlfw_probed = true;
+			wlfw_start();
+		} else if (!wlfw_wait_note || (ms - wlfw_wait_note) >= 5000) {
+			wlfw_wait_note = ms ? ms : 1;
+			LOG("t=%u ms: WLFW attach held until t=%u ms", ms, g_wlan_at_ms);
+		}
 	} else if (wlfw_state >= 1 && wlfw_state <= 4 && wlfw_tries < 3 &&
 	    (ms - wlfw_last) >= 1000) {
 		wlfw_tries++;
@@ -5366,6 +5376,15 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 	unsigned watch = 60;
 
 	(void)PE_parse_boot_argn("modem_watch", &watch, sizeof(watch));
+	{
+		uint32_t at = 0;
+
+		(void)PE_parse_boot_argn("wcn3990-wlan-at", &at, sizeof(at));
+		g_wlan_at_ms = at * 1000u;
+		if (g_wlan_at_ms) {
+			LOG("wlan attach held until t=%u ms", g_wlan_at_ms);
+		}
+	}
 	(void)PE_parse_boot_argn("modem_pdm", &pd_full, sizeof(pd_full));
 	(void)PE_parse_boot_argn("modem_dbg", &modem_dbg, sizeof(modem_dbg));
 	(void)PE_parse_boot_argn("modem_efs_fail", &g_efs_fail, sizeof(g_efs_fail));
