@@ -5058,6 +5058,7 @@ picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out, uint32_t assign_level
 			__asm__ volatile ("dsb sy" ::: "memory");
 			pa = g_wlan_dma_pool_pa;
 			if (pa_out) *pa_out = pa;
+			nc_va = pool_va;
 			goto done;
 		}
 	}
