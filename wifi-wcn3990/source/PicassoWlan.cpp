@@ -270,59 +270,30 @@ extern "C" void
 picasso_wlan_panic_report(void)
 {
 	extern void picasso_usb_panic_write(const char *, int);
-	char text[200];
+	char text[160];
 	int n = 0;
-	uint64_t elr = 0, spsr = 0, esr = 0;
+	uint64_t elr = 0;
 
+	/* One line, one flush: on this board the panic console survives about
+	 * three writes before the SoC stops answering, so the SMMU's own fault
+	 * record goes first and the trapping PC last. */
 	__asm__ volatile ("mrs %0, ELR_EL1" : "=r"(elr));
-	__asm__ volatile ("mrs %0, SPSR_EL1" : "=r"(spsr));
-	__asm__ volatile ("mrs %0, ESR_EL1" : "=r"(esr));
 
-	n += pp_str(text + n, "[wlan] elr=", 12);
-	n += pp_hex(text + n, elr, 16);
-	n += pp_str(text + n, " spsr=", 6);
-	n += pp_hex(text + n, spsr, 8);
-	n += pp_str(text + n, " esr=", 5);
-	n += pp_hex(text + n, esr, 16);
-	n += pp_str(text + n, "\n", 1);
-	picasso_usb_panic_write(text, n);
-
-	if (g_wlan_smmu_regs == NULL) {
-		static const char none[] = "[wlan] smmu never mapped\n";
-
-		picasso_usb_panic_write(none, (int)sizeof(none) - 1);
-		return;
+	n += pp_str(text + n, "[wlan] ", 7);
+	if (g_wlan_smmu_regs != NULL) {
+		n += pp_str(text + n, "gfsr=", 5);
+		n += pp_hex(text + n, g_wlan_smmu_regs[0x048 >> 2], 8);
+		n += pp_str(text + n, " fsynr1=", 8);
+		n += pp_hex(text + n, g_wlan_smmu_regs[0x054 >> 2], 8);
+		n += pp_str(text + n, " fsynr0=", 8);
+		n += pp_hex(text + n, g_wlan_smmu_regs[0x050 >> 2], 8);
+		n += pp_str(text + n, " cr0=", 5);
+		n += pp_hex(text + n, g_wlan_smmu_regs[0x000 >> 2], 8);
+	} else {
+		n += pp_str(text + n, "smmu never mapped ", 18);
 	}
-
-	n = 0;
-	n += pp_str(text + n, "[wlan] cr0=", 11);
-	n += pp_hex(text + n, g_wlan_smmu_regs[0x000 >> 2], 8);
-	n += pp_str(text + n, " acr=", 5);
-	n += pp_hex(text + n, g_wlan_smmu_regs[0x010 >> 2], 8);
-	n += pp_str(text + n, " gfsr=", 6);
-	n += pp_hex(text + n, g_wlan_smmu_regs[0x048 >> 2], 8);
-	n += pp_str(text + n, " fsynr0=", 8);
-	n += pp_hex(text + n, g_wlan_smmu_regs[0x050 >> 2], 8);
-	n += pp_str(text + n, " fsynr1=", 8);
-	n += pp_hex(text + n, g_wlan_smmu_regs[0x054 >> 2], 8);
-	n += pp_str(text + n, " fsynr2=", 8);
-	n += pp_hex(text + n, g_wlan_smmu_regs[0x058 >> 2], 8);
-	n += pp_str(text + n, "\n", 1);
-	picasso_usb_panic_write(text, n);
-
-	n = 0;
-	n += pp_str(text + n, "[wlan] cb60 fsr=", 16);
-	n += pp_hex(text + n, g_wlan_cb_fsr_off[0] == 0xffffffffu ? 0xffffffffu :
-	    g_wlan_smmu_regs[g_wlan_cb_fsr_off[0] >> 2], 8);
-	n += pp_str(text + n, " far=", 5);
-	n += pp_hex(text + n, g_wlan_cb_fsr_off[0] == 0xffffffffu ? 0xffffffffu :
-	    g_wlan_smmu_regs[(g_wlan_cb_fsr_off[0] + 8u) >> 2], 8);
-	n += pp_str(text + n, " cb61 fsr=", 10);
-	n += pp_hex(text + n, g_wlan_cb_fsr_off[1] == 0xffffffffu ? 0xffffffffu :
-	    g_wlan_smmu_regs[g_wlan_cb_fsr_off[1] >> 2], 8);
-	n += pp_str(text + n, " far=", 5);
-	n += pp_hex(text + n, g_wlan_cb_fsr_off[1] == 0xffffffffu ? 0xffffffffu :
-	    g_wlan_smmu_regs[(g_wlan_cb_fsr_off[1] + 8u) >> 2], 8);
+	n += pp_str(text + n, "elr=", 4);
+	n += pp_hex(text + n, elr, 16);
 	n += pp_str(text + n, "\n", 1);
 	picasso_usb_panic_write(text, n);
 }
@@ -3663,15 +3634,84 @@ picasso_wlan_smmu_bind_wlan(uint32_t mode)
 	if (mode >= 7 && mode <= 9) {
 		uint32_t rb = 0, before;
 
-		if (mode == 9) {
+		if (mode == 7) {
+			/* XBL binds 0xc0 through a stream-match entry when it binds
+			 * it at all (SMR[4] id=0c0 mask=1 -> S2CR[4]=3d in the
+			 * 439/440 dumps), and a matching SMR always wins over the
+			 * direct S2CR[StreamID] index.  So both routes have to be
+			 * repointed:
+			 *   1. every valid SMR that matches 0xc0 keeps its entry,
+			 *      and its own S2CR index - the one that actually
+			 *      routes the stream - is set to bank 60;
+			 *   2. S2CR[0xc0] itself is set too, for the boots where
+			 *      XBL left no entry and USFCFG=1 indexes by stream id.
+			 * Only S2CR is written: SMR stores are dropped on this
+			 * SMMU, S2CR stores are not.
+			 */
+			uint32_t slot, routed = 0;
+
+			for (slot = 0; slot < 256; slot++) {
+				uint32_t smr = smmu[(0x800 >> 2) + slot];
+				uint32_t id, mask;
+
+				if (!(smr & 0x80000000u)) {
+					continue;
+				}
+				id = smr & 0x7fffu;
+				mask = (smr >> 16) & 0x7fffu;
+				if (((id ^ 0xc0u) & ~mask & 0x7fffu) != 0) {
+					continue;
+				}
+				before = smmu[(0xc00 >> 2) + slot];
+				for (i = 0; i < 8; i++) {
+					smmu[(0xc00 >> 2) + slot] = 0x3cu;
+					__asm__ volatile ("dsb sy" ::: "memory");
+					rb = smmu[(0xc00 >> 2) + slot];
+					if (rb == 0x3cu) {
+						break;
+					}
+					IOSleep(2);
+				}
+				LOG("smmu bind: SMR[%u] %08x matches c0 -> S2CR[%u] %08x -> %08x (try %u)",
+				    slot, smr, slot, before, rb, i);
+				routed++;
+				ok = (rb == 0x3cu) ? ok : -1;
+				if (routed >= 4) {
+					break;
+				}
+			}
+			if (routed == 0) {
+				LOG("smmu bind: no SMR matches c0, the direct index decides");
+			}
+		}
+
+		before = smmu[(0xc00 >> 2) + 0xc0];
+		for (i = 0; i < 8; i++) {
+			smmu[(0xc00 >> 2) + 0xc0] = (mode == 8) ? 0x3du : 0x3cu;
+			__asm__ volatile ("dsb sy" ::: "memory");
+			rb = smmu[(0xc00 >> 2) + 0xc0];
+			if (rb == ((mode == 8) ? 0x3du : 0x3cu)) {
+				break;
+			}
+			IOSleep(2);
+		}
+		LOG("smmu bind: S2CR[c0] %08x -> %08x readback %08x (try %u) mode %u",
+		    before, (mode == 8) ? 0x3du : 0x3cu, rb, i, mode);
+		ok = (rb == ((mode == 8) ? 0x3du : 0x3cu)) ? ok : -1;
+
+		if (mode != 9) {
+			goto tlb;
+		}
+
+		{
 			uint32_t slot, rb_smr = 0, rb_s2 = 0;
 
-			for (slot = 0; slot < 128; slot++) {
+			for (slot = 0; slot < 256; slot++) {
 				if ((smmu[(0x800 >> 2) + slot] & 0x80000000u) == 0) {
 					break;
 				}
 			}
-			if (slot >= 128) {
+			if (slot >= 256) {
 				slot = 13;
 			}
 			for (i = 0; i < 8; i++) {
@@ -3688,22 +3728,7 @@ picasso_wlan_smmu_bind_wlan(uint32_t mode)
 			LOG("smmu bind: SMR[%u]=%08x S2CR[%u]=%08x (want 800100c0/0000003c)",
 			    slot, rb_smr, slot, rb_s2);
 			ok = ((rb_smr & 0x80000000u) && rb_s2 == 0x3cu) ? 0 : -1;
-			goto tlb;
 		}
-
-		before = smmu[(0xc00 >> 2) + 0xc0];
-		for (i = 0; i < 8; i++) {
-			smmu[(0xc00 >> 2) + 0xc0] = (mode == 7) ? 0x3cu : 0x3du;
-			__asm__ volatile ("dsb sy" ::: "memory");
-			rb = smmu[(0xc00 >> 2) + 0xc0];
-			if (rb == ((mode == 7) ? 0x3cu : 0x3du)) {
-				break;
-			}
-			IOSleep(2);
-		}
-		LOG("smmu bind: S2CR[c0] %08x -> %08x readback %08x (try %u) mode %u",
-		    before, (mode == 7) ? 0x3cu : 0x3du, rb, i, mode);
-		ok = (rb == ((mode == 7) ? 0x3cu : 0x3du)) ? 0 : -1;
 		goto tlb;
 	}
 
