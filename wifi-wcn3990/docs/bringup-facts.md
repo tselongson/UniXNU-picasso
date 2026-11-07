@@ -81,6 +81,8 @@ What is established:
 | the CE DMA block is outside the DMA pool | `kmem_alloc_contig(0xa0000000, 0xb0000000)` | the allocator ignores the bounds and returns 0xcdca4000 anyway |
 | any stream below 128 is the culprit | mode 6: 103 faulting slots defaulted to bank 60 | still dies - the engines are simply not in 0..127 |
 | a wrong CE register offset (RRI wrapper) | compare against CoachZ `hw.c` (`0x24C004`) | matches; the readback holds the address we wrote |
+| `0xc0` can be routed from the non-secure side | mode 7 writes every matching SMR's S2CR *and* `S2CR[0xc0]` | neither lands: no SMR matches `0xc0`, `S2CR[0xc0]` reads `00000000` before and after 8 attempts (index 192 is outside the implemented table) |
+| the SMMU is the one refusing | one-line panic report | `gfsr=00000000 fsynr1=00000000` - no global fault, so not an unidentified stream and not a walk error |
 
 ## 4. Instrumentation now in the tree
 
@@ -105,7 +107,21 @@ Two register offsets were wrong in build 455 and are fixed since: `sTLBGSYNC`
 is `0x070` and `sTLBGSTATUS` is `0x074`; `0x050`/`0x058` are `sGFSYNR0/2`, so
 "tlbgstatus = 0 after 0 us" was reading a status register that never moves.
 
-## 5. Open questions, in the order they must be answered
+## 5. What the firmware says about its own memory
+
+`WLFW_MSA_INFO` (QMI 0x2d) answers with the regions the WLAN may use:
+
+```
+MSA region[0]: addr=0x8ba00000 size=0x10000  secure=1
+MSA region[1]: addr=0x8ba10000 size=0x1f0000 secure=0
+```
+
+That is the `pil_wlan_fw_region@8ba00000` from the device tree, split into a
+64 KiB secure half and a 1.9 MiB non-secure half.  The CE rings are *not*
+there - they are ordinary kernel memory at 0xcd.. - so anything that restricts
+the engines to their own window would show up exactly as it does.
+
+## 6. Open questions, in the order they must be answered
 
 1. Does `S2CR[0xc0]` accept a store at all (index 192 is above the 128 the
    driver used to scan, but inside the 4 KiB GR0 page)?
@@ -118,3 +134,10 @@ is `0x070` and `sTLBGSTATUS` is `0x074`; `0x050`/`0x058` are `sGFSYNR0/2`, so
    expects *I/O* addresses in that window, which only a stage-2 table can map.
    If bank 60 (identity) turns out to be unusable for the WLAN, building that
    table is the remaining option.
+4. `sGFSR` is clear, so the next place a fault can be hiding is a context
+   bank's own `FSR`.  The panic line now prints CB0/CB60/CB61 `FSR`; if one of
+   them is non-zero the SMMU did refuse the transfer and that bank's routing is
+   the thing to change (mode 10 makes bank 0 identity, the way bank 60 is).
+   If all three are zero, the refusal happens below the SMMU - interconnect or
+   XPU - and `hyp_assign` (TZ answered `ret=-2 res=86` for VMIDs 24/25) is the
+   only remaining lever.

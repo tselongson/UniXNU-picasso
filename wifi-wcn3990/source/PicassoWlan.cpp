@@ -3896,6 +3896,66 @@ tlb:
 	return ok;
 }
 
+/* Read-only enumeration of the AOP command DB's BCM names: these are the
+ * interconnect votes this platform exposes, and the GPU driver's crypto-path
+ * vote (which fixed that block's SError) is the same mechanism.  If the copy
+ * engines are refused below the SMMU, the name to vote is in this list.
+ * Layout as drivers/soc/qcom/cmd-db.c: magic at +4, one 16-byte slave
+ * descriptor per resource, then 24-byte header entries whose first 8 bytes
+ * are the name. */
+extern "C" void
+picasso_wlan_cmd_db_dump(void)
+{
+	vm_offset_t va = ml_io_map(0x80860000ull, 0x20000u);
+	volatile uint8_t *db = (volatile uint8_t *)va;
+	uint32_t resource, total = 0;
+
+	if (va == 0) {
+		LOG("cmd-db: cannot map 0x80860000");
+		return;
+	}
+	LOG("cmd-db: magic %02x%02x%02x%02x", db[4], db[5], db[6], db[7]);
+	for (resource = 0; resource < 8; resource++) {
+		volatile uint8_t *slave = db + 8 + resource * 16;
+		uint32_t headers, entries, e;
+
+		if ((slave[0] | (slave[1] << 8)) == 0) {
+			break;
+		}
+		headers = 144u + (uint32_t)(slave[2] | (slave[3] << 8));
+		entries = (uint32_t)(slave[6] | (slave[7] << 8));
+		for (e = 0; e < entries; e++) {
+			uint64_t at = headers + (uint64_t)e * 24u;
+			char name[9];
+			uint32_t i, addr, aux_len, aux_off, unit = 0;
+
+			if (at + 24 > 0x20000u) {
+				break;
+			}
+			for (i = 0; i < 8; i++) {
+				uint8_t c = db[at + i];
+
+				name[i] = (char)((c >= 0x20 && c < 0x7f) ? c : ' ');
+			}
+			name[8] = '\0';
+			addr = (uint32_t)db[at + 16] | ((uint32_t)db[at + 17] << 8) |
+			    ((uint32_t)db[at + 18] << 16) | ((uint32_t)db[at + 19] << 24);
+			aux_len = (uint32_t)(db[at + 20] | (db[at + 21] << 8));
+			aux_off = (uint32_t)(db[at + 22] | (db[at + 23] << 8));
+			if (aux_len >= 4 && 144u + aux_off + 4u <= 0x20000u) {
+				volatile uint8_t *aux = db + 144u + aux_off;
+
+				unit = (uint32_t)aux[0] | ((uint32_t)aux[1] << 8) |
+				    ((uint32_t)aux[2] << 16) | ((uint32_t)aux[3] << 24);
+			}
+			LOG("cmd-db: rsc%u [%s] addr=%08x aux=%u/%08x",
+			    resource, name, addr, aux_len, unit);
+			total++;
+		}
+	}
+	LOG("cmd-db: %u BCM(s)", total);
+}
+
 static void
 picasso_wlan_ce_init(void)
 {
@@ -3909,6 +3969,13 @@ picasso_wlan_ce_init(void)
 	}
 	/* Beacons delivered over WMI_MGMT_RX_EVENT go through the standard
 	 * 802.11 parser below, which fills g_picasso_bsss[]. */
+	{
+		uint32_t dump = 0;
+
+		if (PE_parse_boot_argn("wcn3990-cmddb", &dump, sizeof(dump)) && dump) {
+			picasso_wlan_cmd_db_dump();
+		}
+	}
 	{
 		uint32_t bind = 7;
 
