@@ -197,7 +197,7 @@ static bool gRemoteGic = false; // sheng-smp-gic=1: the boot CPU prepares a new 
 // Group 1 non-secure, priority 0xa0, the given trigger and routed to the boot CPU (GICD_IROUTER, affinity routing is on),
 // then enabled. The handler runs in the primary interrupt context, before the EOI, and must clear a level source.
 // An SPI without a handler is counted and disabled instead of being acknowledged forever.
-#define ARMCPU_SPI_SLOTS 16
+#define ARMCPU_SPI_SLOTS 24   /* touch + the twelve WCN3990 CE lines (+ headroom) */
 struct ArmCpuSpi {uint32_t id; void (*handler) (void *); void *context; volatile uint64_t count;};
 static ArmCpuSpi gSpi[ARMCPU_SPI_SLOTS];
 static volatile uint32_t gSpiUsed = 0;

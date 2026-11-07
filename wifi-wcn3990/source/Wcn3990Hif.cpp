@@ -1330,13 +1330,21 @@ hif_ce_attach_irqs(void)
 
 		if (rc == 0) attached++;
 	}
+	/* ArmCpu has only ARMCPU_SPI_SLOTS (16) handlers for the whole board.
+	 * A partial attach would leave enabled level-high lines with no owner,
+	 * so require all twelve: otherwise disable every engine's interrupt
+	 * and take CoachZ's documented wc_poll(1) pure-polling fallback. */
 	g_ce_irq_live = (attached == 12);
+	if (g_ce_irq_live) {
+		for (ce = 0; ce < 12; ce++) hif_ce_enable(ce);
+	} else {
+		for (ce = 0; ce < 12; ce++) {
+			hif_reg_write(ce, CE_HOST_IE, 0);
+			hif_reg_write(ce, CE_MISC_IE, 0);
+		}
+	}
 	HIF_LOG("copy-engine interrupts %u/12 attached, gicd=%p pure_poll=%u",
 	    attached, g_gicd, !g_ce_irq_live);
-	for (ce = 0; ce < 12; ce++) {
-		if (hif_shape[ce].src_n == 0 && hif_ce_recv[ce] == 0) continue;
-		hif_ce_enable(ce);
-	}
 }
 
 /* CoachZ wc_service(): acknowledge the engine's status, drain every completed
