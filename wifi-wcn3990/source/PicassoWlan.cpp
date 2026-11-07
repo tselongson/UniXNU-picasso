@@ -3470,7 +3470,6 @@ static volatile uint8_t *g_wlan_ce_base = NULL;
 
 static void picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t rssi, uint16_t freq);
 
-static void
 /*
  * Bind the WLAN masters to a bypass context bank, before anything touches the
  * copy engines.  The device tree says iommus = <&apps_smmu 0x20 0x01>, so the
@@ -3512,17 +3511,26 @@ picasso_wlan_smmu_bind_wlan(uint32_t cb)
 	}
 	for (i = 0; i < 8; i++) {
 		uint32_t want = 0x80000000u | (1u << 16) | 0x20u;
-		uint32_t rb_smr, rb_s2cr;
+		uint32_t rb_smr, rb_s2cr, s2cr;
 
-		(void)cb;
-		smmu[(0xc00 >> 2) + slot] = 61u;
+		/* S2CR[n] = TYPE<<16 | CBNDX.  TYPE 0 = translate through the
+		 * bank, 1 = bypass (the bank number is then ignored), 2 = fault.
+		 * 0x3d = CB61 translate is the value build 439 read back from
+		 * stream 0x20 in the one boot where the whole CE loop completed;
+		 * bypass is the variant that cannot depend on CB61's page tables
+		 * at all, which matters because XBL's bank assignment differs per
+		 * boot (USB was on bank 60 in one boot and 61 in the next). */
+		s2cr = (cb == 2) ? 0x00010000u : 61u;
+		smmu[(0xc00 >> 2) + slot] = s2cr;
 		__asm__ volatile ("dsb sy" ::: "memory");
 		smmu[(0x800 >> 2) + slot] = want;
 		__asm__ volatile ("dsb sy" ::: "memory");
 		rb_smr = smmu[(0x800 >> 2) + slot];
 		rb_s2cr = smmu[(0xc00 >> 2) + slot];
-		LOG("smmu bind: slot %u want %08x got %08x s2cr %08x (try %u)",
-		    slot, want, rb_smr, rb_s2cr, i);
+		LOG("smmu bind: mode %u slot %u want %08x got %08x s2cr %08x (try %u)",
+		    cb, slot, want, rb_smr, rb_s2cr, i);
+		LOG("smmu bind: gfsr=%08x gfsynr1=%08x",
+		    smmu[0x048 >> 2], smmu[0x054 >> 2]);
 		if (rb_smr == want) {
 			ok = 0;
 			break;
@@ -3532,6 +3540,7 @@ picasso_wlan_smmu_bind_wlan(uint32_t cb)
 	return ok;
 }
 
+static void
 picasso_wlan_ce_init(void)
 {
 	if (!g_wlan_ce_map) {
