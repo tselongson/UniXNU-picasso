@@ -274,16 +274,20 @@ picasso_wlan_smmu_table_dump(void)
 	LOG("smmu: %u valid stream-match entries", valid);
 	{
 		uint32_t id1 = smmu[0x024 >> 2];
-		uint32_t pages = ((id1 >> 28) & 0x7u) + 1u;
-		uint32_t cb_on = 0;
+		/* IDR1[31:28]+1 is the log2 of the number of pages GR0 occupies
+		 * before the context banks start, so the bank pages live at
+		 * (pages + n) * 0x1000 - not (field + 1 + n) * 0x1000, which is
+		 * what this line used to compute.  On this SMMU IDR1 reads
+		 * 0x6000003e: 62 banks, and pages = 1 << 7 = 128.  The old
+		 * formula produced 7, so every build-447 context-bank read went
+		 * to 0x69000 instead of 0x7d000 - an undecoded hole that hangs
+		 * the bus, which is why all three runs stopped there and why it
+		 * looked like a hardware fault instead of arithmetic. */
+		uint32_t pages = 1u << (((id1 >> 28) & 0x7u) + 1u);
+		uint32_t cb_on = 1;
 
-		/* Off by default: all three build-447 runs stopped dead between
-		 * the "valid stream-match entries" line and the first CB line,
-		 * i.e. on the first context-bank read.  Whether that is an
-		 * undecoded offset or a clock-gated page is itself a finding,
-		 * but it must not block the bring-up. */
 		(void)PE_parse_boot_argn("wcn3990-smmu-cb", &cb_on, sizeof(cb_on));
-		if (!cb_on) {
+		if (!cb_on || pages > 1024u) {
 			return;
 		}
 		uint32_t banks[2] = {61, 60};
@@ -296,11 +300,19 @@ picasso_wlan_smmu_table_dump(void)
 		 * wlan streams at, 60 is what the USB driver programmed. */
 		for (b = 0; b < 2; b++) {
 			uint32_t n = banks[b];
+			uint32_t base = ((pages + n) * 0x1000u) >> 2;
 
-			LOG("smmu: CB%u cbar=%08x cba2r=%08x sctlr=%08x",
+			/* SCTLR.M tells bypass (0) from translation (1); when it is
+			 * 1, TTBR0/TCR say whether a page table was installed at
+			 * all, and FSR/FAR keep the last fault the bank took.  That
+			 * is the whole question the CE bring-up hangs on: a matched
+			 * stream routed to a translating bank with no tables faults
+			 * every DMA the copy engine issues. */
+			LOG("smmu: CB%u cbar=%08x cba2r=%08x sctlr=%08x ttbr0=%08x tcr=%08x fsr=%08x far=%08x",
 			    n, smmu[(0x1000u >> 2) + n],
 			    smmu[(0x1800u >> 2) + n],
-			    smmu[((pages + n) * 0x1000u) >> 2]);
+			    smmu[base + 0x00], smmu[base + 0x20], smmu[base + 0x30],
+			    smmu[base + 0x58], smmu[base + 0x60]);
 		}
 	}
 }
@@ -3499,6 +3511,31 @@ picasso_wlan_smmu_bind_wlan(uint32_t mode)
 			return -1;
 		}
 		smmu = (volatile uint32_t *)va;
+	}
+
+	/* mode 4: turn the SMMU off for every client (sCR0.CLIENTPD, bit 0).
+	 * This is the state CoachZ runs in - its wp_power_up comment says "the
+	 * apps SMMU is disabled here (sCR0 CLIENTPD), so the device sees these
+	 * physical addresses" - and it is the fastest way to separate an SMMU
+	 * fault from a hardware refusal: if the copy engines still raise SError
+	 * with the SMMU out of the path, the SMMU was never the problem.
+	 * Risk: any master that relies on translation would break, but the two
+	 * banks this board actually uses (USB on 60) are identity/bypass, so
+	 * disabling translation should be a no-op for them. */
+	if (mode == 4) {
+		uint32_t scr0 = smmu[0];
+
+		for (i = 0; i < 8; i++) {
+			smmu[0] = scr0 | 1u;
+			__asm__ volatile ("dsb sy" ::: "memory");
+			if (smmu[0] & 1u) {
+				break;
+			}
+			IOSleep(2);
+		}
+		LOG("smmu bind: sCR0 %08x -> %08x clientpd (try %u) rc %d",
+		    scr0, smmu[0], i, (smmu[0] & 1u) ? 0 : -1);
+		return (smmu[0] & 1u) ? 0 : -1;
 	}
 
 	/* sCR0 = 0x00250406 on this board: CLIENTPD = 0 (the SMMU is on) and
