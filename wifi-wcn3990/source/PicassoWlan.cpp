@@ -148,12 +148,17 @@ extern "C" uint64_t sweet_log_position(void) { return 0; }
 /* Apps SMMU (MMU-500).  SMR: [31] VALID, [30:16] MASK (1 = ignore that ID
  * bit), [14:0] ID - the layout arm-smmu.c uses (SMR_ID_SHIFT 0,
  * SMR_MASK_SHIFT 16).  S2CR: [17:16] TYPE (0 translation, 1 bypass, 2 fault),
- * [7:0] CBNDX.  Stream 0x20 is the WLAN copy engine.
+ * [7:0] CBNDX.
+ *
+ * The copy engines are stream 0xc0 on this board: the device tree gives
+ * qcom,icnss@18800000 `iommus = <&apps_smmu 0xc0 0x1>`.  The 0x20 used below
+ * comes from an upstream sc7180 description and belongs to no master here;
+ * picasso_wlan_smmu_bind_wlan() is what actually routes the engines.
  *
  * TESTING NOTE: TYPE=1 (bypass) is not permitted on this SMMU - the store
  * reads back as TYPE=2 (fault).  v345 lost its USB console that way, and every
  * "S2CR=bypass" write in v335-v353 read back as 00020000.  Passthrough has to
- * go through a context bank whose SCTLR.M is 0 instead; bank 61 on this device
+ * go through a context bank whose SCTLR.M is 0 instead; bank 60 on this device
  * has CBAR=0, CBACR=0 and SCTLR.M=0, which is exactly what the USB console
  * driver uses for its own stream. */
 #define WLAN_SMMU_PA                0x15000000ull
@@ -3552,18 +3557,22 @@ static volatile uint8_t *g_wlan_ce_base = NULL;
 static void picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t rssi, uint16_t freq);
 
 /*
- * Bind the WLAN masters to a bypass context bank, before anything touches the
- * copy engines.  The device tree says iommus = <&apps_smmu 0x20 0x01>, so the
- * two masters are streams 0x20 and 0x21; the stream-match table XBL leaves
- * behind has no entry that covers either.  With sCR0.USFCFG set, a CE DMA
- * faults and is dropped, the CE's port waits forever for a response, and the
- * next host access to that port queues behind it and hangs - which is exactly
- * the "dies at the second CE register write" signature of builds 440-447.
+ * Route the WLAN's bus masters before anything touches the copy engines.
  *
- * It has to happen before the first CE DMA: once a transaction is stuck, even
- * an SMMU register access queues behind it (v336/v338 died on the SMR store).
- * S2CR = 61 is the value that was read back from stream 0x20 in build 439, the
- * only boot in which the whole programming loop completed.
+ * The authority on which stream they use is this device's own device tree:
+ * qcom,icnss@18800000 has `iommus = <&apps_smmu 0xc0 0x1>`, i.e. streams 0xc0
+ * and 0xc1.  Builds 430..456 all rewrote S2CR[0x20]/[0x21] instead - a pair
+ * taken from an upstream sc7180 description - which is why pointing that pair
+ * at bank 61, at bank 60, at "bypass" or at nothing produced the same death
+ * every time: no master on this board uses stream 0x20.
+ *
+ * 0xc0 is also above the 128 S2CR slots the dump used to scan, so the route
+ * XBL installs for it (SMR[4] id=0c0 -> S2CR[4]=3d in the 439/440 dumps) never
+ * showed up in a log, and build 456's "default 103 faulting slots to bank 60"
+ * could not have covered it.
+ *
+ * Must run before the first CE DMA: once a transaction is stuck, even an SMMU
+ * register access queues behind it (v336/v338 died on an SMR store).
  */
 extern "C" int
 picasso_wlan_smmu_bind_wlan(uint32_t mode)
@@ -4863,17 +4872,19 @@ picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out, uint32_t assign_level
 	uint64_t pa, r;
 	kern_return_t kr;
 
-	/* The DT gives icnss `qcom,iommu-dma-addr-pool = <0xa0000000 0x10000000>`,
-	 * i.e. the firmware and its CE are expected to DMA inside that window.
-	 * A block allocated anywhere else can still be reachable when the SMMU
-	 * bypasses the stream, but this board's stream 0x20 is translated by CB
-	 * 0x3d, so stay inside the advertised pool first and fall back only if
-	 * it is already taken. */
+	/* The DT gives icnss `qcom,iommu-dma-addr-pool = <0xa0000000 0x10000000>`.
+	 * That is an I/O address window - what the device is expected to put in
+	 * its DMA descriptors - not memory, and there is no reserved-memory node
+	 * there.  On this kernel the kmem_alloc_contig() bounds below are not
+	 * honoured anyway: every boot allocates at 0xcd..... whichever range is
+	 * asked for.  So the block is ordinary kernel memory and the address the
+	 * engines see is its physical address; whether that is reachable is
+	 * decided by the SMMU route, which is what the bind modes change. */
 	kr = kmem_alloc_contig(kernel_map, &va, (vm_size_t)size, PAGE_MASK,
 	    0xa0000000ull, 0xb0000000ull,
 	    (kma_flags_t)(KMA_DATA | KMA_ZERO | KMA_PERMANENT), VM_KERN_MEMORY_IOKIT);
 	if (kr == KERN_SUCCESS) {
-		LOG("CE dma: allocated inside the 0xa0000000 iommu-dma-addr-pool");
+		LOG("CE dma: allocated (pool-preferred request)");
 	} else {
 		LOG("CE dma: pool 0xa0000000 unavailable kr=%d, retrying unrestricted", kr);
 		kr = kmem_alloc_contig(kernel_map, &va, (vm_size_t)size, PAGE_MASK, 0, 0,

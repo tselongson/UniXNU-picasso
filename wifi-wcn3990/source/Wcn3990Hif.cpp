@@ -1175,14 +1175,25 @@ wcn3990_hif_poll(void)
 
 /* --------------------------------------------------------------------- init */
 
-/* Mask the twelve copy-engine SPIs at the GICD before any CE register is
- * touched: XBL leaves them enabled, the lines are level-high and no handler
- * exists until hif_ce_attach_irqs() runs. */
+/* Mask the WLAN's interrupt lines at the GICD before any CE register is
+ * touched: XBL leaves them enabled and the lines are level-high, while no
+ * handler exists until hif_ce_attach_irqs() runs.
+ *
+ * The numbers come from this device's device tree, not from an upstream
+ * board: qcom,icnss@18800000 lists 132, 81, 415, 416, 417, 86, 94, 96, 82,
+ * 119, 120, 87.  Builds up to 456 masked 414..425 - a contiguous run that
+ * only three of those numbers fall in - so 414 and 418..425, which belong to
+ * other masters, were being disabled on every WLAN bring-up.  Which number is
+ * CE n is not in the binding; that matters only once interrupts are used. */
+static const uint32_t hif_wlan_irq[12] = {
+	132, 81, 415, 416, 417, 86, 94, 96, 82, 119, 120, 87
+};
+
 static void
 hif_ce_mask_spis(void)
 {
 	static volatile uint32_t *gicd;
-	uint32_t ce;
+	uint32_t i;
 
 	if (gicd == NULL) {
 		vm_offset_t va = ml_io_map(0x17a00000u, 0x1000u);
@@ -1190,13 +1201,13 @@ hif_ce_mask_spis(void)
 		if (va == 0) return;
 		gicd = (volatile uint32_t *)va;
 	}
-	for (ce = 0; ce < 12; ce++) {
-		uint32_t spi = 414u + ce;
+	for (i = 0; i < 12; i++) {
+		uint32_t spi = hif_wlan_irq[i];
 
 		gicd[(0x180u >> 2) + (spi >> 5)] = 1u << (spi & 31u);
 	}
 	__asm__ volatile ("dsb sy" ::: "memory");
-	HIF_LOG("copy-engine SPIs 414..425 masked at the gicd");
+	HIF_LOG("wlan interrupt lines masked at the gicd (12 of them)");
 }
 
 /* Stage 2: program the CE ring registers but do not post any receive buffer.
