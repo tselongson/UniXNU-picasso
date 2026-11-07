@@ -1217,9 +1217,15 @@ hif_program_bases(void)
 			    hif_reg_read(ce, CE_DST_WM));
 		}
 		/* IRQF_NO_AUTOEN: keep the engine quiet until wc_start() has
-		 * attached all twelve SPI handlers. */
+		 * attached all twelve SPI handlers.  CAUTION (build 440):
+		 * READING CE_HOST_IE/CE_MISC_IE hangs the bus on this silicon -
+		 * 439 wrote 0 and survived the whole loop, 440's single
+		 * read-modify-write of MISC_IE froze the machine dead between
+		 * the CE0 ctrl1 and CE0 src base log lines.  CoachZ happily
+		 * read-modifies these on the same IP, but here treat 0x2c/0x34
+		 * as write-only. */
 		hif_reg_write(ce, CE_HOST_IE, 0);
-		hif_reg_write(ce, CE_MISC_IE, hif_reg_read(ce, CE_MISC_IE) & ~0x3e0u);
+		hif_reg_write(ce, CE_MISC_IE, 0);
 	}
 
 	g_bases_programmed = true;
@@ -1283,10 +1289,11 @@ hif_ce_irq(void *context)
 	uint32_t before;
 
 	if (ce >= 12 || !g_ce_irq_live) return;
-	hif_reg_write(ce, CE_HOST_IE, hif_reg_read(ce, CE_HOST_IE) & ~1u);
-	hif_reg_write(ce, CE_MISC_IE,
-	    hif_reg_read(ce, CE_MISC_IE) & ~0x3e0u);
-	hif_reg_write(ce, CE_HOST_IE, hif_reg_read(ce, CE_HOST_IE) & ~0x1eu);
+	/* Write-only registers (see the caution in hif_program_bases): the
+	 * only bit this driver ever sets is HOST_IE bit0, so clearing with
+	 * literal 0 is CoachZ's read-modify-write minus the lethal read. */
+	hif_reg_write(ce, CE_HOST_IE, 0);
+	hif_reg_write(ce, CE_MISC_IE, 0);
 	g_ce_irqs[ce]++;
 	before = __atomic_fetch_or(&g_ce_pending, 1u << ce, __ATOMIC_ACQ_REL);
 	if (!(before & (1u << ce))) {
@@ -1307,11 +1314,12 @@ hif_ce_irq(void *context)
 static void
 hif_ce_enable(uint32_t ce)
 {
-	uint32_t ie = hif_reg_read(ce, CE_HOST_IE);
+	uint32_t want = (hif_shape[ce].src_n || hif_ce_recv[ce]) ? 1u : 0u;
 
-	if (hif_shape[ce].src_n || hif_ce_recv[ce]) ie |= 1u;
-	else ie &= ~1u;
-	hif_reg_write(ce, CE_HOST_IE, ie & ~0x1eu);
+	/* Copy-complete on engines with a callback, watermark/error bits off.
+	 * Write-only registers (see hif_program_bases): no read-back. */
+	hif_reg_write(ce, CE_HOST_IE, want);
+	hif_reg_write(ce, CE_MISC_IE, 0);
 }
 
 /* CoachZ wc_start(): all twelve SPIs attached BEFORE the first doorbell.
