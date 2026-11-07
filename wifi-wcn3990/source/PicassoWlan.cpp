@@ -4974,6 +4974,28 @@ rmtfs_init_buf(void)
  * pages and never touch the cached alias again.
  * ------------------------------------------------------------------------- */
 static IOMemoryMap *g_wlan_ce_dma_nc_map;   /* keep the uncached alias alive */
+/* The device tree is explicit about where this device may DMA:
+ *
+ *     /soc/qcom,icnss@18800000
+ *         reg-names       = "membase", "smmu_iova_ipa"
+ *         reg             = <0x18800000 0x800000>, <0xb0000000 0x10000>
+ *         qcom,iommu-dma-addr-pool = <0xa0000000 0x10000000>
+ *         qcom,iommu-dma           = "fastmap"
+ *
+ * 0xa0000000..0xb0000000 is the WLAN's DMA window: TZ carves it out of DDR
+ * at boot and, because the pair is "fastmap", maps it block-wise rather than
+ * per buffer.  CB61 - the context bank SID 0xc0 is routed to - reads
+ * SCTLR.M = 0, i.e. it bypasses, so what the copy engine puts on the bus is
+ * a physical address.  A ring in the kernel heap (0xcd...) is therefore a
+ * physical address this master has no permission for: the transaction is
+ * aborted below the SMMU, which is exactly the observed shape (sGFSR = 0,
+ * every context bank's FSR clean), and it wedges the interconnect hard
+ * enough that the display engine starves - the grey screen.
+ *
+ * wcn3990-wlan-dmapool=<pa> places the whole copy-engine block here instead.
+ * 0xa2000000 is 32 MiB into the window, clear of the framebuffer the
+ * bootloader leaves at 0xa0000000 (0x9e3400 bytes). */
+static uint64_t g_wlan_dma_pool_pa;
 extern "C" void *
 picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out, uint32_t assign_level)
 {
@@ -4981,15 +5003,65 @@ picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out, uint32_t assign_level
 	ppnum_t page;
 	uint64_t pa, r;
 	kern_return_t kr;
+	void *nc_va = NULL;
 
-	/* The DT gives icnss `qcom,iommu-dma-addr-pool = <0xa0000000 0x10000000>`.
-	 * That is an I/O address window - what the device is expected to put in
-	 * its DMA descriptors - not memory, and there is no reserved-memory node
-	 * there.  On this kernel the kmem_alloc_contig() bounds below are not
-	 * honoured anyway: every boot allocates at 0xcd..... whichever range is
-	 * asked for.  So the block is ordinary kernel memory and the address the
-	 * engines see is its physical address; whether that is reachable is
-	 * decided by the SMMU route, which is what the bind modes change. */
+	/* Fallback only: ordinary kernel memory.  On this kernel the
+	 * kmem_alloc_contig() bounds below are not honoured - every boot lands at
+	 * 0xcd..... whichever range is asked for - and 0xcd..... is not an address
+	 * the WLAN master may use (see g_wlan_dma_pool_pa), so this path is the
+	 * known-bad baseline the pool option exists to replace. */
+	{
+		uint64_t want = 0;
+
+		/* Two spellings, because PE_parse_boot_argn's 64-bit handling is not
+		 * worth betting a boot on: an absolute address inside the window, or
+		 * a small number meaning MiB into it.  wcn3990-wlan-dmapool=32 is
+		 * 0xa2000000, past the framebuffer at the bottom of the window. */
+		if (PE_parse_boot_argn("wcn3990-wlan-dmapool", &want, sizeof(want))) {
+			if (want >= 0xa0000000ull && want < 0xb0000000ull) {
+				g_wlan_dma_pool_pa = want;
+			} else if (want > 0 && want <= 240) {
+				g_wlan_dma_pool_pa = 0xa0000000ull + want * 0x100000ull;
+			}
+			if (g_wlan_dma_pool_pa != 0 &&
+			    g_wlan_dma_pool_pa + size > 0xb0000000ull) {
+				LOG("CE dma: pool base %llx does not fit %llx",
+				    g_wlan_dma_pool_pa, size);
+				g_wlan_dma_pool_pa = 0;
+			}
+		}
+	}
+	if (g_wlan_dma_pool_pa != 0) {
+		void *pool_va;
+
+		/* Memory TZ carved for this device: it is not in XNU's usable
+		 * range, so it is reachable only through a device mapping. */
+		g_wlan_ce_dma_nc_map = map_phys(g_wlan_dma_pool_pa, size, true);
+		if (g_wlan_ce_dma_nc_map == NULL) {
+			LOG("CE dma: cannot map pool pa %llx, falling back",
+			    g_wlan_dma_pool_pa);
+		} else {
+			uint32_t readback;
+
+			pool_va = (void *)g_wlan_ce_dma_nc_map->getVirtualAddress();
+			memset(pool_va, 0, (size_t)size);
+			/* Prove the window is backed before the engines are pointed
+			 * at it: a pattern that does not survive means this test is
+			 * void, not that the window is wrong. */
+			*(volatile uint32_t *)pool_va = 0x5a5aa5a5u;
+			__asm__ volatile ("dsb sy" ::: "memory");
+			readback = *(volatile uint32_t *)pool_va;
+			LOG("CE dma: pool pa=%llx va=%p size=%llx pattern=%08x %s",
+			    g_wlan_dma_pool_pa, pool_va, size, readback,
+			    (readback == 0x5a5aa5a5u) ? "ok" : "MISMATCH");
+			memset(pool_va, 0, (size_t)size);
+			__asm__ volatile ("dsb sy" ::: "memory");
+			pa = g_wlan_dma_pool_pa;
+			if (pa_out) *pa_out = pa;
+			goto done;
+		}
+	}
+
 	kr = kmem_alloc_contig(kernel_map, &va, (vm_size_t)size, PAGE_MASK,
 	    0xa0000000ull, 0xb0000000ull,
 	    (kma_flags_t)(KMA_DATA | KMA_ZERO | KMA_PERMANENT), VM_KERN_MEMORY_IOKIT);
@@ -5025,10 +5097,11 @@ picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out, uint32_t assign_level
 		LOG("CE dma: cannot map pa %llx write-combining; HIF stays inert", pa);
 		return NULL;
 	}
-	void *nc_va = (void *)g_wlan_ce_dma_nc_map->getVirtualAddress();
+	nc_va = (void *)g_wlan_ce_dma_nc_map->getVirtualAddress();
 	memset(nc_va, 0, (size_t)size);
 	__asm__ volatile ("dsb sy" ::: "memory");
 	LOG("CE dma: uncached alias va=%p pa=%llx size=%llx", nc_va, pa, size);
+done:
 
 	if (assign_level == 0) {
 		LOG("CE dma: pa %llx size %llx NOT assigned (boot-arg)", pa, size);
