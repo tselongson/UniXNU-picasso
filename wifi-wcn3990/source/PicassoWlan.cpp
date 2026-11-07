@@ -3485,11 +3485,12 @@ static void picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t
  * only boot in which the whole programming loop completed.
  */
 extern "C" int
-picasso_wlan_smmu_bind_wlan(uint32_t cb)
+picasso_wlan_smmu_bind_wlan(uint32_t mode)
 {
 	static volatile uint32_t *smmu;
-	uint32_t slot = 0, i;
-	int ok = -1;
+	static const uint32_t streams[2] = { 0x20, 0x21 };
+	uint32_t want, s, i;
+	int ok = 0;
 
 	if (smmu == NULL) {
 		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x1000);
@@ -3499,44 +3500,42 @@ picasso_wlan_smmu_bind_wlan(uint32_t cb)
 		}
 		smmu = (volatile uint32_t *)va;
 	}
-	for (i = 8; i < 128; i++) {
-		if ((smmu[(0x800 >> 2) + i] & 0x80000000u) == 0) {
-			slot = i;
-			break;
-		}
-	}
-	if (slot == 0) {
-		LOG("smmu bind: no free stream-match slot");
-		return -1;
-	}
-	for (i = 0; i < 8; i++) {
-		uint32_t want = 0x80000000u | (1u << 16) | 0x20u;
-		uint32_t rb_smr, rb_s2cr, s2cr;
 
-		/* S2CR[n] = TYPE<<16 | CBNDX.  TYPE 0 = translate through the
-		 * bank, 1 = bypass (the bank number is then ignored), 2 = fault.
-		 * 0x3d = CB61 translate is the value build 439 read back from
-		 * stream 0x20 in the one boot where the whole CE loop completed;
-		 * bypass is the variant that cannot depend on CB61's page tables
-		 * at all, which matters because XBL's bank assignment differs per
-		 * boot (USB was on bank 60 in one boot and 61 in the next). */
-		s2cr = (cb == 2) ? 0x00010000u : 61u;
-		smmu[(0xc00 >> 2) + slot] = s2cr;
-		__asm__ volatile ("dsb sy" ::: "memory");
-		smmu[(0x800 >> 2) + slot] = want;
-		__asm__ volatile ("dsb sy" ::: "memory");
-		rb_smr = smmu[(0x800 >> 2) + slot];
-		rb_s2cr = smmu[(0xc00 >> 2) + slot];
-		LOG("smmu bind: mode %u slot %u want %08x got %08x s2cr %08x (try %u)",
-		    cb, slot, want, rb_smr, rb_s2cr, i);
-		LOG("smmu bind: gfsr=%08x gfsynr1=%08x",
-		    smmu[0x048 >> 2], smmu[0x054 >> 2]);
-		if (rb_smr == want) {
-			ok = 0;
-			break;
+	/* sCR0 = 0x00250406 on this board: CLIENTPD = 0 (the SMMU is on) and
+	 * USFCFG = 1.  USFCFG=1 means a stream with no matching SMR does NOT
+	 * fault - it takes S2CR[StreamID] instead.  The stream-match table has
+	 * no entry for 0x20/0x21, so S2CR[0x20] is the register that actually
+	 * decides what the copy engines' DMA does.  (Writing S2CR at an SMR
+	 * slot index, as the first version of this did, changes nothing.) */
+	want = (mode == 2) ? 0x00010000u       /* TYPE=1: bypass, bank ignored */
+	    : 0x3du;                           /* TYPE=0: translate via CB61   */
+
+	for (s = 0; s < 2; s++) {
+		uint32_t st = streams[s];
+		uint32_t before = smmu[(0xc00 >> 2) + st];
+		uint32_t rb = 0;
+
+		for (i = 0; i < 8; i++) {
+			smmu[(0xc00 >> 2) + st] = want;
+			__asm__ volatile ("dsb sy" ::: "memory");
+			rb = smmu[(0xc00 >> 2) + st];
+			if (rb == want) {
+				break;
+			}
+			IOSleep(2);
 		}
-		IOSleep(2);
+		LOG("smmu bind: stream %02x s2cr %08x -> %08x readback %08x (try %u)",
+		    st, before, want, rb, i);
+		if (rb != want) {
+			ok = -1;
+		}
 	}
+
+	/* FSYNR1 keeps the stream id of the last faulting transaction, and GFSR
+	 * says whether anything faulted at all.  If the CE DMA has been failing
+	 * since the firmware came up, this names it instead of guessing. */
+	LOG("smmu bind: gfsr=%08x gfsynr0=%08x gfsynr1=%08x mode %u rc %d",
+	    smmu[0x048 >> 2], smmu[0x050 >> 2], smmu[0x054 >> 2], mode, ok);
 	return ok;
 }
 
@@ -3559,8 +3558,11 @@ picasso_wlan_ce_init(void)
 		(void)PE_parse_boot_argn("wcn3990-wlan-smrubind", &bind,
 		    sizeof(bind));
 		if (bind) {
+			/* 1 = S2CR[0x20/0x21] translate through CB61 (the value
+			 * build 439 read back), 2 = bypass.  Whatever the readback
+			 * says is printed either way. */
 			LOG("smmu bind: rc %d",
-			    picasso_wlan_smmu_bind_wlan(WLAN_SMMU_PASSTHRU_BANK));
+			    picasso_wlan_smmu_bind_wlan(bind));
 		}
 	}
 	wcn3990_hif_set_frame_sink(picasso_parse_beacon_frame);
