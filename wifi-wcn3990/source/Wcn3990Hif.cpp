@@ -1147,15 +1147,9 @@ wcn3990_hif_poll(void)
 
 /* --------------------------------------------------------------------- init */
 
-/* Stage 2: program the CE ring registers but do not post any receive buffer.
- * ce.c: ath10k_ce_set_dest_ring_base_addr_hi() preserves the non-address bits
- * of dr_base_addr_hi, so use a read-modify-write with CE_DESC_ADDR_HI_MASK.
- *
- * Every one of the 12 copy engines is programmed here, mirroring
- * ath10k_snoc_init_pipes(): the target starts using whichever pipe it pleases
- * the moment it boots, and a reset ring base of 0 makes the CE dma firmware
- * data to garbage addresses under the bypass - which is what killed every
- * build up to 430 within 10 ms of the CE2 doorbell. */
+/* Mask the twelve copy-engine SPIs at the GICD before any CE register is
+ * touched: XBL leaves them enabled, the lines are level-high and no handler
+ * exists until hif_ce_attach_irqs() runs. */
 static void
 hif_ce_mask_spis(void)
 {
@@ -1177,6 +1171,15 @@ hif_ce_mask_spis(void)
 	HIF_LOG("copy-engine SPIs 414..425 masked at the gicd");
 }
 
+/* Stage 2: program the CE ring registers but do not post any receive buffer.
+ * ce.c: ath10k_ce_set_dest_ring_base_addr_hi() preserves the non-address bits
+ * of dr_base_addr_hi, so use a read-modify-write with CE_DESC_ADDR_HI_MASK.
+ *
+ * Every one of the 12 copy engines is programmed here, mirroring
+ * ath10k_snoc_init_pipes(): the target starts using whichever pipe it pleases
+ * the moment it boots, and a reset ring base of 0 makes the CE dma firmware
+ * data to garbage addresses under the bypass - which is what killed every
+ * build up to 430 within 10 ms of the CE2 doorbell. */
 static void
 hif_program_bases(void)
 {
