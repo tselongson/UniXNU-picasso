@@ -4368,6 +4368,41 @@ picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out, uint32_t assign_level
 	uint64_t pa, r;
 	kern_return_t kr;
 
+	/* wcn3990-wlan-dmapool=<MiB into the window>: take the copy-engine block
+	 * straight out of 0xa0000000..0xb0000000, the range the icnss node
+	 * reserves for this device (qcom,iommu-dma-addr-pool, fastmap).  This
+	 * kernel is the one that reaches the doorbell, so this is the only way
+	 * to ask the question where it matters: does the engine accept a ring
+	 * inside its own window where it never accepted one in the heap. */
+	{
+		uint64_t want = 0;
+
+		if (PE_parse_boot_argn("wcn3990-wlan-dmapool", &want, sizeof(want)) &&
+		    want > 0 && want <= 240) {
+			uint64_t base = 0xa0000000ull + want * 0x100000ull;
+			IOMemoryMap *pm = map_phys(base, size, true);
+
+			if (pm == NULL) {
+				LOG("CE dma: pool pa %llx cannot be mapped", base);
+			} else {
+				void *pva = (void *)pm->getVirtualAddress();
+				uint32_t rb;
+
+				memset(pva, 0, (size_t)size);
+				*(volatile uint32_t *)pva = 0x5a5aa5a5u;
+				__asm__ volatile ("dsb sy" ::: "memory");
+				rb = *(volatile uint32_t *)pva;
+				LOG("CE dma: pool pa=%llx va=%p size=%llx pattern=%08x %s",
+				    base, pva, size, rb,
+				    (rb == 0x5a5aa5a5u) ? "ok" : "MISMATCH");
+				memset(pva, 0, (size_t)size);
+				__asm__ volatile ("dsb sy" ::: "memory");
+				if (pa_out) *pa_out = base;
+				return pva;
+			}
+		}
+	}
+
 	/* The DT gives icnss `qcom,iommu-dma-addr-pool = <0xa0000000 0x10000000>`,
 	 * i.e. the firmware and its CE are expected to DMA inside that window.
 	 * A block allocated anywhere else can still be reachable when the SMMU
