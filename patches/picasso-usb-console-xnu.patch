@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3235 @@
+@@ -0,0 +1,3261 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -3237,6 +3237,32 @@ new file mode 100644
 +			return;
 +		}
 +	}
++		/* The WLAN copy engines are stream 0xc0, mask 1: the device tree
++		 * gives icnss iommus = <&apps_smmu 0xc0 0x1>.  XBL leaves that
++		 * stream unmatched on most boots, and a stream-match store made
++		 * later - from the wlan thread, or from the SEC phase - reads
++		 * back 0, so this early window is the only place the bind can be
++		 * made.  Route it to the identity bank USB just proved usable: a
++		 * copy-engine DMA through it then needs no page tables at all. */
++		{
++			uint32_t slot = plan.slot + 1;
++			uint32_t wsmr = 0x80000000u | (1u << 16) | 0x00c0u;
++
++			while (slot < 128 &&
++			    (usb_rd(smmu, 0x800u + 4u * slot) & 0x80000000u)) {
++				slot++;
++			}
++			if (slot < 128) {
++				picasso_usb_smmu_write(smmu, 0xc00u + 4u * slot,
++				    plan.bank);
++				picasso_usb_smmu_write(smmu, 0x800u + 4u * slot, wsmr);
++				printf("PICASSO USB: wlan stream c0 slot=%u smr=%08x s2cr=%08x bank=%u\n",
++				    slot, usb_rd(smmu, 0x800u + 4u * slot),
++				    usb_rd(smmu, 0xc00u + 4u * slot), plan.bank);
++			} else {
++				printf("PICASSO USB: no free slot for the wlan stream\n");
++			}
++		}
 +	ud.smmu_guard = picasso_usb_smmu_guard(smmu, 0, 0);
 +	if (!ud.smmu_guard) {
 +		printf("PICASSO USB: SID e0 guard refused; controller untouched\n");
