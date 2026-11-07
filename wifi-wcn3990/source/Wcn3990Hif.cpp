@@ -337,6 +337,7 @@ hif_pa_of(const void *p)
 extern "C" void *picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out,
     uint32_t assign_level);
 extern "C" void picasso_wlan_smmu_fault_read(uint32_t * out);
+extern "C" void picasso_wlan_smmu_table_dump(void);
 extern "C" int picasso_wlan_smmu_s2cr_set(uint32_t index, uint32_t value,
     uint32_t * readback);
 
@@ -1153,6 +1154,11 @@ hif_program_bases(void)
 {
 	uint64_t rri_pa;
 	uint32_t ce;
+
+	/* First line of stage 2, before any CE register is written: what did
+	 * the SEC firmware's stream pre-bind actually leave in the SMMU?
+	 * Builds 440-443 died inside this very loop with this state unknown. */
+	picasso_wlan_smmu_table_dump();
 
 	/* Must precede the CTRL1 writes: bit 19 tells the CE to publish read
 	 * indices into this array, so a stale/zero address would send a DMA to

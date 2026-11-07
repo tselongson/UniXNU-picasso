@@ -229,12 +229,47 @@ picasso_wlan_smmu_fault_read(uint32_t * out)
 	out[7] = (cb61_off != 0xffffffffu) ? smmu[cb61_off >> 2] : 0xffffffffu;
 }
 
+/* The whole stream-match table in a handful of lines, printed BEFORE the
+ * copy engines touch anything: this is the ground truth of what the SEC
+ * firmware's ArmSmmuAddBypassStream pre-bind left behind (which slot, which
+ * id/mask, routed to which bank) versus what the CE masters need.  440-443
+ * all died between the CE0 ctrl1 and CE0 src-base writes with this state
+ * unknown; the DT gives icnss iommus = <&apps_smmu 0x20 0x01>. */
+extern "C" void
+picasso_wlan_smmu_table_dump(void)
+{
+	static volatile uint32_t *smmu;
+	uint32_t id2, num_s2cr, i, valid = 0;
+
+	if (smmu == NULL) {
+		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x1000);
+
+		if (va == 0) return;
+		smmu = (volatile uint32_t *)va;
+	}
+	id2 = smmu[0x028 >> 2];
+	num_s2cr = (id2 >> 16) & 0x3ffu;
+	if (num_s2cr == 0 || num_s2cr > 128) num_s2cr = 128;
+	LOG("smmu: sCR0=%08x IDR0=%08x IDR2=%08x numS2CR=%u",
+	    smmu[0], smmu[0x020 >> 2], id2, num_s2cr);
+	for (i = 0; i < num_s2cr; i++) {
+		uint32_t smr = smmu[(0x800 >> 2) + i];
+
+		if (smr & 0x80000000u) {
+			LOG("smmu: SMR[%u]=%08x (id=%03x mask=%03x) S2CR=%08x",
+			    i, smr, smr & 0xffffu, (smr >> 16) & 0x7fffu,
+			    smmu[(0xc00 >> 2) + i]);
+			valid++;
+		}
+	}
+	LOG("smmu: %u valid stream-match entries", valid);
+}
+
 /* Write one S2CR and return the readback: the only register family this SMMU
  * still accepts (v361-v363).  Used for the SMMUv2 direct-index fallback, where
  * an unmatched stream takes S2CR[StreamID] when sCR0.USFCFG is clear. */
 extern "C" int
-picasso_wlan_smmu_s2cr_set(uint32_t index, uint32_t value, uint32_t * readback)
-{
+picasso_wlan_smmu_s2cr_set(uint32_t index, uint32_t value, uint32_t * readback){
 	static volatile uint32_t *smmu;
 
 	if (smmu == NULL) {
