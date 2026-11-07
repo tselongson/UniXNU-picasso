@@ -211,7 +211,6 @@ offline_disabled_jobs = [
   "com.apple.wifi.wapic",
   "com.apple.wifiFirmwareLoader",
   "com.apple.wifianalyticsd",
-  "com.apple.wifid",
   "com.apple.wifip2pd",
   "com.apple.wifivelocityd",
 ]
