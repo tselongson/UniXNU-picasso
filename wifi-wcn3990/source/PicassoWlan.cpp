@@ -239,7 +239,7 @@ picasso_wlan_smmu_fault_read(uint32_t * out)
  * USB runs on, 61 = the translating bank).  The panic report below may only
  * read registers, so it reuses these instead of mapping anything itself. */
 static volatile uint32_t *g_wlan_smmu_regs;
-static uint32_t g_wlan_cb_fsr_off[2] = { 0xffffffffu, 0xffffffffu };
+static uint32_t g_wlan_cb_fsr_off[3] = { 0xffffffffu, 0xffffffffu, 0xffffffffu };
 
 static int
 pp_str(char *out, const char *s, int len)
@@ -297,7 +297,22 @@ picasso_wlan_panic_report(void)
 	} else {
 		n += pp_str(text + n, "smmu never mapped ", 18);
 	}
-	n += pp_str(text + n, "elr=", 4);
+	{
+		int b;
+
+		for (b = 0; b < 3; b++) {
+			static const char tag[3][6] = { " cb0=", " cb60=", "cb61=" };
+			uint32_t fsr = 0xffffffffu;
+
+			if (g_wlan_smmu_regs != NULL &&
+			    g_wlan_cb_fsr_off[b] != 0xffffffffu) {
+				fsr = g_wlan_smmu_regs[g_wlan_cb_fsr_off[b] >> 2];
+			}
+			n += pp_str(text + n, tag[b], 5);
+			n += pp_hex(text + n, fsr, 8);
+		}
+	}
+	n += pp_str(text + n, " elr=", 5);
 	n += pp_hex(text + n, elr, 16);
 	n += pp_str(text + n, "\n", 1);
 	picasso_usb_panic_write(text, n);
@@ -364,7 +379,7 @@ picasso_wlan_smmu_table_dump(void)
 		if (!cb_on || pages > 1024u) {
 			return;
 		}
-		uint32_t banks[2] = {61, 60};
+		uint32_t banks[3] = {61, 60, 0};
 		uint32_t b;
 
 		/* GR0 has the per-bank CBAR/CBA2R array; SCTLR lives in the
@@ -372,7 +387,7 @@ picasso_wlan_smmu_table_dump(void)
 		 * never programmed still faults, so print both banks the
 		 * bring-up cares about: 61 is what the SEC bind points the
 		 * wlan streams at, 60 is what the USB driver programmed. */
-		for (b = 0; b < 2; b++) {
+		for (b = 0; b < 3; b++) {
 			uint32_t n = banks[b];
 			uint32_t base = ((pages + n) * 0x1000u) >> 2;
 
@@ -3595,8 +3610,9 @@ picasso_wlan_smmu_bind_wlan(uint32_t mode)
 			uint32_t pages = 1u << (((smmu[0x024 >> 2] >> 28) & 0x7u) + 1u);
 
 			if (pages <= 1024u) {
-				g_wlan_cb_fsr_off[0] = (pages + 60u) * 0x1000u + 0x58u;
-				g_wlan_cb_fsr_off[1] = (pages + 61u) * 0x1000u + 0x58u;
+				g_wlan_cb_fsr_off[0] = (pages + 0u) * 0x1000u + 0x58u;
+				g_wlan_cb_fsr_off[1] = (pages + 60u) * 0x1000u + 0x58u;
+				g_wlan_cb_fsr_off[2] = (pages + 61u) * 0x1000u + 0x58u;
 			}
 		}
 	}
@@ -3640,8 +3656,34 @@ picasso_wlan_smmu_bind_wlan(uint32_t mode)
 	 *   mode 9: an explicit SMR entry for 0xc0/mask 1 -> bank 60, the path
 	 *           XBL uses; if the SMR store does not land, 7 is the answer.
 	 */
-	if (mode >= 7 && mode <= 9) {
+	if (mode >= 7 && mode <= 10) {
 		uint32_t rb = 0, before;
+
+		/* mode 10: the CE's stream 0xc0 has no stream-match entry on this
+		 * boot and S2CR[0xc0] is outside the implemented table, so the
+		 * SMMU falls back on whatever that slot reads - zero, i.e. bank 0,
+		 * a translating bank.  If the panic report shows bank 0's FSR
+		 * carrying the fault, the only lever left is to make bank 0 an
+		 * identity bank the way bank 60 already is.  Opt-in: SIDs
+		 * 0x040..0x04f and 0x080..0x08f also route through bank 0 and
+		 * belong to somebody else. */
+		if (mode == 10) {
+			uint32_t base = (g_wlan_cb_fsr_off[0] != 0xffffffffu) ?
+			    g_wlan_cb_fsr_off[0] - 0x58u : 0xffffffffu;
+
+			if (base == 0xffffffffu) {
+				LOG("smmu bind: cb0 page unknown, mode 10 skipped");
+				return -1;
+			}
+			before = smmu[base >> 2];
+			smmu[base >> 2] = 0;
+			__asm__ volatile ("dsb sy" ::: "memory");
+			rb = smmu[base >> 2];
+			LOG("smmu bind: CB0 sctlr %08x -> %08x (want 00000000)",
+			    before, rb);
+			ok = (rb == 0) ? 0 : -1;
+			goto tlb;
+		}
 
 		if (mode == 7) {
 			/* XBL binds 0xc0 through a stream-match entry when it binds
