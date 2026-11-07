@@ -229,6 +229,104 @@ picasso_wlan_smmu_fault_read(uint32_t * out)
 	out[7] = (cb61_off != 0xffffffffu) ? smmu[cb61_off >> 2] : 0xffffffffu;
 }
 
+/* Set by picasso_wlan_smmu_bind_wlan() once the SMMU is mapped, plus the two
+ * context-bank page offsets this driver cares about (60 = the identity bank
+ * USB runs on, 61 = the translating bank).  The panic report below may only
+ * read registers, so it reuses these instead of mapping anything itself. */
+static volatile uint32_t *g_wlan_smmu_regs;
+static uint32_t g_wlan_cb_fsr_off[2] = { 0xffffffffu, 0xffffffffu };
+
+static int
+pp_str(char *out, const char *s, int len)
+{
+	int i;
+
+	for (i = 0; i < len; i++) {
+		out[i] = s[i];
+	}
+	return len;
+}
+
+static int
+pp_hex(char *out, uint64_t v, int digits)
+{
+	int i, n = 0;
+
+	for (i = digits - 1; i >= 0; i--) {
+		uint32_t d = (uint32_t)((v >> (4 * i)) & 0xfu);
+
+		out[n++] = (char)(d < 10 ? '0' + d : 'a' + (d - 10));
+	}
+	return n;
+}
+
+/* Called from the panic banner in osfmk/kern/debug.c.  An SError on this SoC
+ * is either an SMMU refusal or a NoC error, and the two are indistinguishable
+ * from the console: the SMMU's own fault record is the only thing that says
+ * which.  sGFSR != 0 means the SMMU rejected the transfer and sGFSYNR1 then
+ * names the stream id that tried it; sGFSR == 0 with a dead copy engine means
+ * the transaction never reached the SMMU at all. */
+extern "C" void
+picasso_wlan_panic_report(void)
+{
+	extern void picasso_usb_panic_write(const char *, int);
+	char text[200];
+	int n = 0;
+	uint64_t elr = 0, spsr = 0, esr = 0;
+
+	__asm__ volatile ("mrs %0, ELR_EL1" : "=r"(elr));
+	__asm__ volatile ("mrs %0, SPSR_EL1" : "=r"(spsr));
+	__asm__ volatile ("mrs %0, ESR_EL1" : "=r"(esr));
+
+	n += pp_str(text + n, "[wlan] elr=", 12);
+	n += pp_hex(text + n, elr, 16);
+	n += pp_str(text + n, " spsr=", 6);
+	n += pp_hex(text + n, spsr, 8);
+	n += pp_str(text + n, " esr=", 5);
+	n += pp_hex(text + n, esr, 16);
+	n += pp_str(text + n, "\n", 1);
+	picasso_usb_panic_write(text, n);
+
+	if (g_wlan_smmu_regs == NULL) {
+		static const char none[] = "[wlan] smmu never mapped\n";
+
+		picasso_usb_panic_write(none, (int)sizeof(none) - 1);
+		return;
+	}
+
+	n = 0;
+	n += pp_str(text + n, "[wlan] cr0=", 11);
+	n += pp_hex(text + n, g_wlan_smmu_regs[0x000 >> 2], 8);
+	n += pp_str(text + n, " acr=", 5);
+	n += pp_hex(text + n, g_wlan_smmu_regs[0x010 >> 2], 8);
+	n += pp_str(text + n, " gfsr=", 6);
+	n += pp_hex(text + n, g_wlan_smmu_regs[0x048 >> 2], 8);
+	n += pp_str(text + n, " fsynr0=", 8);
+	n += pp_hex(text + n, g_wlan_smmu_regs[0x050 >> 2], 8);
+	n += pp_str(text + n, " fsynr1=", 8);
+	n += pp_hex(text + n, g_wlan_smmu_regs[0x054 >> 2], 8);
+	n += pp_str(text + n, " fsynr2=", 8);
+	n += pp_hex(text + n, g_wlan_smmu_regs[0x058 >> 2], 8);
+	n += pp_str(text + n, "\n", 1);
+	picasso_usb_panic_write(text, n);
+
+	n = 0;
+	n += pp_str(text + n, "[wlan] cb60 fsr=", 16);
+	n += pp_hex(text + n, g_wlan_cb_fsr_off[0] == 0xffffffffu ? 0xffffffffu :
+	    g_wlan_smmu_regs[g_wlan_cb_fsr_off[0] >> 2], 8);
+	n += pp_str(text + n, " far=", 5);
+	n += pp_hex(text + n, g_wlan_cb_fsr_off[0] == 0xffffffffu ? 0xffffffffu :
+	    g_wlan_smmu_regs[(g_wlan_cb_fsr_off[0] + 8u) >> 2], 8);
+	n += pp_str(text + n, " cb61 fsr=", 10);
+	n += pp_hex(text + n, g_wlan_cb_fsr_off[1] == 0xffffffffu ? 0xffffffffu :
+	    g_wlan_smmu_regs[g_wlan_cb_fsr_off[1] >> 2], 8);
+	n += pp_str(text + n, " far=", 5);
+	n += pp_hex(text + n, g_wlan_cb_fsr_off[1] == 0xffffffffu ? 0xffffffffu :
+	    g_wlan_smmu_regs[(g_wlan_cb_fsr_off[1] + 8u) >> 2], 8);
+	n += pp_str(text + n, "\n", 1);
+	picasso_usb_panic_write(text, n);
+}
+
 /* The whole stream-match table in a handful of lines, printed BEFORE the
  * copy engines touch anything: this is the ground truth of what the SEC
  * firmware's ArmSmmuAddBypassStream pre-bind left behind (which slot, which
@@ -3505,13 +3603,24 @@ picasso_wlan_smmu_bind_wlan(uint32_t mode)
 	int ok = 0;
 
 	if (smmu == NULL) {
-		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x1000);
+		/* 1 MiB: the context-bank pages sit at (pages + n) * 0x1000,
+		 * far above GR0, and the panic report reads bank FSR/FAR. */
+		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x100000u);
 
 		if (va == 0) {
 			return -1;
 		}
 		smmu = (volatile uint32_t *)va;
+		{
+			uint32_t pages = 1u << (((smmu[0x024 >> 2] >> 28) & 0x7u) + 1u);
+
+			if (pages <= 1024u) {
+				g_wlan_cb_fsr_off[0] = (pages + 60u) * 0x1000u + 0x58u;
+				g_wlan_cb_fsr_off[1] = (pages + 61u) * 0x1000u + 0x58u;
+			}
+		}
 	}
+	g_wlan_smmu_regs = smmu;
 
 	/* mode 4: turn the SMMU off for every client (sCR0.CLIENTPD, bit 0).
 	 * This is the state CoachZ runs in - its wp_power_up comment says "the
@@ -3536,6 +3645,40 @@ picasso_wlan_smmu_bind_wlan(uint32_t mode)
 		LOG("smmu bind: sCR0 %08x -> %08x clientpd (try %u) rc %d",
 		    scr0, smmu[0], i, (smmu[0] & 1u) ? 0 : -1);
 		return (smmu[0] & 1u) ? 0 : -1;
+	}
+
+	/* mode 5: every S2CR slot whose SMR is not valid gets 0x3c.  With USFCFG=1
+	 * those slots are exactly what an unmatched stream id indexes, so this
+	 * makes every unknown master identity-mapped through bank 60.
+	 * mode 6: the surgical version - only slots whose TYPE is FAULT (2) are
+	 * defaulted.  Everything that already works (USB on 0x60 -> 0x3c, the
+	 * modem's bypass entries) keeps its route.  If the copy engines still
+	 * take an SError with every faulting slot defaulted, then no stream id
+	 * could have been the reason and the SMMU is out of the picture. */
+	if (mode == 5 || mode == 6) {
+		uint32_t changed = 0;
+
+		for (i = 0; i < 128; i++) {
+			uint32_t smr = smmu[(0x800 >> 2) + i];
+			uint32_t s2 = smmu[(0xc00 >> 2) + i];
+			uint32_t type = (s2 >> 16) & 3u;
+			bool want_it;
+
+			if (mode == 5) {
+				want_it = (smr & 0x80000000u) == 0;
+			} else {
+				want_it = (type == 2u);
+			}
+			if (!want_it || s2 == 0x3cu) {
+				continue;
+			}
+			smmu[(0xc00 >> 2) + i] = 0x3cu;
+			changed++;
+		}
+		__asm__ volatile ("dsb sy" ::: "memory");
+		LOG("smmu bind: mode %u defaulted %u slot(s) to bank 60", mode, changed);
+		ok = 0;
+		goto tlb;
 	}
 
 	/* sCR0 = 0x00250406 on this board: CLIENTPD = 0 (the SMMU is on) and
@@ -3590,20 +3733,24 @@ picasso_wlan_smmu_bind_wlan(uint32_t mode)
 	 * TLB is invalidated - the cached entry keeps saying whatever it said
 	 * before, which here was TYPE=2 (fault).  Without this the write above
 	 * reads back correctly and changes nothing, which is exactly what the
-	 * first run of this build showed.  TLBIALLNSNH drops every non-secure
-	 * entry, then sTLBGSYNC/sTLBGSTATUS wait for the walk to finish. */
+	 * first run of this build showed.  TLBIALLNSNH (0x68) drops every
+	 * non-secure entry, sTLBGSYNC (0x70) starts the walk and sTLBGSTATUS
+	 * (0x74) bit0 says when it is done.  Build 455 polled 0x50/0x58, which
+	 * are sGFSYNR0/2 - status registers - so "tlbgstatus=0 after 0 us" was
+	 * reading a constant and never waited for anything. */
+tlb:
 	smmu[0x068 >> 2] = 0;
 	__asm__ volatile ("dsb sy" ::: "memory");
-	smmu[0x050 >> 2] = 0;
+	smmu[0x070 >> 2] = 0;
 	__asm__ volatile ("dsb sy" ::: "memory");
 	for (i = 0; i < 1000; i++) {
-		if ((smmu[0x058 >> 2] & 1u) == 0) {
+		if ((smmu[0x074 >> 2] & 1u) == 0) {
 			break;
 		}
 		IODelay(1);
 	}
 	LOG("smmu bind: tlb invalidated, tlbgstatus=%08x after %u us",
-	    smmu[0x058 >> 2], i);
+	    smmu[0x074 >> 2], i);
 
 	/* FSYNR1 keeps the stream id of the last faulting transaction, and GFSR
 	 * says whether anything faulted at all.  If the CE DMA has been failing

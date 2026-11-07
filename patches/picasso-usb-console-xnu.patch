@@ -3341,7 +3341,7 @@ diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
 index e9daeed833924a653c2243f46615527a3e9b4195..1d670170759e04d18f6d57f3f78d6e420ade0812 100644
 --- a/osfmk/kern/debug.c
 +++ b/osfmk/kern/debug.c
-@@ -1132,6 +1132,53 @@ void
+@@ -1132,6 +1132,61 @@ void
  panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsigned int reason, void *ctx,
      uint64_t panic_options_mask, void *panic_data_ptr, unsigned long panic_caller)
  {
@@ -3391,11 +3391,19 @@ index e9daeed833924a653c2243f46615527a3e9b4195..1d670170759e04d18f6d57f3f78d6e42
 +			picasso_usb_panic_write(fmt, m);
 +			picasso_usb_panic_write("\r\n", 2);
 +		}
++		/* The copy engines' first DMA fails as either an SMMU refusal
++		 * or a NoC error and the console cannot tell them apart: the
++		 * SMMU's own fault record can. */
++		{
++			extern void picasso_wlan_panic_report(void);
++
++			picasso_wlan_panic_report();
++		}
 +	}
  #pragma clang diagnostic pop
  
  #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
-@@ -1239,6 +1286,12 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+@@ -1239,6 +1294,12 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
  void
  panic_spin_forever(void)
  {
