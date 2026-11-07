@@ -1051,7 +1051,11 @@ hif_handle_rx(const uint8_t *buf, uint32_t nbytes)
 	} else if (eid == g_wmi_eid) {
 		hif_handle_wmi(buf + HTC_HDR_BYTES, payload_len);
 	} else {
-		HIF_LOG("rx: unhandled eid %u (%u bytes)", eid, nbytes);
+		/* HTT and friends: no parser in this bring-up.  Gate the log -
+		 * once data flows this endpoint fires per frame. */
+		if (g_rx_packets < 64) {
+			HIF_LOG("rx: unhandled eid %u (%u bytes)", eid, nbytes);
+		}
 	}
 }
 
@@ -1378,13 +1382,12 @@ hif_ce_service(uint32_t ce)
 		idx = g_dst_sw[ce] & mask;
 		g_dst_sw[ce] = (g_dst_sw[ce] + 1u) & mask;
 		if (nbytes > sh->buf_sz) continue;
-		if (ce == 2) {
-			if (g_rx_packets < 16) hif_bb(BB_RX, idx, nbytes);
-			hif_handle_rx(s_rx2[idx], nbytes);
-		}
-		/* Other receive pipes carry HTT/HTC traffic this bring-up has
-		 * no parser for.  CoachZ hands every pipe to wh_rx(); draining
-		 * and reposting is what keeps those rings from wedging the CE. */
+		/* CoachZ hands EVERY receive pipe to wh_rx() and dispatches on
+		 * the HTC endpoint id inside the header: HTC control (READY,
+		 * CONNECT_SERVICE_RESP) arrives on CE1, WMI events on CE2.
+		 * Parsing only CE2 stalled the handshake before it started. */
+		if (g_rx_packets < 16) hif_bb(BB_RX, (ce << 8) | idx, nbytes);
+		hif_handle_rx(g_buf_va[ce] + (uint64_t)idx * sh->buf_sz, nbytes);
 	}
 	hif_ce_post_ring(ce);
 }
