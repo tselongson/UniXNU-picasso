@@ -40,6 +40,49 @@ were wrong for this board:
 | copy-engine stream id | `0x20` / `0x21` | **`0xc0` / `0xc1`** |
 | CE interrupt lines | `414..425` | **132, 81, 415, 416, 417, 86, 94, 96, 82, 119, 120, 87** |
 
+## 1b. The window the device tree reserves for DMA (added 11-08)
+
+The icnss node does not only name a DMA *pool*, it names a *window*, and the
+two register names spell out what it is for:
+
+```
+reg-names                  = "membase", "smmu_iova_ipa"
+reg                        = <0x18800000 0x800000>, <0xb0000000 0x10000>
+qcom,iommu-dma-addr-pool   = <0xa0000000 0x10000000>
+qcom,iommu-dma             = "fastmap"
+qcom,iommu-faults          = "stall-disable", "HUPCF", "non-fatal"
+```
+
+* `0xa0000000..0xb0000000` is 256 MiB carved out of DDR for this device.  The
+  second register window, `smmu_iova_ipa`, sits at the *top* of that range -
+  it is the IPA/2nd-stage doorbell, not memory.
+* `fastmap` means the whole range is mapped block-wise once, at boot, instead
+  of per buffer.  Nothing in the host maps it per transfer.
+* CB61 - the bank SID `0xc0` is routed to - reads `SCTLR.M = 0`: it *bypasses*.
+  So what the copy engine puts on the bus is a **physical address**, not an
+  IOVA.
+
+And our ring block has always been at `0xcd.....`, i.e. outside that window.
+That is an address the WLAN master has no permission for, refused *below* the
+SMMU - which is precisely the observed shape (`sGFSR = 0`, every context bank's
+FSR clean) and it wedges the interconnect hard enough for the display engine to
+starve, which is the grey screen.
+
+Upstream corroborates both halves:
+
+* mainline ath10k WCN3990 CE faults read
+  `Unhandled context fault: fsr=0x402, iova=0x7fdfd8ac0, fsynr=0x500003,
+  cbfrsynra=0xc1, cb=6` - engines fed **IOVAs** through a context bank, and
+  `0xc1` is the CE3 stream, so `0xc0/0xc1` really are the copy engines.
+* the DMA-mask patch for this chip states the wiring outright: the target is
+  37-bit but addressable to 35 bits, **bit 36 selects SMMU translation**, bit
+  37 is the firmware's internal SRAM.  Every address we hand it must stay
+  below 32 GiB, which `0xa...` and `0xcd...` both do.
+
+`wcn3990-wlan-dmapool=<MiB | pa>` now maps the whole CE block out of that
+window and prints a write/read pattern first, so an unbacked window is
+reported as such instead of being mistaken for a fix.
+
 ## 2. Why "touch the copy engines and the SoC dies"
 
 The failure surface is always the same: the first *write* to a CE register
@@ -71,6 +114,34 @@ What is established:
    one USB already DMAs through; bank 61 is what XBL binds the WLAN streams to
    when it binds them (`SMR[4] id = 0c0 -> S2CR = 3d`).
 
+## 2b. The 437/438/439/440 control that retires the SMMU line
+
+Four consecutive builds, same board, same boot arguments, same SMMU table:
+
+| log | ring pa | engines programmed | result |
+|---|---|---|---|
+| 437-wifi1 | cdce4000 | 12/12 | all bases, 9 posts |
+| 438-wifi1 | cde64000 | 0 | dies before the first base |
+| 439-coherent | cdbe4000 | 12/12 | all bases, 63 posts, no panic |
+| 440-ceirq | cdcc4000 | 0 | dies before the first base |
+| r439 (439 *image*, re-run) | cdcc4000 | 12/12 | all bases, 9 posts |
+
+Every one of them, before a single register is written:
+
+```
+wlan smmu: SMR[0] id=040 mask=00f s2cr=00000000
+wlan smmu: SMR[4] id=0c0 mask=001 s2cr=0000003d type=0 cb=61   <- the WLAN stream
+wlan smmu: SMR[7] id=0e0 mask=000 s2cr=0000003c type=0 cb=60   <- the USB console
+```
+
+So: the SMMU table is **identical** in the runs that survive the loop and the
+runs that do not, the boot arguments are identical, and the ring's physical
+address is not the variable either - the same 439 image completed the loop at
+`cdbe4000` and again at `cdcc4000`, while a current image died at `cdcc4000`.
+Every "bind the stream to bank 60/61/bypass" experiment, and the whole 0xc0
+saga, was therefore chasing something that is not the trigger.  What those
+runs differ in is only how far the code got before the first DMA was attempted.
+
 ## 3. Hypotheses that are now falsified
 
 | hypothesis | experiment | result |
@@ -82,6 +153,8 @@ What is established:
 | any stream below 128 is the culprit | mode 6: 103 faulting slots defaulted to bank 60 | still dies - the engines are simply not in 0..127 |
 | a wrong CE register offset (RRI wrapper) | compare against CoachZ `hw.c` (`0x24C004`) | matches; the readback holds the address we wrote |
 | `0xc0` can be routed from the non-secure side | mode 7 writes every matching SMR's S2CR *and* `S2CR[0xc0]` | neither lands: no SMR matches `0xc0`, `S2CR[0xc0]` reads `00000000` before and after 8 attempts (index 192 is outside the implemented table) |
+| the CTRL1 store (bit 19, RRI update) is what dies | `wcn3990-hif-ctrl1=0` skips the store entirely | still dies, at the same point: the print says `CE0 ctrl1 00000080 left alone` and then nothing |
+| the ring's physical placement matters | same 439 image at cdbe4000 and at cdcc4000 | both complete the loop; a current image dies at cdcc4000 |
 | the SMMU is the one refusing | one-line panic report | `gfsr=00000000 fsynr1=00000000` - no global fault, so not an unidentified stream and not a walk error |
 
 ## 4. Instrumentation now in the tree
@@ -121,7 +194,23 @@ That is the `pil_wlan_fw_region@8ba00000` from the device tree, split into a
 there - they are ordinary kernel memory at 0xcd.. - so anything that restricts
 the engines to their own window would show up exactly as it does.
 
-## 6. Open questions, in the order they must be answered
+## 6. The one question left
+
+Does the copy engine accept a ring that lives inside `0xa0000000..0xb0000000`
+- the window the device tree reserves for it - where every ring so far has
+lived in the kernel heap instead?
+
+`wcn3990-wlan-dmapool=32` (32 MiB into the window, clear of the framebuffer at
+0xa0000000) answers it in one boot.  Two readings matter:
+
+* `CE dma: pool pa=a2000000 ... pattern=5a5aa5a5 ok` - the window is backed and
+  the engines are pointed at it.  If the loop then reaches `CE0 src base` and
+  the doorbell produces a completion, the whole class of failures above was
+  one wrong address range.
+* `pattern=MISMATCH` or the mapping fails - the window is not plain memory the
+  CPU can touch, and the rings have to be placed by the firmware instead.
+
+## 7. Older open questions, in the order they were asked
 
 1. Does `S2CR[0xc0]` accept a store at all (index 192 is above the 128 the
    driver used to scan, but inside the 4 KiB GR0 page)?
