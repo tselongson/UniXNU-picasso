@@ -52,125 +52,8 @@
 
 extern "C" uint64_t kvtophys(vm_offset_t va);
 extern "C" void flush_dcache64(addr64_t pa, unsigned int len, boolean_t phys);
-extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 
 #define HIF_LOG(fmt, ...)   printf("WCN3990-HIF: " fmt "\n", ##__VA_ARGS__)
-
-/* ----------------------------------------------------------- IMEM black box */
-
-/* Qualcomm's always-on IMEM survives a warm reset, so it is the only place a
- * record of the last moments can outlive the very reset it is documenting.
- * The msm-imem page is 0x146AA000: the DT's pil@0x94c crash record ends at
- * 0xA14 and nothing claims 0xA20..0xFFF, so the box starts there.  Each
- * record is 20 bytes (magic, sequence, tag, two args); the sequence is
- * seeded from the highest one already in IMEM so consecutive boots form one
- * uninterrupted stream.  wcn3990_hif_init() prints the previous boot's tail
- * and the reset-reason words before touching the CE, so even a machine that
- * dies inside stage 3 tells the next boot exactly where it got to. */
-#define WLAN_IMEM_PA      0x146AA000ull
-#define WLAN_COOKIE_PA    0x146AB000ull
-#define WLAN_BB_PA        (WLAN_IMEM_PA + 0xA20)
-#define WLAN_BB_MAGIC     0x574C414Eu              /* "WLAN" */
-#define WLAN_BB_MAX       72u
-#define WLAN_RR_COOKIE    ((WLAN_COOKIE_PA + 0x65C) / 4)  /* XNU panic arm */
-#define WLAN_RR_DT        ((WLAN_IMEM_PA + 0x65C) / 4)    /* msm-imem restart_reason */
-#define WLAN_PIL_OFF      (0x94C / 4)                     /* msm-imem pil@94c */
-#define WLAN_PIL_WORDS    (0xC8 / 4)
-
-/* tags */
-#define BB_INIT_ENTRY     1
-#define BB_BASES_DONE     2
-#define BB_DOOR_NOOP      3
-#define BB_DOOR_REAL      4
-#define BB_WATCH          5
-#define BB_WATCH_DONE     6
-#define BB_RX             7
-#define BB_REPOST         8
-
-static volatile uint32_t *g_bb;       /* first record slot */
-static volatile uint32_t *g_imem;     /* page base: restart reason + pil */
-static volatile uint32_t *g_cookie;   /* shared-IMEM page: panic reason */
-static uint32_t g_bb_seq;
-
-static void
-hif_bb_init(void)
-{
-	g_imem = (volatile uint32_t *)ml_io_map(WLAN_IMEM_PA, 0x1000);
-	g_cookie = (volatile uint32_t *)ml_io_map(WLAN_COOKIE_PA, 0x1000);
-	if (!g_imem) return;
-	g_bb = g_imem + ((WLAN_BB_PA - WLAN_IMEM_PA) / 4);
-	/* Continue the previous boots' sequence; a fresh IMEM starts at 1. */
-	for (uint32_t i = 0; i < WLAN_BB_MAX; i++) {
-		uint32_t s = g_bb[i * 5 + 1];
-
-		if (g_bb[i * 5 + 0] == WLAN_BB_MAGIC && s > g_bb_seq && s < 0xffffff00u)
-			g_bb_seq = s;
-	}
-}
-
-static void
-hif_bb(uint32_t tag, uint32_t a1, uint32_t a2)
-{
-	uint32_t idx;
-
-	if (!g_bb) return;
-	idx = g_bb_seq % WLAN_BB_MAX;
-	g_bb[idx * 5 + 0] = WLAN_BB_MAGIC;
-	g_bb[idx * 5 + 1] = ++g_bb_seq;
-	g_bb[idx * 5 + 2] = tag;
-	g_bb[idx * 5 + 3] = a1;
-	g_bb[idx * 5 + 4] = a2;
-	__asm__ __volatile__("dmb sy" ::: "memory");
-}
-
-/* Print the previous boot's last records, the reset reasons and the PIL
- * subsystem-crash record.  Called once, at the very top of hif init, before
- * any CE register is touched. */
-static void
-hif_bb_dump(void)
-{
-	uint32_t hi = g_bb_seq, tail;
-	uint32_t i, k;
-
-	if (!g_bb) {
-		HIF_LOG("blackbox: IMEM map failed");
-		return;
-	}
-	HIF_LOG("blackbox: reset reason cookie=%08x dt=%08x",
-	    g_cookie ? g_cookie[0x65C / 4] : 0xdeadbeef,
-	    g_imem[0x65C / 4]);
-
-	{
-		/* The PIL record holds one entry per subsystem that crashed:
-		 * short name plus reason bytes.  Modem/WLAN assert text starts
-		 * here, if the subsystem ever got to write it. */
-		char pil[0xC9];
-
-		for (i = 0; i < WLAN_PIL_WORDS; i++) {
-			uint32_t w = g_imem[WLAN_PIL_OFF + i];
-
-			pil[i * 4 + 0] = (char)(w);
-			pil[i * 4 + 1] = (char)(w >> 8);
-			pil[i * 4 + 2] = (char)(w >> 16);
-			pil[i * 4 + 3] = (char)(w >> 24);
-		}
-		pil[0xC8] = 0;
-		HIF_LOG("blackbox: pil imem: %s", pil);
-	}
-
-	/* The previous boot's records are the 20 below the highest sequence
-	 * found before this boot started writing. */
-	tail = (hi >= 20) ? hi - 20 : 0;
-	for (k = 0; k < 20 && tail + k < hi; k++) {
-		uint32_t s = tail + k;
-		uint32_t idx = (s - 1) % WLAN_BB_MAX;
-		uint32_t *r = (uint32_t *)(uintptr_t)(g_bb + idx * 5);
-
-		if (r[0] != WLAN_BB_MAGIC) continue;
-		HIF_LOG("blackbox: seq=%u tag=%u a1=%08x a2=%08x",
-		    s, r[2], r[3], r[4]);
-	}
-}
 
 static inline void
 hif_mb(void)
@@ -237,10 +120,6 @@ hif_put32(uint8_t *p, uint32_t v)
 #define CE_DST_WM                0x50
 #define CE_DST_WM_HIGH_MASK      0x0000ffffu
 #define CE_DST_WM_LOW_MASK       0xffff0000u
-/* hw.c: wcn3990_wm_src_ring - the src ring's own watermark register, at a
- * different offset from the dst one.  ath10k_ce_init_src_ring() also writes
- * low 0 / high nentries here; leaving it at reset 0 was a divergence. */
-#define CE_SRC_WM                0x4c
 /* hw.c: wcn3990_ce_regs.ce_rri_low/high live in the CE wrapper at 0x24C000,
  * not inside a per-CE window.  ce.c: ath10k_ce_alloc_rri() stores the DDR
  * address of the read-index array there and then sets bit 19 in every CE's
@@ -279,34 +158,10 @@ typedef char wcn_ce_desc_size_check[(sizeof(struct wcn_ce_desc_64) == 16) ? 1 : 
  * VMID_WLAN through SCM hyp_assign (HLOS keeps RW).  The allocator lives in
  * PicassoWlan.cpp because that is where the SCM call and VMIDs already are. */
 struct hif_dma_block {
-	/* src rings: every OUT pipe gets a programmed ring even if nothing
-	 * ever sends on it - snoc.c: ath10k_snoc_init_pipes() walks all 12. */
 	struct wcn_ce_desc_64 src0[CE0_ENTRIES];
 	struct wcn_ce_desc_64 src3[CE3_ENTRIES];
-	struct wcn_ce_desc_64 src4[32];       /* HTT out (unused) */
-	struct wcn_ce_desc_64 src7[2];        /* diag */
-	/* dst rings: snoc.c posts receive buffers on every IN pipe
-	 * (ath10k_snoc_rx_post loops CE_COUNT), because the target starts
-	 * using whichever pipe it wants the moment it is up.  A reset ring
-	 * base of 0 made the CE dma firmware data to garbage addresses. */
 	struct wcn_ce_desc_64 dst2[CE2_ENTRIES];
-	struct wcn_ce_desc_64 dst1[32];       /* HTT + HTC control in */
-	struct wcn_ce_desc_64 dst5[32];       /* HTT in (IPA, unused) */
-	struct wcn_ce_desc_64 dst7[2];        /* diag in */
-	struct wcn_ce_desc_64 dst8[32];       /* target->uMC */
-	struct wcn_ce_desc_64 dst9[32];       /* HTT in */
-	struct wcn_ce_desc_64 dst10[32];      /* HTT in */
-	struct wcn_ce_desc_64 dst11[32];      /* pktlog in */
-	/* receive buffers */
 	uint8_t rx2[CE2_ENTRIES][CE_BUF_BYTES];
-	uint8_t rx1[32][CE_BUF_BYTES];
-	uint8_t rx5[32][512];
-	uint8_t rx7[2][CE_BUF_BYTES];
-	uint8_t rx8[32][CE_BUF_BYTES];
-	uint8_t rx9[32][CE_BUF_BYTES];
-	uint8_t rx10[32][CE_BUF_BYTES];
-	uint8_t rx11[32][CE_BUF_BYTES];
-	/* transmit scratch */
 	uint8_t tx0[CE_BUF_BYTES];
 	uint8_t tx3[CE_BUF_BYTES];
 	/* wcn3990 keeps the per-CE read indices in DDR (hw_params.rri_on_ddr);
@@ -314,7 +169,7 @@ struct hif_dma_block {
 	uint32_t rri[16];
 };
 
-#define HIF_DMA_SIZE   0x80000u          /* 512 KiB, >sizeof(hif_dma_block) */
+#define HIF_DMA_SIZE   0x40000u          /* 256 KiB, >sizeof(hif_dma_block) */
 static struct hif_dma_block *g_dma;
 #define s_src0  (g_dma->src0)
 #define s_dst2  (g_dma->dst2)
@@ -349,38 +204,7 @@ static bool g_bases_programmed;
 static uint32_t g_post_count = CE2_ENTRIES - 1;
 static uint32_t g_wr0, g_wr3;         /* source ring write index */
 static uint32_t g_sw2, g_post2;       /* dest ring software / posted index */
-static volatile bool g_watch_done;    /* the post-doorbell watch has ended */
 static uint64_t g_rx2_pa, g_dst2_pa, g_src0_pa, g_src3_pa;
-
-/* Per-CE host-side layout, from snoc.c: host_ce_config_wlan (buf sizes) and
- * target_ce_config_wlan (ring depth the target pairs with).  Rings exist for
- * every pipe so a target-side pipe waking up always finds a programmed ring;
- * entry counts beyond 64/32/2 were trimmed to what the bring-up needs. */
-struct hif_ce_shape {
-	uint8_t src_n;      /* host-side src ring entries, 0 = none */
-	uint8_t dst_n;      /* host-side dst ring entries, 0 = none */
-	uint16_t buf_sz;    /* rx buffer bytes for a dst pipe */
-	uint16_t dmax;      /* src_sz_max for a src pipe (CTRL1.DMAX) */
-};
-static const struct hif_ce_shape hif_shape[12] = {
-	/*  0 */ {16, 0, 0, CE_BUF_BYTES},  /* host->target HTC ctrl */
-	/*  1 */ {0, 32, CE_BUF_BYTES, 0},  /* target->host HTT+ctrl */
-	/*  2 */ {0, 64, CE_BUF_BYTES, 0},  /* target->host WMI */
-	/*  3 */ {32, 0, 0, CE_BUF_BYTES},  /* host->target WMI */
-	/*  4 */ {32, 0, 0, 256},           /* host->target HTT (unused) */
-	/*  5 */ {0, 32, 512, 0},           /* target->host HTT (IPA, unused) */
-	/*  6 */ {0, 0, 0, 0},
-	/*  7 */ {2, 2, CE_BUF_BYTES, CE_BUF_BYTES}, /* diag */
-	/*  8 */ {0, 32, CE_BUF_BYTES, 0},
-	/*  9 */ {0, 32, CE_BUF_BYTES, 0},
-	/* 10 */ {0, 32, CE_BUF_BYTES, 0},
-	/* 11 */ {0, 32, CE_BUF_BYTES, 0},  /* pktlog */
-};
-/* ring physical addresses: index by CE id */
-static uint64_t g_sr_pa[12], g_dr_pa[12], g_buf_pa[12];
-static struct wcn_ce_desc_64 *g_sr_desc[12], *g_dr_desc[12];
-static uint8_t *g_buf_va[12];
-static uint32_t g_rri_last[12];       /* heartbeat: last seen DDR read index */
 
 static inline volatile uint32_t *
 hif_reg(uint32_t ce, uint32_t off)
@@ -420,8 +244,8 @@ hif_ce_send(uint32_t ce, uint8_t *buf, uint32_t len)
 	if (!g_regs_live || g_stage < 3 || len == 0 || len > CE_BUF_BYTES) return -1;
 
 	switch (ce) {
-	case 0:  ring = s_src0; entries = hif_shape[0].src_n; wr = &g_wr0; break;
-	case 3:  ring = s_src3; entries = hif_shape[3].src_n; wr = &g_wr3; break;
+	case 0:  ring = s_src0; entries = CE0_ENTRIES; wr = &g_wr0; break;
+	case 3:  ring = s_src3; entries = CE3_ENTRIES; wr = &g_wr3; break;
 	default: return -1;
 	}
 
@@ -482,7 +306,7 @@ hif_ce2_repost(uint32_t idx)
 
 	(void)idx;
 	d->addr = (g_rx2_pa + (uint64_t)slot * CE_BUF_BYTES) & CE_DESC_ADDR_MASK;
-	d->nbytes = CE_BUF_BYTES;   /* the target fills it up to nbytes_max */
+	d->nbytes = 0;
 	d->flags = 0;
 	d->toeplitz = 0;
 	hif_mb();
@@ -1054,22 +878,6 @@ hif_handle_rx(const uint8_t *buf, uint32_t nbytes)
 static void hif_program_bases(void);
 static void hif_post_buffers(void);
 
-/* Clean+invalidate by VA: the RX direction needs the CPU's stale lines gone
- * before a read (the target updates descriptors, buffers and the DDR RRI
- * behind our back), and a plain flush would either hide the new data behind
- * a still-valid line or, on a dirty line, push the CPU's stale bytes right
- * over what the target just wrote. */
-static void
-hif_inv_dcache_va(vm_offset_t va, uint32_t len)
-{
-	vm_offset_t line, end = va + len;
-
-	for (line = va & ~63ull; line < end; line += 64) {
-		__asm__ volatile ("dc civac, %0" : : "r" (line));
-	}
-	__asm__ volatile ("dsb ish" ::: "memory");
-}
-
 extern "C" void
 wcn3990_hif_poll(void)
 {
@@ -1086,26 +894,6 @@ wcn3990_hif_poll(void)
 		    g_polls, g_stage, (int)g_state, g_rx_packets, g_beacons,
 		    (unsigned)s_dst2[0].nbytes,
 		    g_bases_programmed ? hif_reg_read(2, CE_CURRENT_DRRI) : 0);
-		/* The other dst pipes' DDR read indices: a moving index means the
-		 * target consumed a buffer there, which the bring-up wants to
-		 * know about even though nothing drains those rings yet. */
-		if (g_bases_programmed && (g_polls % 5000) == 0) {
-			uint32_t ce;
-
-			for (ce = 0; ce < 12; ce++) {
-				uint32_t now;
-
-				if (ce == 2 || hif_shape[ce].dst_n == 0) continue;
-				hif_inv_dcache_va((vm_offset_t)&s_rri[ce],
-				    sizeof(s_rri[ce]));
-				now = s_rri[ce] & (hif_shape[ce].dst_n - 1);
-				if (now != g_rri_last[ce]) {
-					HIF_LOG("CE%u rri %u -> %u",
-					    ce, g_rri_last[ce], now);
-					g_rri_last[ce] = now;
-				}
-			}
-		}
 		if (g_hif_mode >= 4) {
 			if (g_stage == 1 && g_polls >= 3000) {
 				g_stage = 2;
@@ -1120,37 +908,32 @@ wcn3990_hif_poll(void)
 	if (g_stage < 3) return;
 	if (g_scan_active) g_scan_polls++;
 
-	/* The first seconds after the doorbell are delicate: 425/426/427 died
-	 * in that window with the poller sniffing, 428 - which stayed out of
-	 * the target's way - lived through it and received.  Do not touch the
-	 * rings until the posting thread has finished its watch. */
-	if (!g_watch_done) return;
-	if (g_scan_active) g_scan_polls++;
+	/* The CE updates nbytes behind the CPU's back.  A cache line that still
+	 * holds the zero from the initial memset will keep reporting "empty"
+	 * forever, so invalidate the destination ring before sampling it.  One
+	 * kilobyte per poll is cheap next to losing every receive. */
+	flush_dcache64((addr64_t)g_dst2_pa, (unsigned)sizeof(s_dst2), TRUE);
 
-	/* wcn3990 publishes the per-CE read indices in DDR: the target bumps
-	 * s_rri[2] every time it consumes one of our descriptors.  Invalidate
-	 * before reading - a stale zero line hides completed descriptors
-	 * forever, and a clean would overwrite the target's value. */
-	hif_inv_dcache_va((vm_offset_t)&s_rri[2], sizeof(s_rri[2]));
-	{
-		uint32_t drri = s_rri[2] & (CE2_ENTRIES - 1);
+	while (budget-- > 0) {
+		struct wcn_ce_desc_64 *d = &s_dst2[g_sw2];
+		uint32_t nbytes;
+		uint32_t idx = g_sw2;
 
-		while (budget-- > 0 && drri != g_sw2) {
-			struct wcn_ce_desc_64 *d = &s_dst2[g_sw2];
-			uint32_t idx = g_sw2, nbytes;
+		/* Only touch the cache on a completed descriptor; doing it on
+		 * every idle poll is what the earlier build did 1000x/s. */
+		nbytes = d->nbytes;
+		if (nbytes == 0) break;
+		if (nbytes > CE_BUF_BYTES) nbytes = CE_BUF_BYTES;
 
-			/* The target wrote the received length into nbytes. */
-			hif_inv_dcache_va((vm_offset_t)d, sizeof(*d));
-			nbytes = d->nbytes;
-			if (nbytes == 0 || nbytes > CE_BUF_BYTES) nbytes = CE_BUF_BYTES;
+		flush_dcache64((addr64_t)kvtophys((vm_offset_t)d), 64, TRUE);
+		flush_dcache64((addr64_t)(g_rx2_pa + (uint64_t)idx * CE_BUF_BYTES),
+		    (nbytes + 63u) & ~63u, TRUE);
+		hif_handle_rx(s_rx2[idx], nbytes);
 
-			hif_inv_dcache_va((vm_offset_t)&s_rx2[idx][0], CE_BUF_BYTES);
-			if (g_rx_packets < 16) hif_bb(BB_RX, idx, nbytes);
-			hif_handle_rx(s_rx2[idx], nbytes);
-
-			hif_ce2_repost(idx);
-			g_sw2 = (g_sw2 + 1) & (CE2_ENTRIES - 1);
-		}
+		d->nbytes = 0;
+		hif_mb();
+		g_sw2 = (g_sw2 + 1) & (CE2_ENTRIES - 1);
+		hif_ce2_repost(idx);
 	}
 
 	if (g_state == HIF_CE_UP && (g_polls % 2000) == 0) {
@@ -1160,20 +943,41 @@ wcn3990_hif_poll(void)
 
 /* --------------------------------------------------------------------- init */
 
+/* ce.c: ath10k_ce_init_src_ring() / ath10k_ce_init_dest_ring() both do a
+ * read-modify-write of CE_CTRL1: DMAX = src_sz_max for the OUT rings, and the
+ * src/dst byte-swap bits cleared.  Leaving the reset defaults in place lets
+ * the CE reinterpret our little-endian 64-bit descriptors. */
+static void
+hif_ce_ctrl1(uint32_t ce, bool is_src)
+{
+	uint32_t old = hif_reg_read(ce, CE_CTRL1);
+	uint32_t v = old;
+
+	if (is_src) {
+		v = (v & ~CE_CTRL1_DMAX_MASK) | CE_BUF_BYTES;
+		v &= ~CE_CTRL1_SRC_BSWAP;
+	} else {
+		v &= ~CE_CTRL1_DST_BSWAP;
+	}
+	/* ath10k_ce_alloc_rri() enables DDR read-index updates on every CE. */
+	v |= CE_CTRL1_RRI_UPD;
+	hif_reg_write(ce, CE_CTRL1, v);
+	HIF_LOG("CE%u ctrl1 %08x -> %08x", ce, old, v);
+	/* The CDC console has a transfer in flight per line; if the very next
+	 * register access wedges the interconnect the tail of the log is lost.
+	 * 30 ms here makes the printed line an accurate record of where we got
+	 * to, which is worth far more than the delay. */
+	IOSleep(30);
+}
+
 /* Stage 2: program the CE ring registers but do not post any receive buffer.
  * ce.c: ath10k_ce_set_dest_ring_base_addr_hi() preserves the non-address bits
- * of dr_base_addr_hi, so use a read-modify-write with CE_DESC_ADDR_HI_MASK.
- *
- * Every one of the 12 copy engines is programmed here, mirroring
- * ath10k_snoc_init_pipes(): the target starts using whichever pipe it pleases
- * the moment it boots, and a reset ring base of 0 makes the CE dma firmware
- * data to garbage addresses under the bypass - which is what killed every
- * build up to 430 within 10 ms of the CE2 doorbell. */
+ * of dr_base_addr_hi, so use a read-modify-write with CE_DESC_ADDR_HI_MASK. */
 static void
 hif_program_bases(void)
 {
+	uint32_t hi;
 	uint64_t rri_pa;
-	uint32_t ce;
 
 	/* Must precede the CTRL1 writes: bit 19 tells the CE to publish read
 	 * indices into this array, so a stale/zero address would send a DMA to
@@ -1191,60 +995,38 @@ hif_program_bases(void)
 	    *(volatile uint32_t *)(uintptr_t)(g_ce_va + CE_WRAP_RRI_LOW),
 	    *(volatile uint32_t *)(uintptr_t)(g_ce_va + CE_WRAP_RRI_HIGH));
 
-	for (ce = 0; ce < 12; ce++) {
-		const struct hif_ce_shape *sh = &hif_shape[ce];
-		uint32_t old = hif_reg_read(ce, CE_CTRL1);
-		uint32_t v = old;
+	hif_reg_write(0, CE_SR_BASE_LO, (uint32_t)g_src0_pa);
+	hif_reg_write(0, CE_SR_BASE_HI, (uint32_t)(g_src0_pa >> 32) & 0x1f);
+	hif_reg_write(0, CE_SR_SIZE, CE0_ENTRIES);
+	hif_reg_write(0, CE_HOST_IE, 0);
+	hif_reg_write(0, CE_MISC_IE, 0);
 
-		/* ce.c: ath10k_ce_alloc_rri() enables DDR read-index updates on
-		 * every CE, not only the ones this driver posts on. */
-		v |= CE_CTRL1_RRI_UPD;
-		v &= ~(CE_CTRL1_SRC_BSWAP | CE_CTRL1_DST_BSWAP);
-		if (sh->src_n > 0) {
-			v = (v & ~CE_CTRL1_DMAX_MASK) | sh->dmax;
-		}
-		hif_reg_write(ce, CE_CTRL1, v);
-		HIF_LOG("CE%u ctrl1 %08x -> %08x", ce, old, v);
-		IOSleep(30);
+	hif_reg_write(3, CE_SR_BASE_LO, (uint32_t)g_src3_pa);
+	hif_reg_write(3, CE_SR_BASE_HI, (uint32_t)(g_src3_pa >> 32) & 0x1f);
+	hif_reg_write(3, CE_SR_SIZE, CE3_ENTRIES);
+	hif_reg_write(3, CE_HOST_IE, 0);
+	hif_reg_write(3, CE_MISC_IE, 0);
 
-		if (sh->src_n > 0) {
-			uint64_t pa = g_sr_pa[ce];
-			uint32_t wm;
-
-			hif_reg_write(ce, CE_SR_BASE_LO, (uint32_t)pa);
-			hif_reg_write(ce, CE_SR_BASE_HI,
-			    (uint32_t)(pa >> 32) & 0x1f);
-			hif_reg_write(ce, CE_SR_SIZE, sh->src_n);
-			/* ce.c: src lowmark 0, highmark nentries. */
-			wm = hif_reg_read(ce, CE_SRC_WM);
-			hif_reg_write(ce, CE_SRC_WM,
-			    (wm & CE_DST_WM_LOW_MASK) |
-			    ((uint32_t)sh->src_n & CE_DST_WM_HIGH_MASK));
-			HIF_LOG("CE%u src base=%llx n=%u wm=%08x->%08x",
-			    ce, (unsigned long long)pa, sh->src_n, wm,
-			    hif_reg_read(ce, CE_SRC_WM));
-		}
-		if (sh->dst_n > 0) {
-			uint64_t pa = g_dr_pa[ce];
-			uint32_t hi = hif_reg_read(ce, CE_DR_BASE_HI);
-			uint32_t wm;
-
-			hif_reg_write(ce, CE_DR_BASE_LO, (uint32_t)pa);
-			hi = (hi & ~0x1fu) | ((uint32_t)(pa >> 32) & 0x1fu);
-			hif_reg_write(ce, CE_DR_BASE_HI, hi);
-			hif_reg_write(ce, CE_DR_SIZE, sh->dst_n);
-			/* ce.c: dst low watermark 0, high watermark nentries. */
-			wm = hif_reg_read(ce, CE_DST_WM);
-			hif_reg_write(ce, CE_DST_WM,
-			    (wm & CE_DST_WM_LOW_MASK) |
-			    ((uint32_t)sh->dst_n & CE_DST_WM_HIGH_MASK));
-			HIF_LOG("CE%u dst base=%llx n=%u wm=%08x->%08x",
-			    ce, (unsigned long long)pa, sh->dst_n, wm,
-			    hif_reg_read(ce, CE_DST_WM));
-		}
-		hif_reg_write(ce, CE_HOST_IE, 0);
-		hif_reg_write(ce, CE_MISC_IE, 0);
+	hif_reg_write(2, CE_DR_BASE_LO, (uint32_t)g_dst2_pa);
+	hi = hif_reg_read(2, CE_DR_BASE_HI);
+	hi = (hi & ~0x1fu) | ((uint32_t)(g_dst2_pa >> 32) & 0x1fu);
+	hif_reg_write(2, CE_DR_BASE_HI, hi);
+	hif_reg_write(2, CE_DR_SIZE, CE2_ENTRIES);
+	{
+		/* ce.c: low watermark 0, high watermark nentries. */
+		uint32_t wm = hif_reg_read(2, CE_DST_WM);
+		uint32_t nw = (wm & CE_DST_WM_LOW_MASK) |
+		    ((uint32_t)CE2_ENTRIES & CE_DST_WM_HIGH_MASK);
+		hif_reg_write(2, CE_DST_WM, nw);
+		HIF_LOG("CE2 dst watermark %08x -> %08x", wm,
+		    hif_reg_read(2, CE_DST_WM));
 	}
+	hif_reg_write(2, CE_HOST_IE, 0);
+	hif_reg_write(2, CE_MISC_IE, 0);
+
+	hif_ce_ctrl1(0, true);
+	hif_ce_ctrl1(3, true);
+	hif_ce_ctrl1(2, false);
 
 	g_bases_programmed = true;
 	hif_dump_regs("stage 2: CE bases programmed, no buffers posted");
@@ -1264,125 +1046,57 @@ hif_program_bases(void)
 		picasso_wlan_smmu_s2cr_set(0xc0, WLAN_SMMU_PASSTHRU_BANK, &rb);
 		HIF_LOG("stage 2.5: S2CR[0xc0]=%08x", rb);
 	}
-	hif_bb(BB_BASES_DONE, 0, 0);
 }
 
-/* Post a whole dst ring full of receive buffers and ring that CE's doorbell.
- * snoc.c: ath10k_snoc_rx_post_pipe() fills every slot but one and writes the
- * dest write index once; that write is the doorbell the CE fetches on. */
-static void
-hif_ce_post_ring(uint32_t ce)
-{
-	const struct hif_ce_shape *sh = &hif_shape[ce];
-	struct wcn_ce_desc_64 *ring = g_dr_desc[ce];
-	uint32_t n = sh->dst_n, i;
-
-	/* Fill every descriptor: address, buffer size, cleared flags.  The
-	 * target asserts on a zero nbytes (425-427), and the rings of the
-	 * pipes the bring-up does not consume must still be fully valid for
-	 * the day the firmware starts using them. */
-	for (i = 0; i < n; i++) {
-		ring[i].addr = (g_buf_pa[ce] + (uint64_t)i * sh->buf_sz) &
-		    CE_DESC_ADDR_MASK;
-		ring[i].nbytes = sh->buf_sz;
-		ring[i].flags = 0;
-		ring[i].toeplitz = 0;
-	}
-	/* No bulk clean of the receive buffers here.  428 (2aae2b3) survived
-	 * the doorbell and received 8 descriptors; 429 added a whole-buffer
-	 * clean at init and died within 100 ms of the first fetch, 3/3 vs
-	 * 0/3 on retest.  The RX loop invalidates each buffer before use, so
-	 * dirty lines cannot hide the target's data - and the bulk clean is
-	 * the only change that runs outside the gated poller. */
-	hif_mb();
-	flush_dcache64((addr64_t)g_dr_pa[ce], (unsigned)(n * 16), TRUE);
-
-	/* Keep one slot free so the ring can never look full to the target. */
-	hif_reg_write(ce, CE_DST_WR_INDEX, n - 1);
-	HIF_LOG("CE%u posted %u receive buffers (desc.addr=%llx buf=%u)",
-	    ce, n - 1, (unsigned long long)g_buf_pa[ce], sh->buf_sz);
-	hif_bb(BB_DOOR_REAL, 0x100u + ce, n - 1);
-	IOSleep(30);
-}
-
-/* Stage 3: hand receive buffers to the copy engines. */
+/* Stage 3: hand CE2_ENTRIES-1 buffers to the copy engine. */
 static void
 hif_post_buffers(void)
 {
-	/* Every dst pipe first: the firmware services these rings the moment
-	 * it starts consuming CE2 (the 430 family died exactly there), so the
-	 * rings must be live before the CE2 doorbell rings. */
-	{
-		uint32_t ce;
-
-		for (ce = 0; ce < 12; ce++) {
-			if (ce == 2) continue;
-			if (hif_shape[ce].dst_n > 0) hif_ce_post_ring(ce);
-		}
-	}
-
 	/* ce.c: the write index is a free-running counter masked with
 	 * nentries-1, and __ath10k_ce_rx_post_buf_64() posts on top of
 	 * whatever the register already holds.  Keep one slot free so the
 	 * ring can never look full to the target. */
+	uint32_t cur = hif_reg_read(2, CE_DST_WR_INDEX) & (CE2_ENTRIES - 1);
+	uint32_t n = (g_post_count > 0 && g_post_count < CE2_ENTRIES) ?
+	    g_post_count : (CE2_ENTRIES - 1);
+
+	g_post2 = (cur + n) & (CE2_ENTRIES - 1);
+	/* Bisect the doorbell.  Writing the value that is already there is a
+	 * no-op for the CE, so if the SoC dies on that store the register
+	 * itself is the trigger; if it survives and the real advance kills it,
+	 * the descriptor fetch the doorbell kicks off is what stalls the
+	 * interconnect.  Every line gets its own sleep so it is on the wire
+	 * before the next step. */
+	HIF_LOG("stage 3: doorbell cur=%u target=%u dr_base=%08x desc.addr=%llx",
+	    cur, g_post2, hif_reg_read(2, CE_DR_BASE_LO),
+	    (unsigned long long)s_dst2[0].addr);
+	IOSleep(30);
+	/* Warm the fault-record mapping now: the post-doorbell watch must not
+	 * spend its first microseconds in ml_io_map(). */
 	{
-		uint32_t cur = hif_reg_read(2, CE_DST_WR_INDEX) & (CE2_ENTRIES - 1);
-		uint32_t n = (g_post_count > 0 && g_post_count < CE2_ENTRIES) ?
-		    g_post_count : (CE2_ENTRIES - 1);
-		uint32_t i;
+		uint32_t f[8];
 
-		g_post2 = (cur + n) & (CE2_ENTRIES - 1);
-		/* Fill the CE2 descriptors that are about to be handed over:
-		 * the other dst pipes already got complete rings above, and
-		 * these must be clean before the fetch. */
-		for (i = 0; i < n; i++) {
-			uint32_t slot = (cur + i) & (CE2_ENTRIES - 1);
+		picasso_wlan_smmu_fault_read(f);
+		HIF_LOG("stage 3 warm: gfsr=%08x gfsynr1=%08x scr0=%08x smr4=%08x s2cr4=%08x cb61fsr=%08x",
+		    f[0], f[2], f[4], f[5], f[6], f[7]);
+	}
+	hif_reg_write(2, CE_DST_WR_INDEX, cur);
+	HIF_LOG("stage 3: doorbell no-op write ok (reads %u)",
+	    hif_reg_read(2, CE_DST_WR_INDEX));
+	IOSleep(30);
+	/* wcn3990-hif-noopdoor=1 skips the real doorbell: if the machine then
+	 * lives through the heartbeat the reset is caused by the fetch itself
+	 * (or what follows it), not by any of the surrounding setup. */
+	{
+		uint32_t noop = 0;
 
-			s_dst2[slot].addr = (g_rx2_pa + (uint64_t)slot * CE_BUF_BYTES) &
-			    CE_DESC_ADDR_MASK;
-			s_dst2[slot].nbytes = CE_BUF_BYTES;
-			s_dst2[slot].flags = 0;
-			s_dst2[slot].toeplitz = 0;
-		}
-		hif_mb();
-		flush_dcache64((addr64_t)g_dst2_pa, (unsigned)sizeof(s_dst2), TRUE);
-
-		/* Bisect the doorbell.  Writing the value that is already there
-		 * is a no-op for the CE, so if the SoC dies on that store the
-		 * register itself is the trigger. */
-		HIF_LOG("stage 3: doorbell cur=%u target=%u dr_base=%08x desc.addr=%llx",
-		    cur, g_post2, hif_reg_read(2, CE_DR_BASE_LO),
-		    (unsigned long long)s_dst2[0].addr);
-		hif_bb(BB_DOOR_NOOP, cur, g_post2);
-		IOSleep(30);
-		/* Warm the fault-record mapping now: the post-doorbell watch
-		 * must not spend its first microseconds in ml_io_map(). */
-		{
-			uint32_t f[8];
-
-			picasso_wlan_smmu_fault_read(f);
-			HIF_LOG("stage 3 warm: gfsr=%08x gfsynr1=%08x scr0=%08x smr4=%08x s2cr4=%08x cb61fsr=%08x",
-			    f[0], f[2], f[4], f[5], f[6], f[7]);
-		}
-		hif_reg_write(2, CE_DST_WR_INDEX, cur);
-		HIF_LOG("stage 3: doorbell no-op write ok (reads %u)",
-		    hif_reg_read(2, CE_DST_WR_INDEX));
-		IOSleep(30);
-		/* wcn3990-hif-noopdoor=1 skips the real doorbell: if the machine
-		 * then lives through the heartbeat the reset is caused by the
-		 * fetch itself (or what follows it). */
-		{
-			uint32_t noop = 0;
-
-			PE_parse_boot_argn("wcn3990-hif-noopdoor", &noop, sizeof(noop));
-			if (noop) {
-				HIF_LOG("stage 3: noopdoor - skipping the real doorbell");
-			} else {
-				hif_bb(BB_DOOR_REAL, g_post2, n);
-				hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
-				HIF_LOG("stage 3: posted %u receive buffers (desc.addr=%llx wr=%u)",
-				    n, (unsigned long long)s_dst2[0].addr, g_post2);
-			}
+		PE_parse_boot_argn("wcn3990-hif-noopdoor", &noop, sizeof(noop));
+		if (noop) {
+			HIF_LOG("stage 3: noopdoor - skipping the real doorbell");
+		} else {
+			hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
+			HIF_LOG("stage 3: posted %u receive buffers (desc.addr=%llx wr=%u)",
+			    n, (unsigned long long)s_dst2[0].addr, g_post2);
 		}
 	}
 
@@ -1405,7 +1119,6 @@ hif_post_buffers(void)
 			    k, hif_reg_read(2, CE_CURRENT_DRRI),
 			    hif_reg_read(2, CE_DST_WR_INDEX), f[0], f[1], f[2],
 			    f[4], f[5], f[7]);
-			hif_bb(BB_WATCH, k, hif_reg_read(2, CE_CURRENT_DRRI));
 			IOSleep(10);
 		}
 		for (k = 0; k < 24; k++) {
@@ -1414,11 +1127,8 @@ hif_post_buffers(void)
 			    k, hif_reg_read(2, CE_CURRENT_DRRI),
 			    hif_reg_read(2, CE_DST_WR_INDEX),
 			    (picasso_wlan_smmu_fault_read(f), f[0]));
-			hif_bb(BB_WATCH, 100 + k, hif_reg_read(2, CE_CURRENT_DRRI));
 		}
 	}
-	g_watch_done = true;
-	hif_bb(BB_WATCH_DONE, 0, 0);
 }
 
 extern "C" void
@@ -1429,11 +1139,6 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 {
 	uint32_t v = 0;
 	uint32_t i;
-
-	/* Black box first: print whatever the previous boot managed to write
-	 * into IMEM before its reset, then start recording this boot. */
-	hif_bb_init();
-	hif_bb_dump();
 
 	if (!ce_va || g_regs_live) return;
 
@@ -1501,58 +1206,6 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		HIF_LOG("cannot resolve ring physical addresses");
 		return;
 	}
-
-	/* Per-CE ring/buffer table: every pipe the target can wake up gets a
-	 * programmed ring with valid descriptors, because a reset ring base
-	 * of 0 turned the CE into a scatter machine (430 and friends). */
-	{
-		uint64_t pa;
-		uint32_t ce;
-
-		for (ce = 0; ce < 12; ce++) {
-			g_sr_desc[ce] = NULL;
-			g_dr_desc[ce] = NULL;
-			g_buf_va[ce] = NULL;
-			g_sr_pa[ce] = g_dr_pa[ce] = g_buf_pa[ce] = 0;
-			if (hif_shape[ce].src_n > 0) {
-				g_sr_desc[ce] = (ce == 0 ? s_src0 :
-				    ce == 3 ? s_src3 :
-				    ce == 4 ? g_dma->src4 : g_dma->src7);
-				pa = kvtophys((vm_offset_t)g_sr_desc[ce]);
-				g_sr_pa[ce] = pa;
-			}
-		}
-		g_dr_desc[2] = s_dst2;  g_dr_pa[2] = g_dst2_pa;  g_buf_va[2] = &s_rx2[0][0];
-		g_buf_pa[2] = g_rx2_pa;
-		g_dr_desc[1] = g_dma->dst1;  g_dr_pa[1] = kvtophys((vm_offset_t)g_dma->dst1);
-		g_buf_va[1] = &g_dma->rx1[0][0];
-		g_dr_desc[5] = g_dma->dst5;  g_dr_pa[5] = kvtophys((vm_offset_t)g_dma->dst5);
-		g_buf_va[5] = &g_dma->rx5[0][0];
-		g_dr_desc[7] = g_dma->dst7;  g_dr_pa[7] = kvtophys((vm_offset_t)g_dma->dst7);
-		g_buf_va[7] = &g_dma->rx7[0][0];
-		g_dr_desc[8] = g_dma->dst8;  g_dr_pa[8] = kvtophys((vm_offset_t)g_dma->dst8);
-		g_buf_va[8] = &g_dma->rx8[0][0];
-		g_dr_desc[9] = g_dma->dst9;  g_dr_pa[9] = kvtophys((vm_offset_t)g_dma->dst9);
-		g_buf_va[9] = &g_dma->rx9[0][0];
-		g_dr_desc[10] = g_dma->dst10; g_dr_pa[10] = kvtophys((vm_offset_t)g_dma->dst10);
-		g_buf_va[10] = &g_dma->rx10[0][0];
-		g_dr_desc[11] = g_dma->dst11; g_dr_pa[11] = kvtophys((vm_offset_t)g_dma->dst11);
-		g_buf_va[11] = &g_dma->rx11[0][0];
-		g_buf_pa[1] = kvtophys((vm_offset_t)g_buf_va[1]);
-		g_buf_pa[5] = kvtophys((vm_offset_t)g_buf_va[5]);
-		g_buf_pa[7] = kvtophys((vm_offset_t)g_buf_va[7]);
-		g_buf_pa[8] = kvtophys((vm_offset_t)g_buf_va[8]);
-		g_buf_pa[9] = kvtophys((vm_offset_t)g_buf_va[9]);
-		g_buf_pa[10] = kvtophys((vm_offset_t)g_buf_va[10]);
-		g_buf_pa[11] = kvtophys((vm_offset_t)g_buf_va[11]);
-		for (ce = 0; ce < 12; ce++) {
-			if (hif_shape[ce].dst_n > 0 &&
-			    (!g_dr_pa[ce] || !g_buf_pa[ce])) {
-				HIF_LOG("cannot resolve CE%u ring physical addresses", ce);
-				return;
-			}
-		}
-	}
 	HIF_LOG("rings: src0=%llx dst2=%llx rx2=%llx src3=%llx mode=%d",
 	    (unsigned long long)g_src0_pa, (unsigned long long)g_dst2_pa,
 	    (unsigned long long)g_rx2_pa, (unsigned long long)g_src3_pa, g_hif_mode);
@@ -1570,14 +1223,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	}
 	hif_mb();
 	flush_dcache64((addr64_t)g_dst2_pa, (unsigned int)sizeof(s_dst2), TRUE);
-	/* The 429-era whole-rx2 clean deliberately stays out: see the note in
-	 * hif_ce_post_ring() - it is the only post-428 change that runs before
-	 * the doorbell, and 429/430 both die in the fetch window with it. */
 
 	g_sw2 = 0;
 	g_post2 = 0;
 	g_wr0 = g_wr3 = 0;
-	g_watch_done = false;
 	g_polls = 0;
 	g_rx_packets = 0;
 	g_beacons = 0;
@@ -1587,7 +1236,6 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	g_regs_live = true;
 
 	HIF_LOG("descriptors ready, mode %d stage %d", g_hif_mode, g_stage);
-	hif_bb(BB_INIT_ENTRY, (uint32_t)g_hif_mode, (uint32_t)g_post_count);
 	if (g_hif_mode == 2) hif_program_bases();
 	if (g_hif_mode == 3) {
 		hif_program_bases();
