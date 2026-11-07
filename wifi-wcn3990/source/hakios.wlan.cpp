@@ -96,31 +96,17 @@ say_class_presence(void)
 }
 
 /* Allocate one instance of a class owned by a loaded kext (+1 retained), or NULL when the
- * family that owns the name is not prelinked.
- *
- * Apple documents IONetworkInterface as an abstract class: allocClassWithName()
- * of that name legitimately returns NULL.  The kernelcache does register the
- * concrete subclasses (IO80211Interface, IOEthernetInterface), so try those
- * first - they are real family objects and keep InterfaceNamer/configd on the
- * original IOBSD-matched stack.  CoachZ/sheng/pong all publish an object whose
- * class is IONetworkInterface-derived with IO80211InterfaceRole=Infrastructure;
- * this is the same shape without defining a duplicate metaclass. */
-static const char * const interface_classes[] = {
-	"IO80211Interface", "IOEthernetInterface", "IONetworkInterface",
-};
+ * family that owns the name is not prelinked. */
 static IOService *
-alloc_interface_service(void)
+alloc_service(const char * name)
 {
-	for (unsigned i = 0; i < sizeof(interface_classes) / sizeof(interface_classes[0]); i++) {
-		OSObject *object = OSMetaClass::allocClassWithName(interface_classes[i]);
-		IOService *service = OSDynamicCast(IOService, object);
+	OSObject * object = OSMetaClass::allocClassWithName(name);
+	IOService * service = OSDynamicCast(IOService, object);
 
-		IOLog("HakiosWLAN: interface class %s -> %s\n",
-		    interface_classes[i], service != NULL ? "ok" : "NULL");
-		if (service != NULL) return service;
-		if (object != NULL) object->release();
+	if (object != NULL && service == NULL) {
+		object->release();
 	}
-	return NULL;
+	return service;
 }
 
 /* attach, start, register: the service, or NULL */
@@ -177,14 +163,14 @@ HakiosWLANStart(const char * interface, const uint8_t * address)
 		return;
 	}
 
-	wlan = alloc_interface_service();
+	wlan = alloc_service("IONetworkInterface");
 	if (wlan == NULL) {
 		controller->release();
-		IOLog("HakiosWLAN: no concrete IONetworkInterface subclass is available\n");
+		IOLog("HakiosWLAN: no IONetworkInterface class is loaded\n");
 		return;
 	}
-	/* Only IOService's state is initialised: these are property carriers, not
-	 * driven hardware, and the family's init() expects a real controller. */
+	/* init() is called on IOService only: the family's own init() overrides expect their
+	 * driver context, which a property carrier does not have. */
 	if (!wlan->IOService::init()) {
 		wlan->release();
 		controller->release();
