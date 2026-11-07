@@ -3507,8 +3507,24 @@ picasso_wlan_smmu_bind_wlan(uint32_t mode)
 	 * no entry for 0x20/0x21, so S2CR[0x20] is the register that actually
 	 * decides what the copy engines' DMA does.  (Writing S2CR at an SMR
 	 * slot index, as the first version of this did, changes nothing.) */
-	want = (mode == 2) ? 0x00010000u       /* TYPE=1: bypass, bank ignored */
-	    : 0x3du;                           /* TYPE=0: translate via CB61   */
+	/* mode 1: CB61 (the value build 439 wrote into S2CR[0x20]).
+	 * mode 2: TYPE=1 bypass, no bank involved at all.
+	 * mode 3: CB60 - the bank the USB stream 0xe0 uses, and the only one
+	 *         this board is known to run through: the console log shows
+	 *         "SMMU bank 60 ... sctlr=014c2114 M=0" and "path=identity",
+	 *         i.e. a bank that passes physical addresses straight through.
+	 *         CB61 was never verified that way. */
+	switch (mode) {
+	case 2:
+		want = 0x00010000u;
+		break;
+	case 3:
+		want = 0x3cu;
+		break;
+	default:
+		want = 0x3du;
+		break;
+	}
 
 	for (s = 0; s < 2; s++) {
 		uint32_t st = streams[s];

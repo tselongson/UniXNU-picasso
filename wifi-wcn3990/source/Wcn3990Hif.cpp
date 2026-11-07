@@ -1327,22 +1327,11 @@ hif_program_bases(void)
 
 	g_bases_programmed = true;
 	hif_dump_regs("stage 2: CE bases programmed, no buffers posted");
-	/* SMMUv2 (IHI 0062): with sCR0.USFCFG=0 an unmatched stream uses
-	 * S2CR[StreamID] directly.  USFCFG reads 1 here and clearing it is
-	 * refused, but some Qualcomm implementations honour the direct index
-	 * regardless; S2CR writes are the one register family this SMMU still
-	 * accepts.  Write the passthrough bank the console stream uses for both
-	 * candidate WLAN CE streams (0x20 and the device-tree's 0xc0), read-only
-	 * otherwise: if the implementation ignores the direct index nothing
-	 * changes, and the registers are ours to rewrite later. */
-	{
-		uint32_t rb = 0;
-
-		picasso_wlan_smmu_s2cr_set(0x20, WLAN_SMMU_PASSTHRU_BANK, &rb);
-		HIF_LOG("stage 2.5: S2CR[0x20]=%08x", rb);
-		picasso_wlan_smmu_s2cr_set(0xc0, WLAN_SMMU_PASSTHRU_BANK, &rb);
-		HIF_LOG("stage 2.5: S2CR[0xc0]=%08x", rb);
-	}
+	/* No S2CR write here.  This block used to point S2CR[0x20] at bank 61
+	 * after the programming loop, which is both too late (the CTRL1 RRI DMA
+	 * has already run by then) and destructive: whichever routing
+	 * picasso_wlan_smmu_bind_wlan() installed before the engines were
+	 * touched would be overwritten a few microseconds later. */
 	hif_bb(BB_BASES_DONE, 0, 0);
 }
 
