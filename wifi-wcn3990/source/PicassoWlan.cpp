@@ -4346,14 +4346,20 @@ rmtfs_init_buf(void)
 /* ---------------------------------------------------------------------------
  * wifi-wcn3990: host-side CE DMA memory.
  *
- * Linux gives the CE rings to dma_alloc_coherent(), which maps them into the
- * WLAN device's IOMMU domain.  We have no DMA API, so allocate a standalone
- * contiguous block and assign its pages to the WLAN CE / WLAN VMs through SCM.
- * hyp_assign() always keeps VMID_HLOS with RW, so the kernel can keep driving
- * the rings.  Returning NULL makes the HIF stay completely inert rather than
- * starting a DMA that a firmware master is not allowed to complete (v333 hung
- * the SoC that way, with no panic, until the APSS watchdog bit).
+ * Linux gives the CE rings to dma_alloc_coherent().  On WCN3990 the node has
+ * no `dma-coherent`, so that is a Normal non-cacheable / write-combining
+ * mapping in ordinary RAM (see Trogdor/CoachZ's wc_power_up, which is the
+ * same chip and boots Linux's equivalent path).  A cached mapping is fatal:
+ * a later `clean` writes the CPU's stale bytes over the length the CE just
+ * wrote into a receive descriptor, and the CE can read a descriptor the CPU
+ * has not written back yet.  That produced the all-zero "rx" of 428/438 and
+ * the silent reset within 100 ms of the doorbell.
+ *
+ * kmem_alloc_contig() only supplies the contiguous physical pages.  Flush the
+ * KMA_ZERO lines once, then hand the HIF a write-combining alias of the same
+ * pages and never touch the cached alias again.
  * ------------------------------------------------------------------------- */
+static IOMemoryMap *g_wlan_ce_dma_nc_map;   /* keep the uncached alias alive */
 extern "C" void *
 picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out, uint32_t assign_level)
 {
@@ -4390,16 +4396,34 @@ picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out, uint32_t assign_level
 	pa = ptoa_64(page);
 	if (pa_out) *pa_out = pa;
 
+	/* One last clean of the cached alias: KMA_ZERO left clean lines behind.
+	 * From here on every descriptor, buffer and RRI access goes through the
+	 * write-combining alias, so no CPU cache line can ever overwrite what
+	 * the copy engine writes.  CoachZ maps WC_MEM_BYTES exactly this way. */
+	flush_dcache64((addr64_t)pa, (unsigned)size, TRUE);
+	__asm__ volatile ("dsb sy" ::: "memory");
+	if (!g_wlan_ce_dma_nc_map) {
+		g_wlan_ce_dma_nc_map = map_phys(pa, size, true);
+	}
+	if (!g_wlan_ce_dma_nc_map) {
+		LOG("CE dma: cannot map pa %llx write-combining; HIF stays inert", pa);
+		return NULL;
+	}
+	void *nc_va = (void *)g_wlan_ce_dma_nc_map->getVirtualAddress();
+	memset(nc_va, 0, (size_t)size);
+	__asm__ volatile ("dsb sy" ::: "memory");
+	LOG("CE dma: uncached alias va=%p pa=%llx size=%llx", nc_va, pa, size);
+
 	if (assign_level == 0) {
 		LOG("CE dma: pa %llx size %llx NOT assigned (boot-arg)", pa, size);
-		return (void *)va;
+		return nc_va;
 	}
 	if (assign_level == 3) {
 		static const uint32_t vm_mss[1] = { VMID_MSS_MSA };
 		r = hyp_assign(pa, size, vm_mss, 1);
 		LOG("CE dma: pa %llx size %llx assign MSS_MSA rc %lld",
 		    pa, size, (long long)r);
-		return r == 0 ? (void *)va : NULL;
+		return r == 0 ? nc_va : NULL;
 	}
 
 	{
@@ -4420,7 +4444,7 @@ retry:
 			return NULL;
 		}
 	}
-	return (void *)va;
+	return nc_va;
 }
 
 /* rmtfs paths are QMI strings: u8 length then the characters. */
