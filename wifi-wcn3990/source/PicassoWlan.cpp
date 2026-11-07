@@ -275,6 +275,17 @@ picasso_wlan_smmu_table_dump(void)
 	{
 		uint32_t id1 = smmu[0x024 >> 2];
 		uint32_t pages = ((id1 >> 28) & 0x7u) + 1u;
+		uint32_t cb_on = 0;
+
+		/* Off by default: all three build-447 runs stopped dead between
+		 * the "valid stream-match entries" line and the first CB line,
+		 * i.e. on the first context-bank read.  Whether that is an
+		 * undecoded offset or a clock-gated page is itself a finding,
+		 * but it must not block the bring-up. */
+		(void)PE_parse_boot_argn("wcn3990-smmu-cb", &cb_on, sizeof(cb_on));
+		if (!cb_on) {
+			return;
+		}
 		uint32_t banks[2] = {61, 60};
 		uint32_t b;
 
@@ -3825,6 +3836,25 @@ wlfw_rx(const uint8_t *d, uint32_t len)
 		if (wlfw_state > 9) {
 			LOG("t=%u ms: *** WLFW MISSION MODE ATTACH COMPLETE! WLAN RADIO IS ACTIVE! ***", g_ms);
 			wlfw_state = 0;
+			{
+				/* The firmware has accepted the CE table but the
+				 * hardware behind 0x18800000 is not necessarily
+				 * clocked yet.  CoachZ's wc_power_up() runs on the
+				 * next one-second tick after this response; we ran
+				 * it on the very next instruction.  An access to an
+				 * unclocked block is a NoC error, which TrustZone
+				 * turns into either a reset or an interconnect hang
+				 * (Qualcomm's own MMIO-tracing doc), which is exactly
+				 * the "random silent death" seen in 440-447. */
+				uint32_t gap = 1500;
+
+				(void)PE_parse_boot_argn("wcn3990-hif-delay", &gap,
+				    sizeof(gap));
+				LOG("t=%u ms: wlan settle %u ms before any CE access",
+				    g_ms, gap);
+				if (gap) IOSleep(gap);
+				LOG("t=%u ms: settle done, entering CE bring-up", g_ms);
+			}
 			picasso_wlan_ce_init();
 			picasso_wlan_net_attach();
 		} else {

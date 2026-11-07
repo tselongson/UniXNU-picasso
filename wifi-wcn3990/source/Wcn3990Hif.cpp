@@ -1085,6 +1085,10 @@ static void hif_ce_service(uint32_t ce);
 extern "C" void
 wcn3990_hif_poll(void)
 {
+	/* wcn3990-hif=1 is the "touch nothing" control: no CE register is read
+	 * or written by any thread, which is the only way to tell a driver bug
+	 * from the hardware refusing the access. */
+	if (g_hif_mode == 1) return;
 	if (!g_regs_live) return;
 	g_polls++;
 
