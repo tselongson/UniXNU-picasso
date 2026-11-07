@@ -1206,14 +1206,19 @@ hif_program_bases(void)
 	/* Must precede the CTRL1 writes: bit 19 tells the CE to publish read
 	 * indices into this array, so a stale/zero address would send a DMA to
 	 * physical 0.  It lives in the same contiguous block as the rings. */
+	if (g_ce_trace) hif_bb(BB_CE_ACCESS, 0x0f000001u, 0);
 	rri_pa = hif_pa_of(s_rri);
+	if (g_ce_trace) hif_bb(BB_CE_ACCESS, 0x0f000002u, (uint32_t)rri_pa);
 	memset(s_rri, 0, sizeof(s_rri));
 	hif_mb();
+	if (g_ce_trace) hif_bb(BB_CE_ACCESS, 0x0f000003u, 0);
 	*(volatile uint32_t *)(uintptr_t)(g_ce_va + CE_WRAP_RRI_LOW) = (uint32_t)rri_pa;
 	hif_mb();
+	if (g_ce_trace) hif_bb(BB_CE_ACCESS, 0x0f000004u, 0);
 	*(volatile uint32_t *)(uintptr_t)(g_ce_va + CE_WRAP_RRI_HIGH) =
 	    (uint32_t)(rri_pa >> 32) & 0x1fu;
 	hif_mb();
+	if (g_ce_trace) hif_bb(BB_CE_ACCESS, 0x0f000005u, 0);
 	HIF_LOG("RRI pa=%llx wrapper=%08x/%08x", (unsigned long long)rri_pa,
 	    *(volatile uint32_t *)(uintptr_t)(g_ce_va + CE_WRAP_RRI_LOW),
 	    *(volatile uint32_t *)(uintptr_t)(g_ce_va + CE_WRAP_RRI_HIGH));
