@@ -407,6 +407,12 @@ static int g_ce_trace;
  * whichever access came too soon after the previous one.  That is what a block
  * that needs time to wake on first touch looks like. */
 static uint32_t g_ce_pace_us;
+/* wcn3990-hif-rri=0 leaves CTRL1.RRI_UPD clear: the CE then keeps its read
+ * indices in its own registers instead of DMAing them into DDR.  Every build
+ * that set this bit died on the next CE access; every access before it worked.
+ * wcn3990-hif-sleep=0 replaces the 30 ms IOSleep with a busy wait, so the core
+ * never idles between the two accesses. */
+static int g_ce_rri = 1, g_ce_sleep = 1;
 
 /* CoachZ wc_ring (sw/write) and wc.pending: one software consume index and
  * one posted index per destination ring, plus the per-engine interrupt state.
@@ -1246,14 +1252,22 @@ hif_program_bases(void)
 
 		/* ce.c: ath10k_ce_alloc_rri() enables DDR read-index updates on
 		 * every CE, not only the ones this driver posts on. */
-		v |= CE_CTRL1_RRI_UPD;
+		if (g_ce_rri) {
+			v |= CE_CTRL1_RRI_UPD;
+		} else {
+			v &= ~CE_CTRL1_RRI_UPD;
+		}
 		v &= ~(CE_CTRL1_SRC_BSWAP | CE_CTRL1_DST_BSWAP);
 		if (sh->src_n > 0) {
 			v = (v & ~CE_CTRL1_DMAX_MASK) | sh->dmax;
 		}
 		hif_reg_write(ce, CE_CTRL1, v);
 		HIF_LOG("CE%u ctrl1 %08x -> %08x", ce, old, v);
-		IOSleep(30);
+		if (g_ce_sleep) {
+			IOSleep(30);
+		} else {
+			IODelay(30000);
+		}
 
 		if (sh->src_n > 0) {
 			uint64_t pa = g_sr_pa[ce];
@@ -1569,8 +1583,16 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("wcn3990-hif-pace", &v, sizeof(v)) && v <= 100000) {
 		g_ce_pace_us = v;
 	}
-	HIF_LOG("ce bisect: limit=%u step=%u ms trace=%d pace=%u us",
-	    g_ce_limit, g_ce_step_ms, g_ce_trace, g_ce_pace_us);
+	v = 1;
+	if (PE_parse_boot_argn("wcn3990-hif-rri", &v, sizeof(v)) && v <= 1) {
+		g_ce_rri = (int)v;
+	}
+	v = 1;
+	if (PE_parse_boot_argn("wcn3990-hif-sleep", &v, sizeof(v)) && v <= 1) {
+		g_ce_sleep = (int)v;
+	}
+	HIF_LOG("ce bisect: limit=%u step=%u ms trace=%d pace=%u us rri=%d sleep=%d",
+	    g_ce_limit, g_ce_step_ms, g_ce_trace, g_ce_pace_us, g_ce_rri, g_ce_sleep);
 
 	/* wcn3990-hif-assign: 0 (default) = plain HLOS pages; the real gate for
 	 * the WLAN CE master is the apps-SMMU stream, not a VMID assignment.
