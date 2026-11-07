@@ -1387,33 +1387,48 @@ hif_post_buffers(void)
 
 	/* Watch what the doorbell kicked off, read-only, starting with NO sleep:
 	 * the machine has been dying within tens of milliseconds of the real
-	 * doorbell write, so watch 0 is the only read guaranteed to land.  DRRI
-	 * moving = the copy engine fetched the descriptors; a fault record
-	 * naming a stream = the SMMU refused one.  425 taught us the first fetch
-	 * SUCCEEDS (drri=1, clean fault record) and death lands within the next
-	 * 100 ms, so watch at 10 ms and also carry the pre-bind entry (SMR[4])
-	 * and the bypass bank's own FSR - a context-bank fault does not appear
-	 * in the global record. */
+	 * doorbell write, so watch 0 is the only read guaranteed to land.  The
+	 * IMEM black box cannot carry evidence across the reset (the msm-imem
+	 * page comes back zeroed - XBL owns it), so the death window is traced
+	 * LIVE instead: a compact line every ~8 ms for the first second, then
+	 * every 50 ms (each line is ~70 chars = ~6 ms of wire time at 115200).
+	 * Every line carries CE2's DDR RRI (invalidated first - the target
+	 * owns those words after the doorbell), every other destination CE's
+	 * DDR RRI, and both fault records.  Reading the trace: drri freezing
+	 * at 1 = the target stopped after one descriptor; a nonzero g= or f=
+	 * = the SMMU refused something; a line cut off mid-way = the machine
+	 * died inside the console write itself.  425/428/432/433 all died
+	 * between watch 0 and watch 1; this should show what the target was
+	 * doing at that exact moment. */
 	{
 		uint32_t f[8];
 		int k;
 
-		for (k = 0; k < 10; k++) {
+		for (k = 0; k < 240; k++) {
+			uint32_t drri, r1, r5, r7, r8, r9, ra, rb;
+
+			hif_inv_dcache_va((vm_offset_t)&s_rri[2], sizeof(s_rri[2]));
+			drri = s_rri[2] & (CE2_ENTRIES - 1);
+			hif_inv_dcache_va((vm_offset_t)&s_rri[1], sizeof(s_rri[1]));
+			r1 = s_rri[1] & 0x1f;
+			hif_inv_dcache_va((vm_offset_t)&s_rri[5], sizeof(s_rri[5]));
+			r5 = s_rri[5] & 0x1f;
+			hif_inv_dcache_va((vm_offset_t)&s_rri[7], sizeof(s_rri[7]));
+			r7 = s_rri[7] & 0x1;
+			hif_inv_dcache_va((vm_offset_t)&s_rri[8], sizeof(s_rri[8]));
+			r8 = s_rri[8] & 0x1f;
+			hif_inv_dcache_va((vm_offset_t)&s_rri[9], sizeof(s_rri[9]));
+			r9 = s_rri[9] & 0x1f;
+			hif_inv_dcache_va((vm_offset_t)&s_rri[10], sizeof(s_rri[10]));
+			ra = s_rri[10] & 0x1f;
+			hif_inv_dcache_va((vm_offset_t)&s_rri[11], sizeof(s_rri[11]));
+			rb = s_rri[11] & 0x1f;
 			picasso_wlan_smmu_fault_read(f);
-			HIF_LOG("stage 3 watch %d: drri=%u wr=%u gfsr=%08x gfsynr0=%08x gfsynr1=%08x scr0=%08x smr4=%08x cb61fsr=%08x",
-			    k, hif_reg_read(2, CE_CURRENT_DRRI),
-			    hif_reg_read(2, CE_DST_WR_INDEX), f[0], f[1], f[2],
-			    f[4], f[5], f[7]);
-			hif_bb(BB_WATCH, k, hif_reg_read(2, CE_CURRENT_DRRI));
-			IOSleep(10);
-		}
-		for (k = 0; k < 24; k++) {
-			IOSleep(250);
-			HIF_LOG("stage 3 alive %d: drri=%u wr=%u gfsr=%08x",
-			    k, hif_reg_read(2, CE_CURRENT_DRRI),
-			    hif_reg_read(2, CE_DST_WR_INDEX),
-			    (picasso_wlan_smmu_fault_read(f), f[0]));
-			hif_bb(BB_WATCH, 100 + k, hif_reg_read(2, CE_CURRENT_DRRI));
+			printf("W%03u d=%x w=%x 1=%x 5=%x 7=%x 8=%x 9=%x a=%x b=%x g=%x f=%x\n",
+			    k, drri, hif_reg_read(2, CE_DST_WR_INDEX),
+			    r1, r5, r7, r8, r9, ra, rb, f[0], f[7]);
+			hif_bb(BB_WATCH, k, drri);
+			IOSleep(k < 100 ? 8 : 50);
 		}
 	}
 	g_watch_done = true;
