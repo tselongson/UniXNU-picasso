@@ -391,6 +391,27 @@ static struct wcn_ce_desc_64 *g_sr_desc[12], *g_dr_desc[12];
 static uint8_t *g_buf_va[12];
 static uint32_t g_rri_last[12];       /* heartbeat: last seen DDR read index */
 
+/* CoachZ wc_ring (sw/write) and wc.pending: one software consume index and
+ * one posted index per destination ring, plus the per-engine interrupt state.
+ * Previously only CE2 had these and every other receive ring was posted but
+ * never drained - the firmware fills CE1 with HTT/HTC and the ring wedges. */
+static uint32_t g_dst_sw[12], g_dst_write[12];
+static volatile uint32_t g_ce_pending;      /* bit per CE, set by the IRQ */
+static volatile uint32_t g_ce_masked;
+static uint32_t g_ce_irqs[12], g_ce_repeats[12];
+static volatile uint8_t *g_gicd;
+static bool g_ce_irq_live;
+
+/* cb&2 from host_ce_config_wlan: these are the pipes whose receive rings
+ * wc_service() drains. CB=0 pipes (7, 8) still need their buffers reposted. */
+static const uint8_t hif_ce_recv[12] = {0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 1};
+
+/* ArmCpu.cpp exports this for SPI handlers; the DT gives icnss 12
+ * interrupts 0x19e..0x1a9 = SPI 414 + CE id (level high). */
+extern "C" int armcpu_spi_attach(uint32_t intid, bool edge,
+    void (*handler)(void *), void *context, uint32_t *readback,
+    uint64_t *router);
+
 static inline volatile uint32_t *
 hif_reg(uint32_t ce, uint32_t off)
 {
@@ -475,27 +496,6 @@ hif_ce_send(uint32_t ce, uint8_t *buf, uint32_t len)
 	return 0;
 }
 
-/* Post one more receive buffer on CE2 and advance the dest write index.
- * ce.c: ath10k_ce_rx_update_write_idx() keeps one slot free; we start with
- * CE2_ENTRIES-1 posted buffers for the same reason.  The buffer must be filled
- * at the *write* index (the one slot the target does not own yet), not at the
- * slot just consumed. */
-static void
-hif_ce2_repost(uint32_t idx)
-{
-	uint32_t slot = g_post2 & (CE2_ENTRIES - 1);
-	struct wcn_ce_desc_64 *d = &s_dst2[slot];
-
-	(void)idx;
-	d->addr = (g_rx2_pa + (uint64_t)slot * CE_BUF_BYTES) & CE_DESC_ADDR_MASK;
-	d->nbytes = 0;   /* posted, not completed; the CE writes the length */
-	d->flags = 0;
-	d->toeplitz = 0;
-	hif_mb();
-
-	g_post2 = (slot + 1) & (CE2_ENTRIES - 1);
-	hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
-}
 
 static void
 hif_dump_regs(const char *why)
@@ -1058,12 +1058,15 @@ hif_handle_rx(const uint8_t *buf, uint32_t nbytes)
 /* Defined in the init section below, but the poll ladder must see them. */
 static void hif_program_bases(void);
 static void hif_post_buffers(void);
+static void hif_ce_post_ring(uint32_t ce);
+static void hif_ce_irq(void *context);
+static void hif_ce_enable(uint32_t ce);
+static void hif_ce_attach_irqs(void);
+static void hif_ce_service(uint32_t ce);
 
 extern "C" void
 wcn3990_hif_poll(void)
 {
-	uint32_t budget = CE2_ENTRIES;
-
 	if (!g_regs_live) return;
 	g_polls++;
 
@@ -1107,48 +1110,26 @@ wcn3990_hif_poll(void)
 	if (g_stage < 3) return;
 	if (g_scan_active) g_scan_polls++;
 
-	/* ath10k_snoc_hif_start() posts the buffers and services them right
-	 * away.  No post-doorbell watch, no gate: CoachZ's pure-poll wc_poll(1)
-	 * proves the CE works without a single interrupt registered. */
-
-	/* ath10k_ce_per_engine_service() / CoachZ wc_service() both acknowledge
-	 * the copy-complete, error and watermark status bits (W1C) before they
-	 * look at the ring.  Leaving them set is what stops the CE after a few
-	 * completions - every build so far froze on the fifth receive. */
-	hif_reg_write(2, CE_STATUS, 0x1u | 0x1eu);
-
-	/* The block is Normal non-cacheable, so the CE's write to the DDR read
-	 * index and to each descriptor's nbytes is visible immediately: no
-	 * invalidate, no clean, and no risk of writing back a stale line. */
-	/* ath10k_ce_dest_ring_read_index_get(): a pipe without CE_ATTR_DIS_INTR
-	 * (CE2 is one) reads the CE's CURRENT_DRRI register.  The DDR RRI word
-	 * packs src in [15:0] and dst in [31:16] and is only used for the
-	 * DIS_INTR pipes, so indexing s_rri[2] directly was reading the wrong
-	 * half of the wrong source. */
+	/* CoachZ wc_poll(0): service every engine whose interrupt fired, or all
+	 * of them when the twelve SPIs could not be attached, then re-enable
+	 * that engine's copy-complete interrupt.  The 1 ms cadence comes from
+	 * the modem thread, exactly like CoachZ's watch loop. */
 	{
-		uint32_t drri = hif_reg_read(2, CE_CURRENT_DRRI) & (CE2_ENTRIES - 1);
+		uint32_t pending, ce;
 
-		while (budget-- > 0 && drri != g_sw2) {
-			struct wcn_ce_desc_64 *d = &s_dst2[g_sw2];
-			uint32_t idx = g_sw2, nbytes;
-
-			/* ath10k: a zero length is a descriptor the CE has not
-			 * completed yet, not a full-size frame. */
-			nbytes = d->nbytes;
-			if (nbytes == 0) break;   /* CE has not completed this one yet */
-			if (nbytes > CE_BUF_BYTES) nbytes = CE_BUF_BYTES;
-			d->nbytes = 0;            /* claim it before reposting */
-
-			if (g_rx_packets < 16) hif_bb(BB_RX, idx, nbytes);
-			hif_handle_rx(s_rx2[idx], nbytes);
-
-			hif_ce2_repost(idx);
-			g_sw2 = (g_sw2 + 1) & (CE2_ENTRIES - 1);
+		if (g_ce_irq_live) {
+			pending = __atomic_exchange_n(&g_ce_pending, 0u,
+			    __ATOMIC_ACQUIRE);
+		} else {
+			pending = (1u << 12) - 1u;
 		}
-	}
-
-	if (g_state == HIF_CE_UP && (g_polls % 2000) == 0) {
-		hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
+		for (ce = 0; ce < 12; ce++) {
+			if (!(pending & (1u << ce))) continue;
+			hif_ce_service(ce);
+			if (g_ce_irq_live) hif_ce_enable(ce);
+		}
+		g_sw2 = g_dst_sw[2];
+		g_post2 = g_dst_write[2];
 	}
 }
 
@@ -1235,8 +1216,10 @@ hif_program_bases(void)
 			    ce, (unsigned long long)pa, sh->dst_n, wm,
 			    hif_reg_read(ce, CE_DST_WM));
 		}
+		/* IRQF_NO_AUTOEN: keep the engine quiet until wc_start() has
+		 * attached all twelve SPI handlers. */
 		hif_reg_write(ce, CE_HOST_IE, 0);
-		hif_reg_write(ce, CE_MISC_IE, 0);
+		hif_reg_write(ce, CE_MISC_IE, hif_reg_read(ce, CE_MISC_IE) & ~0x3e0u);
 	}
 
 	g_bases_programmed = true;
@@ -1260,123 +1243,160 @@ hif_program_bases(void)
 	hif_bb(BB_BASES_DONE, 0, 0);
 }
 
-/* Post a whole dst ring full of receive buffers and ring that CE's doorbell.
- * snoc.c: ath10k_snoc_rx_post_pipe() fills every slot but one and writes the
- * dest write index once; that write is the doorbell the CE fetches on. */
+/* CoachZ wc_rx_post() / __ath10k_ce_rx_post_buf_64(): post every free slot
+ * up to (sw - 1), each with its own dsb st + CE_DST_WR_INDEX write.  Descriptor
+ * slot i always owns buffer slot i.  Advancing the index once from 0 to 63
+ * instead is what every build up to 439 froze on. */
 static void
 hif_ce_post_ring(uint32_t ce)
 {
 	const struct hif_ce_shape *sh = &hif_shape[ce];
 	struct wcn_ce_desc_64 *ring = g_dr_desc[ce];
-	uint32_t n = sh->dst_n, i;
+	uint32_t n = sh->dst_n, mask, free;
 
-	/* Fill every descriptor with the buffer address and a zero length.
-	 * Linux/CoachZ post exactly this way: the CE writes the transfer
-	 * length into nbytes when it completes, and a zero nbytes means
-	 * "not done yet" (_ath10k_ce_completed_recv_next_nolock_64). */
-	for (i = 0; i < n; i++) {
-		ring[i].addr = (g_buf_pa[ce] + (uint64_t)i * sh->buf_sz) &
+	if (n == 0 || ring == NULL) return;
+	mask = n - 1;
+	for (free = ((g_dst_sw[ce] - 1u) - g_dst_write[ce]) & mask;
+	     free; free--) {
+		uint32_t slot = g_dst_write[ce] & mask;
+		struct wcn_ce_desc_64 *d = &ring[slot];
+
+		d->addr = (g_buf_pa[ce] + (uint64_t)slot * sh->buf_sz) &
 		    CE_DESC_ADDR_MASK;
-		ring[i].nbytes = 0;
-		ring[i].flags = 0;
-		ring[i].toeplitz = 0;
+		d->nbytes = 0;    /* the CE writes the length on completion */
+		d->flags = 0;
+		d->toeplitz = 0;
+		g_dst_write[ce] = (g_dst_write[ce] + 1u) & mask;
+		__asm__ volatile ("dsb st" ::: "memory");
+		hif_reg_write(ce, CE_DST_WR_INDEX, g_dst_write[ce]);
 	}
-	/* No cache maintenance: the window is Normal non-cacheable. */
-	hif_mb();
-
-	/* Keep one slot free so the ring can never look full to the target. */
-	hif_reg_write(ce, CE_DST_WR_INDEX, n - 1);
-	HIF_LOG("CE%u posted %u receive buffers (desc.addr=%llx buf=%u)",
-	    ce, n - 1, (unsigned long long)g_buf_pa[ce], sh->buf_sz);
-	hif_bb(BB_DOOR_REAL, 0x100u + ce, n - 1);
 }
 
-/* Stage 3: hand receive buffers to the copy engines. */
+/* CoachZ wc_irq(): a level-high CE interrupt that is not acknowledged will
+ * hold a core forever.  Turn the engine's interrupt enables off, record the
+ * pending bit for the 1 ms service loop, and mask the line at the GIC if it
+ * keeps firing anyway. */
+static void
+hif_ce_irq(void *context)
+{
+	uint32_t ce = (uint32_t)(uintptr_t)context;
+	uint32_t before;
+
+	if (ce >= 12 || !g_ce_irq_live) return;
+	hif_reg_write(ce, CE_HOST_IE, hif_reg_read(ce, CE_HOST_IE) & ~1u);
+	hif_reg_write(ce, CE_MISC_IE,
+	    hif_reg_read(ce, CE_MISC_IE) & ~0x3e0u);
+	hif_reg_write(ce, CE_HOST_IE, hif_reg_read(ce, CE_HOST_IE) & ~0x1eu);
+	g_ce_irqs[ce]++;
+	before = __atomic_fetch_or(&g_ce_pending, 1u << ce, __ATOMIC_ACQ_REL);
+	if (!(before & (1u << ce))) {
+		g_ce_repeats[ce] = 0;
+		return;
+	}
+	if (++g_ce_repeats[ce] >= 1000 && g_gicd) {
+		uint32_t intid = 32u + 414u + ce;
+
+		*(volatile uint32_t *)(uintptr_t)(g_gicd + 0x180u +
+		    (intid / 32u) * 4u) = 1u << (intid % 32u);  /* GICD_ICENABLER */
+		__atomic_fetch_or(&g_ce_masked, 1u << ce, __ATOMIC_RELEASE);
+	}
+}
+
+/* CoachZ wc_enable(): copy-complete on for engines with a callback,
+ * watermark/error bits off. */
+static void
+hif_ce_enable(uint32_t ce)
+{
+	uint32_t ie = hif_reg_read(ce, CE_HOST_IE);
+
+	if (hif_shape[ce].src_n || hif_ce_recv[ce]) ie |= 1u;
+	else ie &= ~1u;
+	hif_reg_write(ce, CE_HOST_IE, ie & ~0x1eu);
+}
+
+/* CoachZ wc_start(): all twelve SPIs attached BEFORE the first doorbell.
+ * If an attach fails, wc_poll() falls back to servicing every engine. */
+static void
+hif_ce_attach_irqs(void)
+{
+	uint32_t ce, attached = 0;
+
+	g_gicd = (volatile uint8_t *)ml_io_map(0x17a00000u, 0x1000u);
+	for (ce = 0; ce < 12; ce++) {
+		uint32_t readback = 0;
+		uint64_t router = 0;
+		int rc = armcpu_spi_attach(32u + 414u + ce, false,
+		    hif_ce_irq, (void *)(uintptr_t)ce, &readback, &router);
+
+		if (rc == 0) attached++;
+	}
+	g_ce_irq_live = (attached == 12);
+	HIF_LOG("copy-engine interrupts %u/12 attached, gicd=%p pure_poll=%u",
+	    attached, g_gicd, !g_ce_irq_live);
+	for (ce = 0; ce < 12; ce++) {
+		if (hif_shape[ce].src_n == 0 && hif_ce_recv[ce] == 0) continue;
+		hif_ce_enable(ce);
+	}
+}
+
+/* CoachZ wc_service(): acknowledge the engine's status, drain every completed
+ * receive descriptor, hand CE2/HTC traffic to the protocol layer, retire
+ * completed sends, then repost the free slots. */
+static void
+hif_ce_service(uint32_t ce)
+{
+	const struct hif_ce_shape *sh = &hif_shape[ce];
+	struct wcn_ce_desc_64 *ring;
+	uint32_t mask, guard;
+
+	hif_reg_write(ce, CE_STATUS, 0x1u | 0x1eu);
+	if (sh->dst_n == 0 || (ring = g_dr_desc[ce]) == NULL) return;
+	mask = sh->dst_n - 1;
+
+	for (guard = 0; guard <= mask; guard++) {
+		struct wcn_ce_desc_64 *d = &ring[g_dst_sw[ce] & mask];
+		uint32_t nbytes = d->nbytes, idx;
+
+		if (nbytes == 0) break;      /* not completed yet */
+		d->nbytes = 0;
+		idx = g_dst_sw[ce] & mask;
+		g_dst_sw[ce] = (g_dst_sw[ce] + 1u) & mask;
+		if (nbytes > sh->buf_sz) continue;
+		if (ce == 2) {
+			if (g_rx_packets < 16) hif_bb(BB_RX, idx, nbytes);
+			hif_handle_rx(s_rx2[idx], nbytes);
+		}
+		/* Other receive pipes carry HTT/HTC traffic this bring-up has
+		 * no parser for.  CoachZ hands every pipe to wh_rx(); draining
+		 * and reposting is what keeps those rings from wedging the CE. */
+	}
+	hif_ce_post_ring(ce);
+}
+
+/* Stage 3 = CoachZ wc_start(): attach the twelve CE interrupts first, then
+ * post every destination ring with one doorbell per descriptor.  No bisect
+ * no-op write, no warm-up sleep, no watch: the CE sees a live, serviced ring
+ * from the first store. */
 static void
 hif_post_buffers(void)
 {
-	/* Every dst pipe first: the firmware services these rings the moment
-	 * it starts consuming CE2 (the 430 family died exactly there), so the
-	 * rings must be live before the CE2 doorbell rings. */
-	{
-		uint32_t ce;
+	uint32_t ce;
 
-		for (ce = 0; ce < 12; ce++) {
-			if (ce == 2) continue;
-			if (hif_shape[ce].dst_n > 0) hif_ce_post_ring(ce);
-		}
+	hif_ce_attach_irqs();
+	for (ce = 0; ce < 12; ce++) {
+		if (hif_shape[ce].dst_n == 0) continue;
+		g_dst_sw[ce] = hif_reg_read(ce, CE_CURRENT_DRRI) &
+		    (hif_shape[ce].dst_n - 1);
+		g_dst_write[ce] = hif_reg_read(ce, CE_DST_WR_INDEX) &
+		    (hif_shape[ce].dst_n - 1);
+		hif_ce_post_ring(ce);
+		HIF_LOG("CE%u posted: sw=%u write=%u desc.addr=%llx",
+		    ce, g_dst_sw[ce], g_dst_write[ce],
+		    (unsigned long long)g_dr_pa[ce]);
 	}
-
-	/* ce.c: the write index is a free-running counter masked with
-	 * nentries-1, and __ath10k_ce_rx_post_buf_64() posts on top of
-	 * whatever the register already holds.  Keep one slot free so the
-	 * ring can never look full to the target. */
-	{
-		uint32_t cur = hif_reg_read(2, CE_DST_WR_INDEX) & (CE2_ENTRIES - 1);
-		uint32_t n = (g_post_count > 0 && g_post_count < CE2_ENTRIES) ?
-		    g_post_count : (CE2_ENTRIES - 1);
-		uint32_t i;
-
-		g_post2 = (cur + n) & (CE2_ENTRIES - 1);
-		/* Fill the CE2 descriptors that are about to be handed over:
-		 * the other dst pipes already got complete rings above, and
-		 * these must be clean before the fetch. */
-		for (i = 0; i < n; i++) {
-			uint32_t slot = (cur + i) & (CE2_ENTRIES - 1);
-
-			s_dst2[slot].addr = (g_rx2_pa + (uint64_t)slot * CE_BUF_BYTES) &
-			    CE_DESC_ADDR_MASK;
-			s_dst2[slot].nbytes = 0;
-			s_dst2[slot].flags = 0;
-			s_dst2[slot].toeplitz = 0;
-		}
-		hif_mb();
-
-		/* Bisect the doorbell.  Writing the value that is already there
-		 * is a no-op for the CE, so if the SoC dies on that store the
-		 * register itself is the trigger. */
-		HIF_LOG("stage 3: doorbell cur=%u target=%u dr_base=%08x desc.addr=%llx",
-		    cur, g_post2, hif_reg_read(2, CE_DR_BASE_LO),
-		    (unsigned long long)s_dst2[0].addr);
-		hif_bb(BB_DOOR_NOOP, cur, g_post2);
-		IOSleep(30);
-		/* Warm the fault-record mapping now: the post-doorbell watch
-		 * must not spend its first microseconds in ml_io_map(). */
-		{
-			uint32_t f[8];
-
-			picasso_wlan_smmu_fault_read(f);
-			HIF_LOG("stage 3 warm: gfsr=%08x gfsynr1=%08x scr0=%08x smr4=%08x s2cr4=%08x cb61fsr=%08x",
-			    f[0], f[2], f[4], f[5], f[6], f[7]);
-		}
-		hif_reg_write(2, CE_DST_WR_INDEX, cur);
-		HIF_LOG("stage 3: doorbell no-op write ok (reads %u)",
-		    hif_reg_read(2, CE_DST_WR_INDEX));
-		IOSleep(30);
-		/* wcn3990-hif-noopdoor=1 skips the real doorbell: if the machine
-		 * then lives through the heartbeat the reset is caused by the
-		 * fetch itself (or what follows it). */
-		{
-			uint32_t noop = 0;
-
-			PE_parse_boot_argn("wcn3990-hif-noopdoor", &noop, sizeof(noop));
-			if (noop) {
-				HIF_LOG("stage 3: noopdoor - skipping the real doorbell");
-			} else {
-				hif_bb(BB_DOOR_REAL, g_post2, n);
-				hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
-				HIF_LOG("stage 3: posted %u receive buffers (desc.addr=%llx wr=%u)",
-				    n, (unsigned long long)s_dst2[0].addr, g_post2);
-			}
-		}
-	}
-
-	/* ath10k_snoc_hif_start() services the rings immediately after posting;
-	 * CoachZ's wc_poll(1) shows the pure-polling path (no interrupts
-	 * attached) is a valid backend.  There is deliberately no sleep here:
-	 * a CE completion left unacknowledged for even a few milliseconds is
-	 * what froze every previous build at the fifth receive. */
-	HIF_LOG("stage 3: CE rings live, poller now servicing every 1 ms");
+	g_sw2 = g_dst_sw[2];
+	g_post2 = g_dst_write[2];
+	HIF_LOG("stage 3: all receive rings live, 1 ms service loop owns the CE");
 }
 
 extern "C" void
