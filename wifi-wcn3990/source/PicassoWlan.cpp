@@ -3471,6 +3471,67 @@ static volatile uint8_t *g_wlan_ce_base = NULL;
 static void picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t rssi, uint16_t freq);
 
 static void
+/*
+ * Bind the WLAN masters to a bypass context bank, before anything touches the
+ * copy engines.  The device tree says iommus = <&apps_smmu 0x20 0x01>, so the
+ * two masters are streams 0x20 and 0x21; the stream-match table XBL leaves
+ * behind has no entry that covers either.  With sCR0.USFCFG set, a CE DMA
+ * faults and is dropped, the CE's port waits forever for a response, and the
+ * next host access to that port queues behind it and hangs - which is exactly
+ * the "dies at the second CE register write" signature of builds 440-447.
+ *
+ * It has to happen before the first CE DMA: once a transaction is stuck, even
+ * an SMMU register access queues behind it (v336/v338 died on the SMR store).
+ * S2CR = 61 is the value that was read back from stream 0x20 in build 439, the
+ * only boot in which the whole programming loop completed.
+ */
+extern "C" int
+picasso_wlan_smmu_bind_wlan(uint32_t cb)
+{
+	static volatile uint32_t *smmu;
+	uint32_t slot = 0, i;
+	int ok = -1;
+
+	if (smmu == NULL) {
+		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x1000);
+
+		if (va == 0) {
+			return -1;
+		}
+		smmu = (volatile uint32_t *)va;
+	}
+	for (i = 8; i < 128; i++) {
+		if ((smmu[(0x800 >> 2) + i] & 0x80000000u) == 0) {
+			slot = i;
+			break;
+		}
+	}
+	if (slot == 0) {
+		LOG("smmu bind: no free stream-match slot");
+		return -1;
+	}
+	for (i = 0; i < 8; i++) {
+		uint32_t want = 0x80000000u | (1u << 16) | 0x20u;
+		uint32_t rb_smr, rb_s2cr;
+
+		(void)cb;
+		smmu[(0xc00 >> 2) + slot] = 61u;
+		__asm__ volatile ("dsb sy" ::: "memory");
+		smmu[(0x800 >> 2) + slot] = want;
+		__asm__ volatile ("dsb sy" ::: "memory");
+		rb_smr = smmu[(0x800 >> 2) + slot];
+		rb_s2cr = smmu[(0xc00 >> 2) + slot];
+		LOG("smmu bind: slot %u want %08x got %08x s2cr %08x (try %u)",
+		    slot, want, rb_smr, rb_s2cr, i);
+		if (rb_smr == want) {
+			ok = 0;
+			break;
+		}
+		IOSleep(2);
+	}
+	return ok;
+}
+
 picasso_wlan_ce_init(void)
 {
 	if (!g_wlan_ce_map) {
@@ -3483,6 +3544,16 @@ picasso_wlan_ce_init(void)
 	}
 	/* Beacons delivered over WMI_MGMT_RX_EVENT go through the standard
 	 * 802.11 parser below, which fills g_picasso_bsss[]. */
+	{
+		uint32_t bind = 0;
+
+		(void)PE_parse_boot_argn("wcn3990-wlan-smrubind", &bind,
+		    sizeof(bind));
+		if (bind) {
+			LOG("smmu bind: rc %d",
+			    picasso_wlan_smmu_bind_wlan(WLAN_SMMU_PASSTHRU_BANK));
+		}
+	}
 	wcn3990_hif_set_frame_sink(picasso_parse_beacon_frame);
 	wcn3990_hif_init(g_wlan_ce_base, WLAN_CE_BASE_PA);
 }
