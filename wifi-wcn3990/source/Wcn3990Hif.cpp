@@ -413,6 +413,14 @@ static uint32_t g_ce_pace_us;
  * wcn3990-hif-sleep=0 replaces the 30 ms IOSleep with a busy wait, so the core
  * never idles between the two accesses. */
 static int g_ce_rri = 1, g_ce_sleep = 1;
+/* wcn3990-hif-ctrl1: what the CTRL1 store actually does.
+ *   2 (default) bit 19 = RRI update enabled and DMAX set from the ring shape
+ *   1           read-modify-write with bit 19 only, DMAX left as XBL set it
+ *   0           no store at all - the engine keeps the state the firmware left
+ * The store is the last thing that happens before the SoC dies, and build 439
+ * performed exactly the same store (0x80800) and survived, so 0 separates "the
+ * store itself is refused" from "the DMA it kicks off is refused". */
+static int g_ce_ctrl1 = 2;
 
 /* CoachZ wc_ring (sw/write) and wc.pending: one software consume index and
  * one posted index per destination ring, plus the per-engine interrupt state.
@@ -1272,8 +1280,16 @@ hif_program_bases(void)
 		if (sh->src_n > 0) {
 			v = (v & ~CE_CTRL1_DMAX_MASK) | sh->dmax;
 		}
-		hif_reg_write(ce, CE_CTRL1, v);
-		HIF_LOG("CE%u ctrl1 %08x -> %08x", ce, old, v);
+		if (g_ce_ctrl1 == 0) {
+			HIF_LOG("CE%u ctrl1 %08x left alone", ce, old);
+		} else {
+			if (g_ce_ctrl1 == 1) {
+				v = (old | CE_CTRL1_RRI_UPD) &
+				    ~(CE_CTRL1_SRC_BSWAP | CE_CTRL1_DST_BSWAP);
+			}
+			hif_reg_write(ce, CE_CTRL1, v);
+			HIF_LOG("CE%u ctrl1 %08x -> %08x", ce, old, v);
+		}
 		if (g_ce_sleep) {
 			IOSleep(30);
 		} else {
@@ -1591,8 +1607,13 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("wcn3990-hif-sleep", &v, sizeof(v)) && v <= 1) {
 		g_ce_sleep = (int)v;
 	}
-	HIF_LOG("ce bisect: limit=%u step=%u ms trace=%d pace=%u us rri=%d sleep=%d",
-	    g_ce_limit, g_ce_step_ms, g_ce_trace, g_ce_pace_us, g_ce_rri, g_ce_sleep);
+	v = 2;
+	if (PE_parse_boot_argn("wcn3990-hif-ctrl1", &v, sizeof(v)) && v <= 2) {
+		g_ce_ctrl1 = (int)v;
+	}
+	HIF_LOG("ce bisect: limit=%u step=%u ms trace=%d pace=%u us rri=%d sleep=%d ctrl1=%d",
+	    g_ce_limit, g_ce_step_ms, g_ce_trace, g_ce_pace_us, g_ce_rri, g_ce_sleep,
+	    g_ce_ctrl1);
 
 	/* wcn3990-hif-assign: 0 (default) = plain HLOS pages; the real gate for
 	 * the WLAN CE master is the apps-SMMU stream, not a VMID assignment.
