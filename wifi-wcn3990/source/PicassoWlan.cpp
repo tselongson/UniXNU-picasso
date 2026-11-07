@@ -3647,6 +3647,66 @@ picasso_wlan_smmu_bind_wlan(uint32_t mode)
 		return (smmu[0] & 1u) ? 0 : -1;
 	}
 
+	/* The device tree, not an upstream description, says which stream the
+	 * copy engines use: qcom,icnss@18800000 has iommus = <&apps_smmu 0xc0
+	 * 0x1>, i.e. streams 0xc0 and 0xc1.  Every build up to 456 wrote
+	 * S2CR[0x20]/[0x21] instead - a pair taken from an sc7180 device tree -
+	 * and that is why routing those two to bank 60 changed nothing at all.
+	 * 0xc0 is also above the 128 slots this driver used to scan, which is
+	 * how the real route stayed invisible in every dump.
+	 *
+	 *   mode 7: S2CR[0xc0] -> bank 60 (the identity bank USB runs on)
+	 *   mode 8: S2CR[0xc0] -> bank 61 (what XBL installs when it binds it)
+	 *   mode 9: an explicit SMR entry for 0xc0/mask 1 -> bank 60, the path
+	 *           XBL uses; if the SMR store does not land, 7 is the answer.
+	 */
+	if (mode >= 7 && mode <= 9) {
+		uint32_t rb = 0, before;
+
+		if (mode == 9) {
+			uint32_t slot, rb_smr = 0, rb_s2 = 0;
+
+			for (slot = 0; slot < 128; slot++) {
+				if ((smmu[(0x800 >> 2) + slot] & 0x80000000u) == 0) {
+					break;
+				}
+			}
+			if (slot >= 128) {
+				slot = 13;
+			}
+			for (i = 0; i < 8; i++) {
+				smmu[(0xc00 >> 2) + slot] = 0x3cu;
+				smmu[(0x800 >> 2) + slot] = 0x800100c0u; /* V|mask1|id 0xc0 */
+				__asm__ volatile ("dsb sy" ::: "memory");
+				rb_smr = smmu[(0x800 >> 2) + slot];
+				rb_s2 = smmu[(0xc00 >> 2) + slot];
+				if ((rb_smr & 0x80000000u) && rb_s2 == 0x3cu) {
+					break;
+				}
+				IOSleep(2);
+			}
+			LOG("smmu bind: SMR[%u]=%08x S2CR[%u]=%08x (want 800100c0/0000003c)",
+			    slot, rb_smr, slot, rb_s2);
+			ok = ((rb_smr & 0x80000000u) && rb_s2 == 0x3cu) ? 0 : -1;
+			goto tlb;
+		}
+
+		before = smmu[(0xc00 >> 2) + 0xc0];
+		for (i = 0; i < 8; i++) {
+			smmu[(0xc00 >> 2) + 0xc0] = (mode == 7) ? 0x3cu : 0x3du;
+			__asm__ volatile ("dsb sy" ::: "memory");
+			rb = smmu[(0xc00 >> 2) + 0xc0];
+			if (rb == ((mode == 7) ? 0x3cu : 0x3du)) {
+				break;
+			}
+			IOSleep(2);
+		}
+		LOG("smmu bind: S2CR[c0] %08x -> %08x readback %08x (try %u) mode %u",
+		    before, (mode == 7) ? 0x3cu : 0x3du, rb, i, mode);
+		ok = (rb == ((mode == 7) ? 0x3cu : 0x3du)) ? 0 : -1;
+		goto tlb;
+	}
+
 	/* mode 5: every S2CR slot whose SMR is not valid gets 0x3c.  With USFCFG=1
 	 * those slots are exactly what an unmatched stream id indexes, so this
 	 * makes every unknown master identity-mapped through bank 60.
@@ -3774,14 +3834,17 @@ picasso_wlan_ce_init(void)
 	/* Beacons delivered over WMI_MGMT_RX_EVENT go through the standard
 	 * 802.11 parser below, which fills g_picasso_bsss[]. */
 	{
-		uint32_t bind = 0;
+		uint32_t bind = 7;
 
 		(void)PE_parse_boot_argn("wcn3990-wlan-smrubind", &bind,
 		    sizeof(bind));
 		if (bind) {
-			/* 1 = S2CR[0x20/0x21] translate through CB61 (the value
-			 * build 439 read back), 2 = bypass.  Whatever the readback
-			 * says is printed either way. */
+			/* 7 (the default) routes stream 0xc0 - the stream the
+			 * device tree gives icnss - to bank 60, the identity
+			 * bank USB already runs on.  1..6 are the earlier
+			 * experiments on 0x20/0x21; 8/9 are the CB61 and
+			 * explicit-SMR variants.  Whatever the readback says
+			 * is printed either way. */
 			LOG("smmu bind: rc %d",
 			    picasso_wlan_smmu_bind_wlan(bind));
 		}
