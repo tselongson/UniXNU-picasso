@@ -70,14 +70,21 @@ static void picassoLogThread(void *,wait_result_t) {
     thread_terminate(current_thread());
 }
 }
-// Exact Picasso layout measured in build164. Root authentication and both GPT
-// CRC checks still precede initialization. No writes to the root or GPT.
+// Exact Picasso layout measured in build164 on a 64 GiB SKU.  This unit is the
+// 128 GiB SKU: its userdata partition ends at LBA 30944250 (not 15330298), so
+// the 20 GiB Data window lands at 25439066 and the GPT CRCs differ.  The root
+// image bytes, partition start and reserve are identical on both SKUs.  The
+// four values below were measured on two consecutive boots of THIS device
+// (console-wifi0.log / console-wifi0-erase.log) and are stable across the
+// userdata erase/re-flash; keeping them explicit preserves the same write-
+// protection binding as build164.  A build164/64 GiB unit would now refuse
+// initialization instead of writing at the wrong LBA.
 extern "C" int picasso_data_init_begin(uint64_t pages,const uint8_t seed[32]) {
     uint32_t request=0;PE_parse_boot_argn("picasso-data-replace-20g",&request,sizeof(request));
-    if(!seed || pages!=5242880 || gStoreRegionBlocks!=5243041 || gStoreRegionFirst!=9825114 ||
-       gStoreGeometry.first!=2883584 || gStoreGeometry.last!=15330298 ||
+    if(!seed || pages!=5242880 || gStoreRegionBlocks!=5243041 || gStoreRegionFirst!=25439066 ||
+       gStoreGeometry.first!=2883584 || gStoreGeometry.last!=30944250 ||
        gStoreGeometry.imageBytes!=8380219392ULL || reserveBlocks()!=262144 ||
-       gStoreGeometry.headerCrc!=0x3c17a352 || gStoreGeometry.entriesCrc!=0xd82988c2 ||
+       gStoreGeometry.headerCrc!=0x4607b886 || gStoreGeometry.entriesCrc!=0x7a8e105c ||
        native_ufs_store_gpt_check() || !picassoRecordWindowOpen())return 0;
     uint8_t identity[picasso_data_init::identityBytes]={};
     picasso_record::put64(identity,gStoreGeometry.first);
