@@ -242,7 +242,10 @@ picasso_wlan_smmu_table_dump(void)
 	uint32_t id2, num_s2cr, i, valid = 0;
 
 	if (smmu == NULL) {
-		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0x1000);
+		/* The context-bank pages live far above GR0 (bank 61 sits at
+		 * a multiple of 0x1000 past it), so map the whole register
+		 * block the way the USB driver does. */
+		vm_offset_t va = ml_io_map(WLAN_SMMU_PA, 0xd0000);
 
 		if (va == 0) return;
 		smmu = (volatile uint32_t *)va;
@@ -252,6 +255,12 @@ picasso_wlan_smmu_table_dump(void)
 	if (num_s2cr == 0 || num_s2cr > 128) num_s2cr = 128;
 	LOG("smmu: sCR0=%08x IDR0=%08x IDR2=%08x numS2CR=%u",
 	    smmu[0], smmu[0x020 >> 2], id2, num_s2cr);
+	/* GFSYNR1 carries the stream id of the last faulting transaction, so a
+	 * fault raised before this driver touched anything (the firmware
+	 * bringing itself up) is attributable instead of guessed. */
+	LOG("smmu: gfsr=%08x gfsynr0=%08x gfsynr1=%08x gfsynr2=%08x",
+	    smmu[0x048 >> 2], smmu[0x050 >> 2], smmu[0x054 >> 2],
+	    smmu[0x058 >> 2]);
 	for (i = 0; i < num_s2cr; i++) {
 		uint32_t smr = smmu[(0x800 >> 2) + i];
 
@@ -263,6 +272,26 @@ picasso_wlan_smmu_table_dump(void)
 		}
 	}
 	LOG("smmu: %u valid stream-match entries", valid);
+	{
+		uint32_t id1 = smmu[0x024 >> 2];
+		uint32_t pages = ((id1 >> 28) & 0x7u) + 1u;
+		uint32_t banks[2] = {61, 60};
+		uint32_t b;
+
+		/* GR0 has the per-bank CBAR/CBA2R array; SCTLR lives in the
+		 * bank's own page.  An S2CR that names a bank whose CBAR was
+		 * never programmed still faults, so print both banks the
+		 * bring-up cares about: 61 is what the SEC bind points the
+		 * wlan streams at, 60 is what the USB driver programmed. */
+		for (b = 0; b < 2; b++) {
+			uint32_t n = banks[b];
+
+			LOG("smmu: CB%u cbar=%08x cba2r=%08x sctlr=%08x",
+			    n, smmu[(0x1000u >> 2) + n],
+			    smmu[(0x1800u >> 2) + n],
+			    smmu[((pages + n) * 0x1000u) >> 2]);
+		}
+	}
 }
 
 /* Write one S2CR and return the readback: the only register family this SMMU

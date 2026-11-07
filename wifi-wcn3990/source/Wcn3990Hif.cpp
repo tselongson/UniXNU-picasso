@@ -85,6 +85,8 @@ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 #define BB_WATCH_DONE     6
 #define BB_RX             7
 #define BB_REPOST         8
+#define BB_SMMU_FAULT     9   /* gfsr / gfsynr1 right after the doorbell */
+#define BB_SMMU_CB       10   /* cb61 fsr / CE2 DRRI right after the doorbell */
 
 static volatile uint32_t *g_bb;       /* first record slot */
 static volatile uint32_t *g_imem;     /* page base: restart reason + pil */
@@ -391,6 +393,10 @@ static uint64_t g_sr_pa[12], g_dr_pa[12], g_buf_pa[12];
 static struct wcn_ce_desc_64 *g_sr_desc[12], *g_dr_desc[12];
 static uint8_t *g_buf_va[12];
 static uint32_t g_rri_last[12];       /* heartbeat: last seen DDR read index */
+/* Bisect knobs: how many engines to program, and how long to wait between
+ * them.  A single build then covers a range of experiments by rebooting with
+ * wcn3990-hif-cecount=N / wcn3990-hif-cewait=MS instead of rebuilding. */
+static uint32_t g_ce_limit = 12, g_ce_step_ms = 0;
 
 /* CoachZ wc_ring (sw/write) and wc.pending: one software consume index and
  * one posted index per destination ring, plus the per-engine interrupt state.
@@ -1067,6 +1073,7 @@ static void hif_ce_post_ring(uint32_t ce);
 static void hif_ce_irq(void *context);
 static void hif_ce_enable(uint32_t ce);
 static void hif_ce_attach_irqs(void);
+static void hif_ce_mask_spis(void);
 static void hif_ce_service(uint32_t ce);
 
 extern "C" void
@@ -1150,10 +1157,37 @@ wcn3990_hif_poll(void)
  * data to garbage addresses under the bypass - which is what killed every
  * build up to 430 within 10 ms of the CE2 doorbell. */
 static void
+hif_ce_mask_spis(void)
+{
+	static volatile uint32_t *gicd;
+	uint32_t ce;
+
+	if (gicd == NULL) {
+		vm_offset_t va = ml_io_map(0x17a00000u, 0x1000u);
+
+		if (va == 0) return;
+		gicd = (volatile uint32_t *)va;
+	}
+	for (ce = 0; ce < 12; ce++) {
+		uint32_t spi = 414u + ce;
+
+		gicd[(0x180u >> 2) + (spi >> 5)] = 1u << (spi & 31u);
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	HIF_LOG("copy-engine SPIs 414..425 masked at the gicd");
+}
+
+static void
 hif_program_bases(void)
 {
 	uint64_t rri_pa;
 	uint32_t ce;
+
+	/* Mask the twelve copy-engine SPIs at the GIC before touching a
+	 * single CE register.  XBL leaves them enabled, the CE lines are
+	 * level-high, and no handler exists until hif_ce_attach_irqs() runs
+	 * later - a pending line would be delivered into an empty vector. */
+	hif_ce_mask_spis();
 
 	/* First line of stage 2, before any CE register is written: what did
 	 * the SEC firmware's stream pre-bind actually leave in the SMMU?
@@ -1175,7 +1209,7 @@ hif_program_bases(void)
 	    *(volatile uint32_t *)(uintptr_t)(g_ce_va + CE_WRAP_RRI_LOW),
 	    *(volatile uint32_t *)(uintptr_t)(g_ce_va + CE_WRAP_RRI_HIGH));
 
-	for (ce = 0; ce < 12; ce++) {
+	for (ce = 0; ce < g_ce_limit; ce++) {
 		const struct hif_ce_shape *sh = &hif_shape[ce];
 		uint32_t old = hif_reg_read(ce, CE_CTRL1);
 		uint32_t v = old;
@@ -1196,9 +1230,12 @@ hif_program_bases(void)
 			uint32_t wm;
 
 			hif_reg_write(ce, CE_SR_BASE_LO, (uint32_t)pa);
+			if (ce == 0) HIF_LOG("CE0 step: SR_BASE_LO");
 			hif_reg_write(ce, CE_SR_BASE_HI,
 			    (uint32_t)(pa >> 32) & 0x1f);
+			if (ce == 0) HIF_LOG("CE0 step: SR_BASE_HI");
 			hif_reg_write(ce, CE_SR_SIZE, sh->src_n);
+			if (ce == 0) HIF_LOG("CE0 step: SR_SIZE");
 			/* ce.c: src lowmark 0, highmark nentries. */
 			wm = hif_reg_read(ce, CE_SRC_WM);
 			hif_reg_write(ce, CE_SRC_WM,
@@ -1214,9 +1251,12 @@ hif_program_bases(void)
 			uint32_t wm;
 
 			hif_reg_write(ce, CE_DR_BASE_LO, (uint32_t)pa);
+			if (ce == 0) HIF_LOG("CE0 step: DR_BASE_LO");
 			hi = (hi & ~0x1fu) | ((uint32_t)(pa >> 32) & 0x1fu);
 			hif_reg_write(ce, CE_DR_BASE_HI, hi);
+			if (ce == 0) HIF_LOG("CE0 step: DR_BASE_HI");
 			hif_reg_write(ce, CE_DR_SIZE, sh->dst_n);
+			if (ce == 0) HIF_LOG("CE0 step: DR_SIZE");
 			/* ce.c: dst low watermark 0, high watermark nentries. */
 			wm = hif_reg_read(ce, CE_DST_WM);
 			hif_reg_write(ce, CE_DST_WM,
@@ -1236,7 +1276,10 @@ hif_program_bases(void)
 		 * as write-only. */
 		hif_reg_write(ce, CE_HOST_IE, 0);
 		hif_reg_write(ce, CE_MISC_IE, 0);
+		if (ce == 0) HIF_LOG("CE0 step: IE cleared");
+		if (g_ce_step_ms && ce + 1 < g_ce_limit) IOSleep(g_ce_step_ms);
 	}
+	HIF_LOG("ce bisect: programmed %u engine(s)", g_ce_limit);
 
 	g_bases_programmed = true;
 	hif_dump_regs("stage 2: CE bases programmed, no buffers posted");
@@ -1408,7 +1451,7 @@ hif_post_buffers(void)
 	uint32_t ce;
 
 	hif_ce_attach_irqs();
-	for (ce = 0; ce < 12; ce++) {
+	for (ce = 0; ce < g_ce_limit; ce++) {
 		if (hif_shape[ce].dst_n == 0) continue;
 		g_dst_sw[ce] = hif_reg_read(ce, CE_CURRENT_DRRI) &
 		    (hif_shape[ce].dst_n - 1);
@@ -1421,6 +1464,22 @@ hif_post_buffers(void)
 	}
 	g_sw2 = g_dst_sw[2];
 	g_post2 = g_dst_write[2];
+
+	/* A copy engine whose descriptor fetch was dropped by the SMMU leaves
+	 * a record in GFSR/FSYNR and in the context bank's FSR within
+	 * microseconds of the doorbell.  The console line may not survive the
+	 * wedge that follows, so the same numbers go into the black box, which
+	 * the next boot dumps. */
+	{
+		uint32_t f[8], drri;
+
+		picasso_wlan_smmu_fault_read(f);
+		drri = hif_reg_read(2, CE_CURRENT_DRRI) & (CE2_ENTRIES - 1);
+		hif_bb(BB_SMMU_FAULT, f[0], f[2]);
+		hif_bb(BB_SMMU_CB, f[7], drri);
+		HIF_LOG("post-doorbell: gfsr=%08x gfsynr1=%08x cb61fsr=%08x drri=%u",
+		    f[0], f[2], f[7], drri);
+	}
 	HIF_LOG("stage 3: all receive rings live, 1 ms service loop owns the CE");
 }
 
@@ -1460,6 +1519,19 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	    v < CE2_ENTRIES) {
 		g_post_count = v;
 	}
+
+	/* wcn3990-hif-cecount=N programs only CE0..N-1; wcn3990-hif-cewait=MS
+	 * sleeps between engines.  Programming only CE0 tells us whether the
+	 * very first engine write is what kills the SoC. */
+	v = 0;
+	if (PE_parse_boot_argn("wcn3990-hif-cecount", &v, sizeof(v)) && v <= 12) {
+		g_ce_limit = v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("wcn3990-hif-cewait", &v, sizeof(v)) && v <= 5000) {
+		g_ce_step_ms = v;
+	}
+	HIF_LOG("ce bisect: limit=%u step=%u ms", g_ce_limit, g_ce_step_ms);
 
 	/* wcn3990-hif-assign: 0 (default) = plain HLOS pages; the real gate for
 	 * the WLAN CE master is the apps-SMMU stream, not a VMID assignment.
