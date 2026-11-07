@@ -3341,18 +3341,61 @@ diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
 index e9daeed833924a653c2243f46615527a3e9b4195..1d670170759e04d18f6d57f3f78d6e420ade0812 100644
 --- a/osfmk/kern/debug.c
 +++ b/osfmk/kern/debug.c
-@@ -1132,6 +1132,10 @@ void
+@@ -1132,6 +1132,53 @@ void
  panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsigned int reason, void *ctx,
      uint64_t panic_options_mask, void *panic_data_ptr, unsigned long panic_caller)
  {
 +	{
 +		extern void picasso_usb_panic_begin(void);
++		extern void picasso_usb_panic_write(const char *, int);
++		const char *fmt = panic_format_str;
++		unsigned long esr = 0, far = 0;
++		char buf[152];
++		int n = 0, k;
++
++		/* The formatted panic text died mid-flight on 2026-11-07: the
++		 * BEGIN banner reached the console and nothing followed, so the
++		 * panic machinery itself was still running when the machine
++		 * hung.  Dump the raw trap facts first - ESR/FAR of the abort
++		 * (stale when panic() is called directly, which is diagnostic
++		 * on its own), the panic caller and the format string. */
++		__asm__ volatile ("mrs %0, ESR_EL1" : "=r"(esr));
++		__asm__ volatile ("mrs %0, FAR_EL1" : "=r"(far));
 +		picasso_usb_panic_begin();
++		buf[n++] = '\r'; buf[n++] = '\n';
++		buf[n++] = '['; buf[n++] = 'p'; buf[n++] = 'i'; buf[n++] = 'c';
++		buf[n++] = ']'; buf[n++] = ' ';
++		for (k = 15; k >= 0; k--) {
++			int d = (int)((esr >> (4 * k)) & 0xf);
++
++			buf[n++] = (char)(d < 10 ? '0' + d : 'a' + (d - 10));
++		}
++		buf[n++] = ' ';
++		for (k = 15; k >= 0; k--) {
++			int d = (int)((far >> (4 * k)) & 0xf);
++
++			buf[n++] = (char)(d < 10 ? '0' + d : 'a' + (d - 10));
++		}
++		buf[n++] = ' ';
++		for (k = 7; k >= 0; k--) {
++			int d = (int)((panic_caller >> (4 * k)) & 0xf);
++
++			buf[n++] = (char)(d < 10 ? '0' + d : 'a' + (d - 10));
++		}
++		buf[n++] = '\r'; buf[n++] = '\n';
++		picasso_usb_panic_write(buf, n);
++		if (fmt != NULL) {
++			int m = 0;
++
++			while (fmt[m] != '\0' && m < 140) m++;
++			picasso_usb_panic_write(fmt, m);
++			picasso_usb_panic_write("\r\n", 2);
++		}
 +	}
  #pragma clang diagnostic pop
  
  #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
-@@ -1239,6 +1243,12 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+@@ -1239,6 +1286,12 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
  void
  panic_spin_forever(void)
  {
