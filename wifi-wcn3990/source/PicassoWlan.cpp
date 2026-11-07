@@ -301,14 +301,14 @@ picasso_wlan_panic_report(void)
 		int b;
 
 		for (b = 0; b < 3; b++) {
-			static const char tag[3][6] = { " cb0=", " cb60=", "cb61=" };
+			static const char tag[3][7] = { "  cb0=", " cb60=", " cb61=" };
 			uint32_t fsr = 0xffffffffu;
 
 			if (g_wlan_smmu_regs != NULL &&
 			    g_wlan_cb_fsr_off[b] != 0xffffffffu) {
 				fsr = g_wlan_smmu_regs[g_wlan_cb_fsr_off[b] >> 2];
 			}
-			n += pp_str(text + n, tag[b], 5);
+			n += pp_str(text + n, tag[b], 6);
 			n += pp_hex(text + n, fsr, 8);
 		}
 	}
@@ -3914,7 +3914,8 @@ picasso_wlan_cmd_db_dump(void)
 		LOG("cmd-db: cannot map 0x80860000");
 		return;
 	}
-	LOG("cmd-db: magic %02x%02x%02x%02x", db[4], db[5], db[6], db[7]);
+	LOG("cmd-db: magic %02x%02x%02x%02x", (unsigned)db[4],
+	    (unsigned)db[5], (unsigned)db[6], (unsigned)db[7]);
 	for (resource = 0; resource < 8; resource++) {
 		volatile uint8_t *slave = db + 8 + resource * 16;
 		uint32_t headers, entries, e;
