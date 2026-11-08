@@ -773,10 +773,17 @@ hif_dump_regs(const char *why)
  * commands (WMI_INIT up to RX_RING_CFG) all worked because they contain no
  * arrays at all, and a zero-length array is silently ignored - which is why
  * the bug stayed hidden until the first command that really carries one. */
-#define WMI_TLV_ARRAY_UINT32          17
-#define WMI_TLV_ARRAY_BYTE            18
-#define WMI_TLV_ARRAY_STRUCT          19
-#define WMI_TLV_ARRAY_FIXED_STRUCT    20
+/* ath10k wmi-tlv.h:586-592: the array tags start at 16, one BELOW where
+ * this driver had them.  The 17/18/19/20 values are the ath11k numbering -
+ * a 13/13 tag check had blessed them against the wrong reference tree - so
+ * every array TLV we sent was off by one.  The firmware's own verdict
+ * agrees with ath10k: a 39-channel START_SCAN array with tag 16 ran the
+ * whole capture (504 sh4) while tag 17 died (sh3), and INIT's empty array
+ * booted with 18 (501 ia2) and died with 19 (500). */
+#define WMI_TLV_ARRAY_UINT32          16
+#define WMI_TLV_ARRAY_BYTE            17
+#define WMI_TLV_ARRAY_STRUCT          18
+#define WMI_TLV_ARRAY_FIXED_STRUCT    19
 #define WMI_TLV_MGMT_RX_HDR           44
 #define WMI_TLV_INIT_CMD              74
 #define WMI_TLV_RESOURCE_CONFIG       75
@@ -1212,16 +1219,17 @@ hif_send_wmi_init(void)
 
 	p = hif_put_tlv(p, WMI_TLV_INIT_CMD, (uint16_t)sizeof(init), &init);
 	p = hif_put_tlv(p, WMI_TLV_RESOURCE_CONFIG, (uint16_t)sizeof(cfg), cfg);
-	/* Linux always terminates INIT with an empty ARRAY_STRUCT
-	 * (wmi-tlv.c gen_init: sizeof(*tlv) + chunks_len, chunks_len 0 when
-	 * num_mem_chunks is 0).  This firmware panics on that tag: with
-	 * tag 18 (the old, wrong value) it booted, with tag 19 it dies
-	 * right after INIT.  initarr=0 omits the TLV entirely, 1 keeps the
-	 * Linux tag, 2 reproduces the old value - so one image can decide. */
+	/* Linux always terminates INIT with an empty ARRAY_STRUCT (tag 18;
+	 * wmi-tlv.c gen_init: sizeof(*tlv) + chunks_len, chunks_len 0 when
+	 * num_mem_chunks is 0).  This firmware wants exactly that: with 18 it
+	 * boots (501 ia2), with 19 - the ath11k-shifted value this driver
+	 * used to send - it dies right after INIT (500).  initarr=0 omits the
+	 * TLV entirely, 1 sends the Linux tag, 2 sends 19 as a negative
+	 * control - so one image can decide. */
 	if (g_init_arr == 1) {
 		p = hif_put_tlv(p, WMI_TLV_ARRAY_STRUCT, 0, NULL);
 	} else if (g_init_arr == 2) {
-		p = hif_put_tlv(p, 18, 0, NULL);
+		p = hif_put_tlv(p, 19, 0, NULL);
 	}
 
 	HIF_LOG("WMI: send INIT (abi 0x%08x, %u TLV bytes)", WMI_TLV_ABI_VER0,
@@ -1505,15 +1513,19 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 
 	/* scanshp bisects the four array TLVs.  503 proved shape 1 (struct
 	 * only, 100 bytes) is accepted and the target answers with a scan
-	 * event, while shape 0 kills it - so the command struct is fine and
-	 * one of the arrays is not.
-	 *   0 full Linux command (tags 17/20/20/18)
+	 * event, while the old shape 0 killed it - and 504 plus the ath10k
+	 * wmi-tlv.h enum settled why: the array tags were off by one (the
+	 * ath11k numbers 17/18/19/20 had replaced the ath10k 16/17/18/19).
+	 * With the defines fixed, shape 0 is the full Linux command
+	 * (16/19/19/17); the other shapes stay as A/B controls.
+	 *   0 full Linux command (tags 16/19/19/17)
 	 *   1 struct only
-	 *   2 struct + one empty channel array (tag 17)
-	 *   3 struct + 39-channel array, tag 17
-	 *   4 struct + 39-channel array, tag 16   (one less, the old value)
-	 *   5 struct + broadcast-BSSID array only, tag 20
-	 *   6 all four arrays with the old 16/19/19/17 tags */
+	 *   2 struct + one empty channel array
+	 *   3 struct + 39-channel array (define value)
+	 *   4 struct + 39-channel array, hard-coded 16 (the value that
+	 *     survived 504 while 17 died)
+	 *   5 struct + broadcast-BSSID array only
+	 *   6 all four arrays, hard-coded 16/19/19/17 */
 	switch (g_scan_shape) {
 	case 1:
 	case 2:
