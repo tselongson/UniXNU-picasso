@@ -963,6 +963,19 @@ hif_htt_setup_finish(void)
 		(void)hif_htt_version_req();
 		return;
 	}
+	/* bit4/bit5 separate "the target rejects this message type" from "the
+	 * target rejects this payload": bit4 sends an empty RX_RING_CFG, bit5
+	 * sends a type the protocol does not define at all. */
+	if (g_htt_ring & 16) {
+		HIF_LOG("HTT: probe RX_RING_CFG with an empty payload");
+		(void)hif_htt_send(HTT_H2T_MSG_TYPE_RX_RING_CFG, NULL, 0);
+		return;
+	}
+	if (g_htt_ring & 32) {
+		HIF_LOG("HTT: probe undefined message type 99");
+		(void)hif_htt_send(99, NULL, 0);
+		return;
+	}
 	/* bit0 = RX_RING_CFG, bit1 = AGGR_CFG.  They are split because the
 	 * pair sent together killed the target with a platform error; one
 	 * boot per bit tells which command the firmware refuses. */
@@ -2103,7 +2116,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_htt_setup = (int)v;
 	}
 	v = 0;
-	if (PE_parse_boot_argn("httring", &v, sizeof(v)) && v <= 15) {
+	if (PE_parse_boot_argn("httring", &v, sizeof(v)) && v <= 63) {
 		g_htt_ring = (int)v;
 	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
