@@ -296,3 +296,38 @@ heard()`），但从未在硬件上见过 `HEARD BEACON`；`picasso_sta_join()`
 只打印握手成功并编造 BSSID/RSSI，未发任何 WMI 关联/密钥命令；
 `picasso_wlan_transmit()` 会主动伪造 DHCP Offer/ACK，HTT 数据面完全没有。
 控制面通 ≠ WiFi 可用，不拿「能 attach en0」冒称修好。
+
+## 487：**SError 根因闭环** —— WMI INIT 资源池没配
+
+`boot-487.img` 三组，同一镜像单变量：
+
+| 组 | `wmiinit` | `hifstop` | panic | 采集 | 结果 |
+|---|---|---|---|---|---|
+| `i0` | 0（旧 12 字段） | 0 | **有** | 94.5 s 断 | 基准，VDEV_CREATE 后 SError |
+| `i1` | **1（完整 44 字段）** | 0 | **0** | **满 99.6 s** | WMI READY → VDEV_CREATE → 无崩溃 |
+| `i2` | 1 | 4 | **有** | 94.5 s 断 | 跳过 vdev 却强制 START_SCAN |
+
+`i1` 计数：`CDC PANIC BEGIN` 0、`PICASSO PANIC caller` 0、
+`Unhandled implementation specific` 0；HIF 心跳持续到 5000 poll、
+`rx=13`、GPU hangcheck / CPUFREQ / TOUCH / nvram sync / modem tftp 全部
+正常，`state=5`（HIF_READY）、`en0 ATTACHED`。
+
+**所以 post-WMI SError 的因就是 `hif_send_wmi_init()` 只填了
+`wmi_tlv_resource_config` 44 个 u32 中的 12 个。** 补齐 Linux
+`ath10k_wmi_tlv_op_gen_init()` 的值后，VDEV_CREATE 不再杀死机器。
+这是三天来第一个「CE → HTC → WMI → vdev 之后系统继续活着」的构建。
+
+`i2` 不是反例：`hifstop=4` 故意跳过 VDEV_CREATE 又强制发
+START_SCAN，而 `hif_send_vdev_create()` 上方的注释已经写明
+「A START_SCAN names a vdev_id, and the firmware rejects the scan if that
+vdev was never created」。这是人为构造的非法命令序列，不是
+`wmiinit` 失效。488 改为**保留 vdev + 打开 autoscan** 再验证扫描。
+
+## 488（进行中）：扫描能不能真的出 AP
+
+不重建：`work/make-488.py` 把 487 镜像的 `wmiinit=0` → `=1`，
+并把 `hifstop=0` 的 26 字节槽等长换成 `wcn3990-hif-autoscan=1`
+（`hifstop` 随之缺省为 0，即正常创建 vdev）。`work/chain-488.sh`
+跑 `s1`（完整配置 + 自动扫描）与 `s0`（旧配置 + 自动扫描，对照）。
+判读：`WMI: send START_SCAN` → `WMI: SCAN event` →
+`WMI_MGMT_RX` beacon → `HEARD BEACON` → `heard N access points`。
