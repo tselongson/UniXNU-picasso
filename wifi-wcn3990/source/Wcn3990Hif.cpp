@@ -288,7 +288,11 @@ typedef char wcn_ce_desc_size_check[(sizeof(struct wcn_ce_desc_64) == 16) ? 1 : 
  * HTT_RX_RING_SIZE_MIN is 128; the real kernel uses 2048 entries (4 MiB of
  * buffers), MIN keeps the target's RX path alive and fits the 1 MiB window. */
 #define HTC_HDR_BYTES                 8
-#define HTT_HDR_BYTES                 4
+/* htt.h: struct htt_cmd_hdr is { u8 msg_type; } __packed and struct htt_cmd
+ * is __packed too, so the command payload starts at byte 1, not 4.  Every
+ * builder in htt_tx.c uses sizeof(cmd->hdr) == 1; VERSION_REQ only looks
+ * 4-byte aligned because struct htt_ver_req is itself three pad bytes. */
+#define HTT_HDR_BYTES                 1
 #define HTT_H2T_MSG_TYPE_VERSION_REQ  0
 #define HTT_H2T_MSG_TYPE_RX_RING_CFG  2
 #define HTT_H2T_MSG_TYPE_AGGR_CFG     5
@@ -628,9 +632,16 @@ hif_service_ce1(void)
 		 * htt_resp (and therefore the message type) follows it.  Reading
 		 * b[0] here returns the endpoint id, not the message type. */
 		if (g_htt_rx < 8) {
-			HIF_LOG("htt rx #%u len=%u eid=%u type=%u",
+			/* htt.h: struct htt_resp_hdr is one byte and
+			 * struct htt_ver_resp is {minor, major, rsvd0}, so
+			 * VERSION_CONF carries the target's HTT version at
+			 * b[9]/b[10] - the value ath10k_htt_verify_version()
+			 * insists must be major 3. */
+			HIF_LOG("htt rx #%u len=%u eid=%u type=%u ver=%u.%u",
 			    g_htt_rx, nbytes, nbytes ? b[0] : 0,
-			    nbytes > HTC_HDR_BYTES ? b[HTC_HDR_BYTES] : 0xff);
+			    nbytes > HTC_HDR_BYTES ? b[HTC_HDR_BYTES] : 0xff,
+			    nbytes > HTC_HDR_BYTES + 1 ? b[HTC_HDR_BYTES + 1] : 0xff,
+			    nbytes > HTC_HDR_BYTES + 2 ? b[HTC_HDR_BYTES + 2] : 0xff);
 			g_htt_rx++;
 		}
 		/* htt.c ath10k_htt_setup() waits for VERSION_CONF before it
@@ -870,8 +881,12 @@ hif_htt_send(uint8_t msg_type, const uint8_t *payload, uint32_t len)
 static int
 hif_htt_version_req(void)
 {
+	/* htt.h: struct htt_ver_req is pad[sizeof(u32) - sizeof(htt_cmd_hdr)],
+	 * i.e. exactly three zero bytes, so the whole message is 4 bytes. */
+	static const uint8_t pad[3] = { 0, 0, 0 };
+
 	HIF_LOG("HTT: send VERSION_REQ (eid=%u)", g_htt_eid);
-	return hif_htt_send(HTT_H2T_MSG_TYPE_VERSION_REQ, NULL, 0);
+	return hif_htt_send(HTT_H2T_MSG_TYPE_VERSION_REQ, pad, sizeof(pad));
 }
 
 /* htt_tx.c ath10k_htt_send_rx_ring_cfg_64().  This is the message that gives
