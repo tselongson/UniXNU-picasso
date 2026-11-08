@@ -392,6 +392,7 @@ static int g_ready_stop;
  * will scan without a vdev at all. */
 static int g_vdev_pre;
 static int g_wmi_init_full;   /* wmiinit=1: Linux WCN3990 resource config */
+static int g_scan_chans = -1; /* scanchans=N: cap the START_SCAN channel list */
 static int g_vdev_pending;
 static uint32_t g_vdev_at;
 static uint32_t g_quiet_probe_polls;
@@ -911,6 +912,7 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 	uint8_t bssid[6];
 
 	if (nch * 4 > sizeof(chans)) nch = sizeof(chans) / 4;
+	if (g_scan_chans >= 0) nch = (uint32_t)g_scan_chans;
 	if (dwell_ms == 0 || dwell_ms > 300) dwell_ms = 40;
 
 	memset(&cmd, 0, sizeof(cmd));
@@ -1643,9 +1645,14 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("wmiinit", &v, sizeof(v)) && v <= 1) {
 		g_wmi_init_full = (int)v;
 	}
-	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; wmiinit=%d",
+	v = 0;
+	if (PE_parse_boot_argn("scanchans", &v, sizeof(v)) && v <= 39) {
+		g_scan_chans = (int)v;
+	}
+	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
+	    "wmiinit=%d; scanchans=%d",
 	    g_tx3_rotate ? "8 rotating" : "single (legacy)", g_autoscan,
-	    g_ready_stop, g_vdev_pre, g_wmi_init_full);
+	    g_ready_stop, g_vdev_pre, g_wmi_init_full, g_scan_chans);
 	{
 		uint64_t dma_pa = 0;
 		g_dma = (struct hif_dma_block *)picasso_wlan_ce_dma_alloc(
