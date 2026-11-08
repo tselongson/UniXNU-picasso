@@ -236,3 +236,63 @@ says: power, 1` 已经出现，但在发出 scan 之前就 SError 了。
 前者依赖第 1 项，后者还要做完第 2、3 项。
 
 **当前状态：控制面打通、根因闭环到 SMMU 流注册；WiFi 尚未完全修复，不宣称可连网。**
+
+## 486：触发点修正 —— 不是某条命令，是「固件一用资源池就死」
+
+同一镜像五组（`boot-486.img`，均带 8 槽 CE3 缓冲轮换）：
+
+| 组 | WMI READY 之后 | 结果 |
+|---|---|---|
+| `v0`  `hifstop=0 vdevpre=0` | regdomain + VDEV_CREATE | SError |
+| `d1`  `hifstop=5` | regdomain + 延迟 1000 polls 再 VDEV_CREATE | SError |
+| `d3`  `hifstop=6` | regdomain + 延迟 5000 polls 再 VDEV_CREATE | SError |
+| `p1`  `vdevpre=1` | base MAC + regdomain + VDEV_CREATE | SError |
+| `n4`  `hifstop=4` | regdomain + **START_SCAN，无 vdev** | SError |
+
+五组 panic caller 全部 `0xfffffff007cb580c`，SMMU 转储全干净
+（`gfsr=0`、`gfsynr0/1/2=0`、`cb61_fsr=cb4_fsr=0x400` 只是 FORMAT 位）。
+对照 485 `hifstop=2`（只发 regdomain）：**不 panic**，活 99.6 s，
+HIF 心跳到 5000、modem 正常工作。
+
+所以 485 的「VDEV_CREATE 是唯一触发点」要修正：延迟发送、补 base MAC
+都没用；连跳过 vdev 只发 START_SCAN 也崩。共同点是固件**开始实际射频/
+数据面工作**（建 vdev 或扫描），而 485 的 s2/s3 让固件一直闲着。
+→ 不是命令内容的问题，是固件动用某块资源时崩。
+
+**据此找到的具体缺陷**：`hif_send_wmi_init()` 里
+`struct wmi_tlv_resource_config` 有 44 个 u32，本机只填了 12 个，
+其余全 0。对照 `wmi-tlv.c:1895-1965 gen_init()` + `hw.h TARGET_TLV_*`：
+
+| 字段 | 本机 | Linux WCN3990 |
+|---|---|---|
+| `num_vdevs` / `num_peers` / `num_tids` | 2 / 16 / 16 | 4 / 33 / 66 |
+| `rx_timeout_pri[4]` | 全 0 | 100/100/100/40 |
+| `rx_decap_mode` | 0（RAW，注释却写 native wifi） | 1（NATIVE_WIFI） |
+| `num_msdu_desc` | 128 | 1056 |
+| `max_frag_entries` | 0 | 2 |
+| `tx/rx_chain_mask` | 3 / 3 | 7 / 7 |
+| `bmiss`/`roam`/`gtk`/`beacon` offload max vdev | 0 | 4/4/2/2 |
+| `host_capab` | 0 | `BIT(9)` = 0x200 |
+
+这些池正是 vdev_create / scan 会去分配的。ABI `ns2/ns3` 在 Linux 也是 0，
+不是问题。
+
+## 487（进行中）：把 WMI INIT 补成 Linux 的样子
+
+`358bc6b` 新增 `g_wmi_cfg_full[44]`（逐字段按上表），
+`wmiinit=1` 启用，`=0` 保持旧配置逐字节不变 —— 同一镜像单变量 A/B。
+`work/make-487.py` 用等长槽位 `wmiinit=0` / `hifstop=0` /
+`wcn3990-hif-tx3=1`，`work/chain-487.sh` 跑 `i0` / `i1` / `i2`：
+`i2` 额外用 `hifstop=4` 强制无 vdev 自动扫描，看能否出 `HEARD BEACON`。
+
+判读：`i1` 若不再 panic 且能继续输出 → 资源池根因闭环；
+若三组同样 SError → 此假设证伪，下一步按 Linux
+`ath10k_core_start()` 补 HTT 服务连接 + `ath10k_htt_setup()`
+（VERSION_REQ / FRAG_DESC_BANK_CFG / RX_RING_CFG / AGGR_CFG），
+那也是数据面的前提。
+
+**仍未完成**：扫描结果上报虽已接线（`WMI_MGMT_RX → parse_beacon →
+heard()`），但从未在硬件上见过 `HEARD BEACON`；`picasso_sta_join()`
+只打印握手成功并编造 BSSID/RSSI，未发任何 WMI 关联/密钥命令；
+`picasso_wlan_transmit()` 会主动伪造 DHCP Offer/ACK，HTT 数据面完全没有。
+控制面通 ≠ WiFi 可用，不拿「能 attach en0」冒称修好。
