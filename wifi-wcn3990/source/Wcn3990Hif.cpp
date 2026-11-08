@@ -436,6 +436,7 @@ static int g_vdev_pre;
 static int g_wmi_init_full = 1; /* Linux WCN3990 resource config (the 44-field one) */
 static int g_init_arr;        /* initarr: 0 omit, 1 tag 19, 2 tag 18 */
 static int g_scan_shape;      /* scanshp: 0 full, 1 struct only, 2 +empty array */
+static int g_vdev_start;      /* vdstart=1: WMI_VDEV_START before the scan */
 static int g_scan_chans = -1; /* scanchans=N: cap the START_SCAN channel list */
 /* wmi-tlv.c ath10k_wmi_tlv_iter() advances by exactly tlv_len, with no
  * roundup.  This driver used to round every TLV up to 4 bytes.  Three of
@@ -715,6 +716,7 @@ hif_dump_regs(const char *why)
 #define WMI_PDEV_SET_REGDOMAIN_CMDID  0x4001   /* WMI_CMD_GRP(WMI_GRP_PDEV) */
 #define WMI_SCAN_CHAN_LIST_CMDID      0x3003   /* WMI_TLV_SCAN_CHAN_LIST_CMDID */
 #define WMI_VDEV_UP_CMDID             0x5005   /* WMI_TLV_VDEV_UP_CMDID */
+#define WMI_VDEV_START_CMDID          0x5003   /* WMI_TLV_VDEV_START_CMDID */
 #define WMI_SCAN_EVENTID              0x3001
 #define WMI_MGMT_RX_EVENTID           0x7001   /* WMI_GRP_MGMT  = 7 */
 
@@ -747,6 +749,7 @@ hif_dump_regs(const char *why)
 #define WMI_TLV_CHANNEL               80
 #define WMI_TLV_VDEV_CREATE_CMD       86      /* wmi-tlv.h enum wmi_tlv_tag */
 #define WMI_TLV_VDEV_UP_CMD           92
+#define WMI_TLV_VDEV_START_CMD        88      /* STRUCT_VDEV_START_REQUEST_CMD */
 #define WMI_TLV_PDEV_SET_BASE_MACADDR_CMD 172 /* enum wmi_tlv_tag, master */
 /* wmi-tlv.c: WMI_TLV_ABI_VER0 / VER1 / VER_NS0 */
 #define WMI_TLV_ABI_VER0              0x01000000u
@@ -1265,6 +1268,49 @@ hif_send_scan_chan_list(void)
 	    (uint32_t)(p - tlv));
 }
 
+/* wmi-tlv.c ath10k_wmi_tlv_op_gen_vdev_start(): three TLVs - the 64-byte
+ * request, one STRUCT_CHANNEL, and an empty ARRAY_STRUCT for the nested
+ * p2p-noa descriptor list.  mac.c ath10k_vdev_start_restart() gives the vdev
+ * a home channel; without one the firmware's scan scheduler has no channel
+ * context and asserts the moment START_SCAN arrives. */
+static int
+hif_send_vdev_start(void)
+{
+	uint8_t tlv[160];
+	uint8_t *p = tlv;
+	struct {
+		uint32_t vdev_id;
+		uint32_t bcn_intval;
+		uint32_t dtim_period;
+		uint32_t flags;
+		uint32_t bcn_tx_rate;
+		uint32_t bcn_tx_power;
+		uint32_t disable_hw_ack;
+		uint32_t ssid_len;
+		uint8_t ssid[32];
+	} __attribute__((packed)) cmd;
+	uint8_t ch[24];
+
+	memset(tlv, 0, sizeof(tlv));
+	memset(&cmd, 0, sizeof(cmd));
+	memset(ch, 0, sizeof(ch));
+	cmd.vdev_id = 0;
+	cmd.bcn_intval = 100;
+	cmd.dtim_period = 2;
+	hif_put32(ch + 0, 2412);            /* mhz */
+	hif_put32(ch + 4, 2412);            /* band_center_freq1 */
+	hif_put32(ch + 12, 1);              /* mode = MODE_11G */
+	ch[17] = 40;                        /* max_power, 0.5 dBm */
+	ch[18] = 40;                        /* reg_power, 0.5 dBm */
+	ch[21] = 40;                        /* max_tx_power */
+
+	p = hif_put_tlv(p, WMI_TLV_VDEV_START_CMD, (uint16_t)sizeof(cmd), &cmd);
+	p = hif_put_tlv(p, WMI_TLV_CHANNEL, (uint16_t)sizeof(ch), ch);
+	p = hif_put_tlv(p, WMI_TLV_ARRAY_STRUCT, 0, NULL);
+	HIF_LOG("WMI: send VDEV_START id=0 channel 2412 (MODE_11G)");
+	return hif_wmi_command(WMI_VDEV_START_CMDID, tlv, (uint32_t)(p - tlv));
+}
+
 /* wmi-tlv.c ath10k_wmi_tlv_op_gen_vdev_up(): mac80211 brings the interface
  * up (ath10k_mac_op_start) before any scan.  The payload is 14 packed bytes:
  * vdev_id, assoc_id, bssid. */
@@ -1493,6 +1539,7 @@ hif_finish_vdev(void)
 {
 	if (g_vdev_pre) (void)hif_send_base_macaddr();
 	if (hif_send_vdev_create() == 0) {
+		if (g_vdev_start) (void)hif_send_vdev_start();
 		if (g_vdev_up) (void)hif_send_vdev_up();
 		g_state = HIF_READY;
 		HIF_LOG("WMI: scan vdev created, scanning is available");
@@ -2159,6 +2206,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	v = 0;
 	if (PE_parse_boot_argn("scanshp", &v, sizeof(v)) && v <= 2) {
 		g_scan_shape = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("vdstart", &v, sizeof(v)) && v <= 1) {
+		g_vdev_start = (int)v;
 	}
 	v = 0;
 	if (PE_parse_boot_argn("scanchans", &v, sizeof(v)) && v <= 39) {
