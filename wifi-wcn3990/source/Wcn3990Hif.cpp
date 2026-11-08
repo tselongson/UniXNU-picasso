@@ -1118,18 +1118,28 @@ wcn3990_hif_poll(void)
 	if (g_scan_active) g_scan_polls++;
 
 	if (g_ce_quiet) {
-		if ((g_polls % 1000) == 0) {
+		/* The console dies at the doorbell, so anything learned here has to
+		 * reach the next boot through the IMEM box: one probe every ~5 s,
+		 * each recorded as two records (BB_SMMU_CB a1=probe# a2=DRRI,
+		 * BB_CE_ACCESS a1=0x5150|probe# a2=rx bytes).  A DRRI that moves
+		 * while the driver never touches the engines means the target is
+		 * consuming buffers and the wlan is further along than the console
+		 * ever showed. */
+		if (g_quiet_probe_polls != 0 && g_polls >= g_quiet_probe_polls) {
+			uint32_t drri = hif_reg_read(2, CE_CURRENT_DRRI);
+			uint32_t nb = (unsigned)s_dst2[0].nbytes;
+
+			hif_bb(10, g_quiet_probed, drri);
+			hif_bb(11, 0x51500000u | (g_quiet_probed & 0xffffu), nb);
+			if (g_quiet_probed == 0) {
+				HIF_LOG("quiet probe 0: drri=%x nbytes=%u", drri, nb);
+			}
+			g_quiet_probed++;
+			g_quiet_probe_polls = g_polls + 5000;
+		}
+		if ((g_polls % 5000) == 0) {
 			HIF_LOG("quiet heartbeat polls=%u probe=%d", g_polls,
 			    g_quiet_probed);
-		}
-		if (g_quiet_probe_polls != 0 && !g_quiet_probed &&
-		    g_polls >= g_quiet_probe_polls) {
-			g_quiet_probed = 1;
-			HIF_LOG("quiet probe: drri=%x srri0=%x srwr0=%x nbytes0=%u",
-			    hif_reg_read(2, CE_CURRENT_DRRI),
-			    hif_reg_read(0, CE_CURRENT_SRRI),
-			    hif_reg_read(0, CE_SR_WR_INDEX),
-			    (unsigned)s_dst2[0].nbytes);
 		}
 		return;
 	}
