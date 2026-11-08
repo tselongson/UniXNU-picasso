@@ -365,3 +365,70 @@ CE1/CE5/CE2 接收缓冲投递（各 31/31/63 个）。
 = 0x0300），也从没发过 `VERSION_REQ` / `FRAG_DESC_BANK_CFG` /
 `RX_RING_CFG` / `AGGR_CFG`。固件扫描时要把结果写回 host 的 HTT RX ring，
 没有这块 DMA 内存就是外部中止的典型成因。补齐它同时也是数据面的前提。
+
+## 490 未跑成：CI 是网络故障，不是构建错误
+
+`42464600780` 在 **Prepare authenticated stock touch firmware** 一步以
+`urllib.error.HTTPError: HTTP Error 504: Gateway Time-out` 失败，连
+`Build kernel + payload` 都没到。`work/ci-fail-42464600780.log` 有原始
+堆栈。这是外部下载超时，重跑即可；`work/chain-491.sh` 因此对 CI 加了
+最多 4 次重试，并且遇到真正的编译错误（`Undefined symbols` / `fatal
+error`）会立刻停止，不把编译错误当网络抖动反复重试。
+
+## 491：静态审计先于实机，找到 4 个格式错误的 WMI 命令
+
+之前把 START_SCAN 的 TLV **逐字段**对照过 `wmi-tlv.c:1977
+gen_start_scan`，结论是「结构一致」，但那只比了字段顺序和长度，**没有
+比 TLV 之间的填充**。
+
+`wmi-tlv.c:72 ath10k_wmi_tlv_iter()` 的推进规则是：
+
+```c
+ptr += sizeof(*tlv);   /* 4 */
+ptr += tlv_len;        /* 精确长度，没有 roundup */
+```
+
+而本移植的 `hif_put_tlv()` 返回 `p + 4 + ((len + 3) & ~3u)`，把每条
+TLV 补齐到 4 字节。凡是长度不是 4 的倍数的 TLV，都被硬塞进 2 个
+零字节；这些字节在 target 眼里是下一条 TLV 的前半截。
+
+自己写的离线工具 `work/wmi-tlv-audit.py`（按同一套字段尺寸重建字节流，
+再用 Linux 的迭代器走一遍）给出：
+
+| 命令 | 旧布局（`--pad`） | 精确布局 |
+|---|---|---|
+| WMI_INIT | 216 B OK | 216 B OK |
+| PDEV_SET_REGDOMAIN | 24 B OK | 24 B OK |
+| PDEV_SET_BASE_MACADDR | **12 B，尾部 2 B 截断** | 10 B OK |
+| **VDEV_CREATE** | **24 B，尾部 2 B 截断** | **22 B OK** |
+| VDEV_UP（新增） | 20 B 截断 | 18 B OK |
+| **START_SCAN(39ch)** | **280 B，多出一条 tag=0 的假 TLV，尾部 2 B 截断** | **278 B OK** |
+
+7 条命令里 4 条在旧构建里无法被 Linux 的解析器读完。这直接给出一个
+可证伪的解释：**VDEV_CREATE 被 target 拒绝，vdev 根本不存在**，随后
+`START_SCAN` 点名一个不存在的 vdev，固件 assert，经 apps 侧 SError
+表现为 `Unhandled implementation specific error`；SMMU 转储干净、
+崩溃前没有 `WMI: SCAN event` 也都对得上。
+
+注意：这只是**源码级证据**，不是实机结论。修法是把精确长度设为默认
+（`tlvpad=0`），同时保留 `tlvpad=1` 复现旧行为作为同一条链里的负对照。
+
+## 491 的一次构建、七个单变量实验
+
+`cec4d5c` 除修 TLV 外，把 Linux 在 WMI READY 之后、START_SCAN 之前还
+做、而本移植没做的步骤全部做成**独立开关**，这样一次 CI 构建就能分别
+验证，不用每个假设都重编一次内核：
+
+| 开关 | 对应 Linux |
+|---|---|
+| `chanlist=1` | `WMI_SCAN_CHAN_LIST`（`mac.c ath10k_update_channel_list()`，`0x3003`），39 个 `STRUCT_CHANNEL` |
+| `vdevup=1` | `WMI_VDEV_UP`（`wmi-tlv.c:2283 gen_vdev_up`，`0x5005`），14 B 载荷 |
+| `scanlinux=1` | `0xA000` scan/req ID 前缀 + `ath10k_wmi_start_scan_init()` 默认值 + passive flag XOR |
+| `httconn=1` | `ath10k_htt_connect()`：SETUP_COMPLETE 之前连接 `HTT_DATA_MSG`(0x0300) |
+| `scanchans=N` | 490 留下的信道数二分（39 / 1 / 0） |
+
+`work/make-491.py` 把短参数等长塞进 6 个既有 boot-arg 槽（空格是
+`PE_parse_boot_argn` 的分隔符），保持 args 行长度不变；`work/multi-boot.sh`
+每次只翻一个 token。判读顺序：`pad`（旧布局，应崩）→ `fix`（精确布局）
+→ 其余开关 → `WMI: SCAN event` → `WMI_MGMT_RX` → `HEARD BEACON`。
+**结果待 491 链跑完后回填，此处不预先宣称已修复。**
