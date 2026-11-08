@@ -111,11 +111,44 @@ fmt: Unhandled implementation specific error
 A/B。同时它也说明：0xc0 未注册时的表现是**静音**（无 panic），注册后 CE 真跑
 起来才会触发 SError —— 两个不同故障，之前一直被混为一谈。
 
-**下一个从未测过的变量**：全部十几次实验都是 `assign_level=0`，即 CE 内存
-从未通过 SCM `hyp_assign()` 授权给任何固件 VMID，而 SError 正是「访问未授权
-内存」的典型硬件表现。483 已备好 `out/full-flash/boot-483.img`（把
-`offline-hid-swipe-delay=8` 等长换成 `wcn3990-hif-assign=0` 槽位，不需重建），
-`work/chain-483.sh` 会在同一镜像上跑 `=0/1/2/3` 四个值。
+**483 结果：TZ 授权假设证伪**（同一镜像 `=0/1/2/3` 四组）：
+
+| 组 | SCM 授权 | 结果 |
+|---|---|---|
+| `a0` | 不授权 | 完整 WMI → 同样的 SError |
+| `a1` | `VMID_WLAN_CE` | `hyp_assign rc -2`，TZ 拒绝，HIF 保持 inert |
+| `a2` | `+VMID_WLAN` | 两级都 `rc -2`，HIF 保持 inert |
+| `a3` | `VMID_MSS_MSA` | **`rc 0` 授权成功**，完整 WMI → **仍同样的 SError** |
+
+所以问题不在内存归属。（副产品：本机只有 `VMID_MSS_MSA` 能授成功，
+24/25 两个 VMID 被 TZ 拒绝。）
+
+## 484：真正的 SError 根因 —— CE3 发送缓冲区被所有 WMI 命令复用
+
+网上检索命中 **CVE-2022-50700 / Linux `wifi: ath10k: Delay the unmapping
+of the buffer`**：WCN3990 的 CE3（WMI 命令通道）copy-complete 到达时硬件
+可能仍在读源缓冲，host 立即解映射/复用会触发 SMMU fault + kernel panic，
+崩溃签名 `Unhandled context fault: fsr=0x402 ... Asserted in copy_engine`。
+我们日志里的 `cb61fsr=00000400` 与之同族。
+
+**代码里是更严重的同型 bug**：`hif_wmi_command()` 把每条 WMI 命令都写进
+同一个静态 DMA 缓冲 `s_tx3`，于是 CE3 的每个描述符都指向**同一个物理地址**
+（483 `a0`：desc 0/1/2 全是 `pa cdd9ae40`）。WMI READY 之后背靠背发
+`PDEV_SET_REGDOMAIN` 和 `VDEV_CREATE`，第二条 `memset`+`memcpy` 直接覆盖
+还在搬运的第一条 → 固件/CE 读到损坏命令 → SMMU 外部中止 → APSS SError。
+这也解释了为什么 panic 时间稳定落在 WMI 完成后 0.2 s、以及
+`WMI: event 0x401f (1148 bytes)` 之后。
+
+修复（`d00b0b8`）：
+
+- `tx3` 改成 8 个 2 KiB 槽，`hif_wmi_command()` 用与 `hif_ce_send()` 相同的
+  `g_wr3` 索引取槽，任意两个在飞描述符不可能共享字节；
+- 编译期 `hif_dma_window_check` 保证 512 KiB DMA 窗口仍装得下（+14 KiB）；
+- `wcn3990-hif-tx3=0/1` 单变量 A/B；
+- `wcn3990-hif-autoscan=1` 在 `HIF_READY` 后自动发 `START_SCAN`，用来把
+  `WMI_MGMT_RX → HEARD BEACON → BSS 列表` 整条路一次验证完。
+
+484 正在构建并跑 `t0`（旧行为）/ `t1`（独立缓冲）/ `t2`（独立缓冲+自动扫描）。
 
 ## 距离「完全可用」还差什么（代码摸底结论，2026-11-08）
 
