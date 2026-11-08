@@ -2,12 +2,10 @@
 """Capture the Picasso CDC-ACM kernel console on macOS."""
 import argparse
 from datetime import datetime
-import fcntl
 import glob
 import os
 from pathlib import Path
 import select
-import struct
 import sys
 import termios
 import time
@@ -28,21 +26,6 @@ def configure_serial(fd):
     attrs[6][termios.VMIN] = 0
     attrs[6][termios.VTIME] = 0
     termios.tcsetattr(fd, termios.TCSANOW, attrs)
-
-
-def assert_modem_lines(fd):
-    wanted = termios.TIOCM_DTR | termios.TIOCM_RTS
-    before = struct.unpack(
-        'I', fcntl.ioctl(fd, termios.TIOCMGET, struct.pack('I', 0)))[0]
-    fcntl.ioctl(fd, termios.TIOCMBIS, struct.pack('I', wanted))
-    after = struct.unpack(
-        'I', fcntl.ioctl(fd, termios.TIOCMGET, struct.pack('I', 0)))[0]
-    if after & wanted != wanted:
-        raise OSError(
-            f'failed to assert DTR/RTS: TIOCM before={before:#x} '
-            f'after={after:#x}, wanted={wanted:#x}'
-        )
-    return before, after
 
 
 def main():
@@ -110,14 +93,10 @@ def main():
 
                 fd = None
                 try:
-                    fd = os.open(current_port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+                    fd = os.open(current_port, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
                     configure_serial(fd)
-                    bits_before, bits_after = assert_modem_lines(fd)
-                    print(
-                        f'Recording {current_port} to {output} '
-                        f'(TIOCM={bits_before:#x}->{bits_after:#x}; Ctrl-C to stop)',
-                        file=sys.stderr,
-                    )
+                    print(f'Recording {current_port} to {output} (Ctrl-C to stop)',
+                          file=sys.stderr)
                     while deadline is None or time.monotonic() < deadline:
                         timeout = 0.5
                         if deadline is not None:
@@ -137,9 +116,7 @@ def main():
                         except BlockingIOError:
                             continue
                         if not data:
-                            if args.reconnect:
-                                break
-                            raise OSError('USB serial device returned EOF')
+                            continue
                         log.write(data)
                         log.flush()
                         if not args.no_stdout:
