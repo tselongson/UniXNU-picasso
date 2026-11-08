@@ -847,7 +847,7 @@ CmdDbBcm cmdDbBcmLookup(const Mapping &db, const char *name)
 /* Votes the crypto path's BCMs through the apps RSC's active TCSs. Returns the
  * number of BCMs voted. Every wait is bounded: a stuck RSC must not stop the
  * boot, and the PAS result is what the caller measures. */
-unsigned rpmhVoteCryptoPath()
+extern "C" unsigned rpmhVoteCryptoPath(void)
 {
     Mapping rsc = {};
     Mapping db = {};
