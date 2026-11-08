@@ -1678,10 +1678,19 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 		hif_handle_mgmt_rx(payload + 4, len - 4);
 		break;
 	case WMI_SCAN_EVENTID:
+		/* TLV, not a flat struct: payload is the 4-byte WMI header, then
+		 * a 4-byte TLV header, then struct wmi_scan_event
+		 * { event_type, reason, channel_freq, scan_req_id, scan_id,
+		 *   vdev_id, tsfl }.  Reading payload+4 used to fold the TLV
+		 * length and tag into "type" (0x24001c), which is how we know
+		 * the tag is 36 and the block is 28 bytes. */
 		if (len >= 16) {
-			HIF_LOG("WMI: SCAN event type=%u reason=%u freq=%u beacons=%u",
-			    hif_le32(payload + 4), hif_le32(payload + 8),
-			    hif_le32(payload + 12), g_beacons);
+			HIF_LOG("WMI: SCAN event type=%u reason=%u freq=%u req=0x%x "
+			    "id=0x%x vdev=%u beacons=%u",
+			    hif_le32(payload + 8), hif_le32(payload + 12),
+			    hif_le32(payload + 16), hif_le32(payload + 20),
+			    hif_le32(payload + 24), hif_le32(payload + 28),
+			    g_beacons);
 		}
 		g_scan_active = false;
 		break;
