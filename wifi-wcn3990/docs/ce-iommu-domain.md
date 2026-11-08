@@ -476,3 +476,64 @@ bytes`（精确布局），`boot-491.img` 的 `tlvpad` 开关确实生效了。
 固件，本移植一直没有这块内存。参考树里只有 `htt.h` 的常量和结构体，
 `htt_tx.c` 的编码函数不在（`grep h2t_ver_req_msg` 只有 htt.c 的调用处），
 所以这一步要么补上游源码，要么按 `htt.h` 的线格式自己写。
+
+## 492 实测：HTT 通了，Scanner 仍然崩
+
+一个镜像 `boot-492.img`（CI `42472147929`）+ 3 次开机。**流程教训（第二次）**：
+串口在 `t+51 s` 才枚举，HIF 在串口首字节之后 `~94 s` 才启动，所以 150 s 的
+采集窗口只剩 5 s 给驱动——第一次三组全是截断日志。窗口按 `≥200 s` 定。
+
+| 组 | 唯一变量 | 结果 |
+|---|---|---|
+| `hand` | `httsetup=1`（只发 VERSION_REQ，不扫描） | **不崩**，心跳 30000 次，CE1 收到 1 条 T2H |
+| `scan` | `autoscan=1`（不握手，扫描） | SError `caller=0xfffffff007cb61b8` |
+| `hs` | 两者都开 | **SError，同一 caller** |
+
+`hand` 的原始证据：
+
+```
+WCN3990-HIF: HTC: HTT endpoint eid=2
+WCN3990-HIF: HTT: send VERSION_REQ (eid=2)
+WCN3990-HIF: htt rx #0 len=12 type=2
+WCN3990-HIF: heartbeat polls=30000 stage=3 state=5 rx=14
+```
+
+这是本移植**第一次收到固件发来的 HTT T2H 消息**：CE4（H2T）发送路径、CE1（T2H）
+接收路径、HTC 端点复用都验证通过。`state=5` 是 `HIF_READY`。
+
+结论：**只发 VERSION_REQ 不足以救 START_SCAN**。但 492 从未发过
+`RX_RING_CFG`——固件此时仍然拿着一个**空的 RX ring**。`hs` 崩在 START_SCAN
+之后，与"固件拿到扫描结果却无处可放 → assert"完全一致，这就是 493 要验的。
+
+### 492→493 期间修掉的两个 bug
+
+1. **CE1 解析错位**：CE 缓冲区开头是 8 字节 HTC 头，`b[0]` 是 endpoint id，
+   不是 `htt_resp.hdr.msg_type`。必须读 `b[HTC_HDR_BYTES]`。旧的 VERSION_CONF
+   判断因此永远不可能命中。
+2. **宏定义顺序**：`HTT_RX_RING_ENTRIES` / `HTT_RX_BUF_SIZE` 定义在文件后半
+   （727 行），而 `struct hif_dma_block`（341 行）已经用了它们——这一版**必然
+   编译失败**。已把所有 HTT/HTC 尺寸宏前移到 `CE_BUF_BYTES` 之后，并加了一个
+   扫描脚本核对全文件 114 个宏没有第二处 use-before-define。
+
+## 493：补 RX_RING_CFG + AGGR_CFG
+
+`htt_tx.c ath10k_htt_send_rx_ring_cfg_64()` 逐字段对齐：
+
+| 偏移 | 字段 | 值 |
+|---|---|---|
+| 0 | `num_rings` | 1 |
+| 1 | `rsvd0` | 0 |
+| 3 | `fw_idx_shadow_reg_paddr` | `&g_dma->htt_alloc_idx` |
+| 11 | `rx_ring_base_paddr` | `g_dma->htt_ring` |
+| 19 | `rx_ring_len` | 128 项 |
+| 21 | `rx_ring_bufsize` | 2048 |
+| 23 | `flags` | 0xffff（Linux 按位 OR 全部 16 个 flag） |
+| 25 | `fw_idx_init_val` | 0 |
+| 27 | 10 个 `rx_desc` 偏移 | wcn3990：74/90/27/37/4/26/7/12/1/2 |
+
+`AGGR_CFG` 用 v2 结构（ampdu 64 / amsdu 6 / reserved）。另外加了
+`hif_service_htt_ring()`：每个 poll 把 `alloc_idx` 往前走，否则 128 项环形
+缓冲绕圈后固件会停住。
+
+开关是独立的 `httring=1`，`httring=0` 时与 492 字节等价，所以同一个镜像可以
+把「VERSION_REQ」和「RX ring」分开判读。**结果待 493 跑完回填。**
