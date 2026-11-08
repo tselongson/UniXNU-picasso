@@ -704,3 +704,46 @@ WCN3990-HIF: heartbeat polls=89000
 解释：RX ring 合法之后，固件真正开始往里写扫描结果，这时才碰到下一个问题。
 下一步要分清是"扫描命令本身"还是"往 ring 写"——`rx` 组 89000 次心跳说明
 静态的 ring 无害，只有真的产生 RX 才触发。
+
+## 根因二：四个 array TLV 的 tag 全部小 1
+
+`wmi-tlv.h` 里 tag 不是独立定义的常量，而是 `enum wmi_tlv_tag` 的序号：
+
+```c
+	WMI_TLV_TAG_LAST_RESERVED       = 15,
+	WMI_TLV_TAG_FIRST_ARRAY_ENUM    = 16,   /* 不是可用 tag */
+	WMI_TLV_TAG_ARRAY_UINT32        = 17,
+	WMI_TLV_TAG_ARRAY_BYTE          = 18,
+	WMI_TLV_TAG_ARRAY_STRUCT        = 19,
+	WMI_TLV_TAG_ARRAY_FIXED_STRUCT  = 20,
+```
+
+而本移植写的是 16 / 17 / 18 / 19，**四个都少 1**。后果：
+
+| 命令里的数组 | 应有的 tag | 实际发出去的 tag | 固件看到 |
+|---|---|---|---|
+| START_SCAN 信道频率表 | 17 ARRAY_UINT32 | 16 FIRST_ARRAY_ENUM | 非法 tag |
+| START_SCAN SSID 表 | 20 ARRAY_FIXED_STRUCT | 19 ARRAY_STRUCT | 类型错 |
+| START_SCAN BSSID 表 | 20 ARRAY_FIXED_STRUCT | 19 ARRAY_STRUCT | 类型错 |
+| START_SCAN IE | 18 ARRAY_BYTE | 17 ARRAY_UINT32 | 类型错 |
+| SCAN_CHAN_LIST 信道表 | 19 ARRAY_STRUCT | 18 ARRAY_BYTE | 类型错 |
+
+**这正是"为什么前面所有命令都活着、一到 START_SCAN 就死"的答案**：
+
+- `WMI_INIT`、`PDEV_SET_REGDOMAIN`、`VDEV_CREATE`、`RX_RING_CFG`、`AGGR_CFG`
+  里**一个数组都没有**（INIT 的那条数组长度为 0，固件会直接忽略），所以它们的
+  tag 全对，全部被接受；
+- `START_SCAN` 是第一条**真正带数组**的命令，固件一走到信道数组就遇到 tag 16，
+  直接 assert。这同时解释了为什么 `scanchans=0` 也崩 —— 长度为 0 的数组 TLV
+  仍然写着 tag 16。
+
+也解释了此前所有"排除实验"都无效：无论改 scan_id、notify mask、passive 标志、
+信道数量、chan list、HTT 连接还是 VDEV_UP，**第一个数组 TLV 的 tag 都是错的**。
+
+`work/wmi-tagcheck.py` 把驱动里 13 个 tag 逐条和 Linux 枚举对了一遍，现在
+13/13 一致；命令 id 也独立核对过（`WMI_TLV_GRP_START = 3` ⇒ START_SCAN
+0x3001、SCAN_CHAN_LIST 0x3003、PDEV 组 4 ⇒ REGDOMAIN 0x4001、VDEV 组 5 ⇒
+CREATE 0x5001 / UP 0x5005），全部正确。
+
+**500 的判读**：`ring`（对照，不扫描）应保持 89000+ 心跳；`scan`（只修 tag）
+是主判据；`scanch` 额外打开 SCAN_CHAN_LIST。
