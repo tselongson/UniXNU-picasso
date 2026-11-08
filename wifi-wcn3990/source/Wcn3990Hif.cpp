@@ -383,6 +383,16 @@ static int g_autoscan_sent;
  * a documented failure mode, so this separates "our command kills the
  * firmware" from "the firmware kills the host on its own". */
 static int g_ready_stop;
+/* 485 bisect proved VDEV_CREATE is the sole trigger of the post-WMI
+ * ARM64 SError, with clean SMMU fault registers.  Linux sends
+ * WMI_PDEV_SET_BASE_MACADDR right after WMI READY and only creates the
+ * vdev much later, when the interface is brought up.  vdevpre=1 adds
+ * that missing command; hifstop=5/6 delays VDEV_CREATE by 1k/5k polls;
+ * hifstop=4 skips it and forces an autoscan to see whether the firmware
+ * will scan without a vdev at all. */
+static int g_vdev_pre;
+static int g_vdev_pending;
+static uint32_t g_vdev_at;
 static uint32_t g_quiet_probe_polls;
 static int g_quiet_probed;
 static bool g_bases_programmed;
@@ -564,6 +574,7 @@ hif_dump_regs(const char *why)
 #define WMI_READY_EVENTID             0x0002
 #define WMI_START_SCAN_CMDID          0x3001   /* WMI_GRP_SCAN  = 3 */
 #define WMI_VDEV_CREATE_CMDID         0x5001   /* wmi.h: WMI_CMD_GRP(WMI_GRP_VDEV) */
+#define WMI_PDEV_SET_BASE_MACADDR_CMDID 0x400d /* WMI_TLV_PDEV_SET_BASE_MACADDR_CMDID */
 #define WMI_PDEV_SET_REGDOMAIN_CMDID  0x4001   /* WMI_CMD_GRP(WMI_GRP_PDEV) */
 #define WMI_SCAN_EVENTID              0x3001
 #define WMI_MGMT_RX_EVENTID           0x7001   /* WMI_GRP_MGMT  = 7 */
@@ -579,6 +590,7 @@ hif_dump_regs(const char *why)
 #define WMI_TLV_START_SCAN_CMD        77
 #define WMI_TLV_PDEV_SET_REGDOMAIN_CMD 81
 #define WMI_TLV_VDEV_CREATE_CMD       86      /* wmi-tlv.h enum wmi_tlv_tag */
+#define WMI_TLV_PDEV_SET_BASE_MACADDR_CMD 172 /* enum wmi_tlv_tag, master */
 /* wmi-tlv.c: WMI_TLV_ABI_VER0 / VER1 / VER_NS0 */
 #define WMI_TLV_ABI_VER0              0x01000000u
 #define WMI_TLV_ABI_VER1              53u
@@ -793,6 +805,7 @@ hif_send_pdev_regdomain(void)
 		uint32_t limit_5g;
 	} __attribute__((packed)) cmd;
 
+	memset(tlv, 0, sizeof(tlv));
 	memset(&cmd, 0, sizeof(cmd));
 	p = hif_put_tlv(p, WMI_TLV_PDEV_SET_REGDOMAIN_CMD, (uint16_t)sizeof(cmd), &cmd);
 	HIF_LOG("WMI: send PDEV_SET_REGDOMAIN (world)");
@@ -811,6 +824,7 @@ hif_send_vdev_create(void)
 		uint8_t mac[6];
 	} __attribute__((packed)) cmd;
 
+	memset(tlv, 0, sizeof(tlv));
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.vdev_id = 0;
 	cmd.vdev_type = 2;                     /* WMI_VDEV_TYPE_STA */
@@ -946,6 +960,37 @@ hif_handle_mgmt_rx(const uint8_t *tlvs, uint32_t len)
 	}
 }
 
+/* Linux ath10k_core_start() sends WMI_PDEV_SET_BASE_MACADDR immediately
+ * after WMI READY, before any vdev exists.  The command is one TLV holding
+ * exactly the six-byte MAC (wmi.h struct wmi_pdev_set_base_macaddr_cmd). */
+static int
+hif_send_base_macaddr(void)
+{
+	uint8_t tlv[32];
+	uint8_t *p = tlv;
+	uint8_t mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+
+	memset(tlv, 0, sizeof(tlv));
+	p = hif_put_tlv(p, WMI_TLV_PDEV_SET_BASE_MACADDR_CMD,
+	    (uint16_t)sizeof(mac), mac);
+	HIF_LOG("WMI: send PDEV_SET_BASE_MACADDR %02x:%02x:%02x:%02x:%02x:%02x",
+	    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+	return hif_wmi_command(WMI_PDEV_SET_BASE_MACADDR_CMDID, tlv,
+	    (uint32_t)(p - tlv));
+}
+
+static void
+hif_finish_vdev(void)
+{
+	if (g_vdev_pre) (void)hif_send_base_macaddr();
+	if (hif_send_vdev_create() == 0) {
+		g_state = HIF_READY;
+		HIF_LOG("WMI: scan vdev created, scanning is available");
+	} else {
+		HIF_LOG("WMI: VDEV_CREATE failed");
+	}
+}
+
 static void
 hif_handle_wmi(const uint8_t *payload, uint32_t len)
 {
@@ -997,15 +1042,20 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 		} else {
 			hif_send_pdev_regdomain();
 		}
-		if (g_ready_stop == 2 || g_ready_stop == 3) {
+		if (g_ready_stop == 2 || g_ready_stop == 3 ||
+		    g_ready_stop == 4) {
 			g_state = HIF_READY;
-			HIF_LOG("WMI: READY stop=%u, skipping VDEV_CREATE",
-			    g_ready_stop);
-		} else if (hif_send_vdev_create() == 0) {
-			g_state = HIF_READY;
-			HIF_LOG("WMI: scan vdev created, scanning is available");
+			if (g_ready_stop == 4) g_autoscan = 1;
+			HIF_LOG("WMI: READY stop=%u, skipping VDEV_CREATE%s",
+			    g_ready_stop, g_ready_stop == 4 ? ", forcing autoscan" : "");
+		} else if (g_ready_stop == 5 || g_ready_stop == 6) {
+			g_vdev_pending = 1;
+			g_vdev_at = g_polls +
+			    (g_ready_stop == 5 ? 1000u : 5000u);
+			HIF_LOG("WMI: READY, VDEV_CREATE delayed %u polls",
+			    g_vdev_at - g_polls);
 		} else {
-			HIF_LOG("WMI: VDEV_CREATE failed");
+			hif_finish_vdev();
 		}
 		break;
 	case WMI_MGMT_RX_EVENTID:
@@ -1148,6 +1198,11 @@ wcn3990_hif_poll(void)
 	}
 
 	if (g_stage < 3) return;
+	if (g_vdev_pending && g_polls >= g_vdev_at) {
+		g_vdev_pending = 0;
+		HIF_LOG("WMI: delayed VDEV_CREATE now (poll %u)", g_polls);
+		hif_finish_vdev();
+	}
 	if (g_autoscan && !g_autoscan_sent && g_state == HIF_READY) {
 		g_autoscan_sent = 1;
 		HIF_LOG("autoscan: WMI ready, issuing START_SCAN");
@@ -1528,12 +1583,16 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_autoscan = (int)v;
 	}
 	v = 0;
-	if (PE_parse_boot_argn("hifstop", &v, sizeof(v)) && v <= 3) {
+	if (PE_parse_boot_argn("hifstop", &v, sizeof(v)) && v <= 6) {
 		g_ready_stop = (int)v;
 	}
-	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d",
+	v = 0;
+	if (PE_parse_boot_argn("vdevpre", &v, sizeof(v)) && v <= 1) {
+		g_vdev_pre = (int)v;
+	}
+	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d",
 	    g_tx3_rotate ? "8 rotating" : "single (legacy)", g_autoscan,
-	    g_ready_stop);
+	    g_ready_stop, g_vdev_pre);
 	{
 		uint64_t dma_pa = 0;
 		g_dma = (struct hif_dma_block *)picasso_wlan_ce_dma_alloc(
