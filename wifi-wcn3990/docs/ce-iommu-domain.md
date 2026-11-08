@@ -747,3 +747,36 @@ CREATE 0x5001 / UP 0x5005），全部正确。
 
 **500 的判读**：`ring`（对照，不扫描）应保持 89000+ 心跳；`scan`（只修 tag）
 是主判据；`scanch` 额外打开 SCAN_CHAN_LIST。
+
+## 500/501 实测：tag 修对了，但 INIT 那条空数组要拿掉
+
+| 构建 | 组 | INIT 末尾空数组 | 结果 |
+|---|---|---|---|
+| 500 | `ring` / `scan` / `scanch` | tag 19（Linux 原样） | **3/3 在 INIT 之后立刻 SError**，到不了 READY |
+| 501 | `ia0` | **整条省略**（212 B） | **READY ✓** → VERSION_CONF ✓ → VDEV_CREATE ✓ → RX_RING_CFG ✓ → START_SCAN 后 SError |
+| 501 | `ia2` | tag 18（旧值） | 同样 READY，同样在 START_SCAN 后 SError（同一个 caller） |
+
+三点结论：
+
+1. **INIT 里那条长度为 0 的 `ARRAY_STRUCT` 不能用 tag 19**：固件会死在 INIT
+   之后。省略掉（`initarr=0`，INIT 从 216 B 变 212 B）或保留旧值 18 都能过。
+   `num_host_mem_chunks = 0`（SERVICE_READY 里 `mem_reqs 0` 也证实固件没要内存），
+   所以这条 TLV 本来就不携带任何信息，省略是最干净的做法。
+2. 因而 491 那批"排除实验"里凡是带 `wmiinit=1` 的组，**其实都卡在 INIT 上**，
+   它们对 START_SCAN 的判断不能算数。
+3. **改成 17/18/19/20 之后 START_SCAN 仍然 SError**（`_arm64_platform_error.cold.1`），
+   说明数组 tag 是一个真 bug，但不是扫描崩溃的原因。
+
+崩溃前最后两条日志很有价值：
+
+```
+WCN3990-HIF: ce3 send: desc 3 pa cdd1c640 len 290 -> wr 4 (reg 4 shadow 4)
+WCN3990-HIF: HTC: control message 1025 (7 bytes)
+WCN3990-HIF: HTC: control message 1025 (7 bytes)
+fmt: Unhandled implementation specific error
+```
+
+也就是说 START_SCAN 之后固件先回了**两条 7 字节的 0x401 控制消息**，然后才
+SError。503 把这两条消息的前 12 字节原样打出来，并同时验证三个假设：
+`vdstart`（先给 vdev 一个 home channel）、`scanshp=1`（START_SCAN 完全不带数组）、
+`c1`（先发 SCAN_CHAN_LIST）。
