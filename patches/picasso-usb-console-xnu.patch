@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3396 @@
+@@ -0,0 +1,3433 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -2569,6 +2569,43 @@ new file mode 100644
 +	pup_reg("cb4_fsr", usb_rd(c, 0x58));
 +	pup_reg("cb4_far", usb_rd(c, 0x60));
 +	pup_reg("cb4_fsynr0", usb_rd(c, 0x68));
++	/* A context-bank translation fault sets CBn_FSR even when GFSR stays
++	 * clean, and the WLAN MAC is not necessarily CB61.  Print every CB
++	 * whose FSR carries more than the FORMAT bit, then every stream the
++	 * SMMU still has an SMR/S2CR for. */
++	{
++		uint32_t n;
++
++		for (n = 0; n < 64u; n++) {
++			uint32_t fsr;
++
++			c = b + (((uint64_t)(pages + n)) << 12);
++			fsr = usb_rd(c, 0x58);
++			if (fsr == 0u || fsr == 0x400u) continue;
++			picasso_usb_panic_write("cb", 2);
++			pup_hex64((uint64_t)n);
++			pup_reg("_fsr", fsr);
++			pup_reg("_far", usb_rd(c, 0x60));
++			pup_reg("_farhi", usb_rd(c, 0x64));
++			pup_reg("_fsynr0", usb_rd(c, 0x68));
++		}
++	}
++	{
++		uint32_t n;
++
++		for (n = 0; n < 64u; n++) {
++			uint32_t smr = usb_rd(b, 0x800u + 4u * n);
++			uint32_t s2cr = usb_rd(b, 0xc00u + 4u * n);
++
++			if (smr == 0u && s2cr == 0u) continue;
++			picasso_usb_panic_write("smr", 3);
++			pup_hex64((uint64_t)n);
++			pup_reg("", smr);
++			picasso_usb_panic_write("s2cr", 4);
++			pup_hex64((uint64_t)n);
++			pup_reg("", s2cr);
++		}
++	}
 +}
 +
 +void
