@@ -331,3 +331,37 @@ vdev was never created」。这是人为构造的非法命令序列，不是
 跑 `s1`（完整配置 + 自动扫描）与 `s0`（旧配置 + 自动扫描，对照）。
 判读：`WMI: send START_SCAN` → `WMI: SCAN event` →
 `WMI_MGMT_RX` beacon → `HEARD BEACON` → `heard N access points`。
+
+## 488 / 489：START_SCAN 是**第二个独立故障**
+
+`boot-488.img`（=`boot-487.img` 等长换槽：`wmiinit=1` +
+`wcn3990-hif-autoscan=1`，`hifstop` 缺省 0 所以 vdev 正常创建）：
+
+| 组 | 配置 | 结果 |
+|---|---|---|
+| `s1` | wmiinit=1 + vdev + autoscan | 发出 START_SCAN 后 SError |
+| `s0` | wmiinit=0 + vdev + autoscan | 同样 SError |
+| `m1` | wmiinit=1 + base MAC + vdev + autoscan（489） | 同样 SError |
+
+`m1` 是 `boot-489.img`（把 `offline-hid-auto-home=5` 等长换成
+`vdevpre=1`）。三组 panic caller 全 `0xfffffff007cb5978`，SMMU 转储干净，
+崩溃前只有两条 `HTC: control message 1025`，**没有任何
+`WMI: SCAN event` 或 `WMI_MGMT_RX`** —— 固件没来得及回传扫描结果。
+
+所以现在是**两个独立故障**：
+
+1. VDEV_CREATE → SError：**已闭环修复**（`wmiinit=1`，487 i1 验证）。
+2. START_SCAN → SError：与 `wmiinit`、base MAC 无关，未修。
+
+已排除：CE3 缓冲复用、SMMU 故障、TZ VMID 授权、VDEV_CREATE 时序/前置
+命令、START_SCAN TLV 结构（逐字段对照 `wmi-tlv.c:1977 gen_start_scan`，
+15 u32 common + 6 u32 + mac_addr/mac_mask + 5 个数组 TLV 完全一致）、
+CE1/CE5/CE2 接收缓冲投递（各 31/31/63 个）。
+
+**下一步依据**：`ath10k_core_start()` 的顺序是
+`ath10k_htt_connect()`(core.c:3108) → `wmi_wait_for_unified_ready`(3213)
+→ `pdev_set_base_macaddr`(3225) → **`ath10k_htt_setup()`(3270)**
+→ 之后才有扫描。本移植从没连接过 HTT 服务（`ATH10K_HTC_SVC_ID_HTT_DATA_MSG`
+= 0x0300），也从没发过 `VERSION_REQ` / `FRAG_DESC_BANK_CFG` /
+`RX_RING_CFG` / `AGGR_CFG`。固件扫描时要把结果写回 host 的 HTT RX ring，
+没有这块 DMA 内存就是外部中止的典型成因。补齐它同时也是数据面的前提。
