@@ -3385,9 +3385,31 @@ static volatile uint8_t *g_wlan_ce_base = NULL;
 
 static void picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t rssi, uint16_t freq);
 
+/* The copy engine's first DMA wedges the interconnect path it shares with the
+ * USB console: the doorbell write returns, the console dies within a second,
+ * and the SoC itself stays up - the same signature the GPU's qcrypto block had
+ * before its NoC path was voted.  rpmhVoteCryptoPath() is the proven fix for
+ * that shape (CE0/SN6/SN0/SH0/MC0/ACV/CN0 through the apps RSC), so run it
+ * before the engines are ever doorbelled.  wcn3990-wlan-rpmh=0 opts out. */
+extern "C" unsigned rpmhVoteCryptoPath(void);
+static int g_wlan_rpmh = 1;
+
 static void
 picasso_wlan_ce_init(void)
 {
+	{
+		uint32_t off = 0;
+
+		if (PE_parse_boot_argn("wcn3990-wlan-rpmh", &off, sizeof(off)) && off) {
+			g_wlan_rpmh = 0;
+		}
+		if (g_wlan_rpmh) {
+			unsigned voted = rpmhVoteCryptoPath();
+
+			LOG("rpmh: voted %u bcm(s) for the wlan path%s",
+			    voted, voted ? "" : " (RSC/cmd-db did not map)");
+		}
+	}
 	if (!g_wlan_ce_map) {
 		g_wlan_ce_map = map_phys(WLAN_CE_BASE_PA, WLAN_CE_SIZE, false);
 		if (!g_wlan_ce_map) {
