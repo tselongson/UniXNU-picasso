@@ -748,7 +748,7 @@ hif_service_htt_ring(void)
 {
 	uint32_t fw_idx, budget = HTT_RX_RING_ENTRIES;
 
-	if (!g_htt_ring || !g_htt_ring_done || g_dma == NULL) return;
+	if (!(g_htt_ring & 1) || !g_htt_ring_done || g_dma == NULL) return;
 
 	fw_idx = g_dma->htt_alloc_idx & (HTT_RX_RING_ENTRIES - 1);
 	while (g_htt_ring_rd != fw_idx && budget-- > 0) {
@@ -945,12 +945,15 @@ hif_htt_setup_finish(void)
 {
 	if (g_htt_ring_done) return;
 	if (!g_htt_ring) {
-		HIF_LOG("HTT: VERSION_CONF seen; httring=0 so RX_RING_CFG is skipped");
+		HIF_LOG("HTT: VERSION_CONF seen; httring=0 so htt_setup is skipped");
 		return;
 	}
 	g_htt_ring_done = 1;
-	(void)hif_htt_rx_ring_cfg();
-	(void)hif_htt_aggr_cfg();
+	/* bit0 = RX_RING_CFG, bit1 = AGGR_CFG.  They are split because the
+	 * pair sent together killed the target with a platform error; one
+	 * boot per bit tells which command the firmware refuses. */
+	if (g_htt_ring & 1) (void)hif_htt_rx_ring_cfg();
+	if (g_htt_ring & 2) (void)hif_htt_aggr_cfg();
 }
 
 /* wmi-tlv.h: struct wmi_tlv { __le16 len; __le16 tag; u8 value[]; }.
@@ -2086,7 +2089,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_htt_setup = (int)v;
 	}
 	v = 0;
-	if (PE_parse_boot_argn("httring", &v, sizeof(v)) && v <= 1) {
+	if (PE_parse_boot_argn("httring", &v, sizeof(v)) && v <= 3) {
 		g_htt_ring = (int)v;
 	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
