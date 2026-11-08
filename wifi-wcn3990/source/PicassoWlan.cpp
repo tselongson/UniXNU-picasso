@@ -6105,6 +6105,81 @@ picasso_wlan_smmu_early(void)
 	    free_slot, r[(0xc00 >> 2) + free_slot]);
 }
 
+/* ---------------------------------------------------------------------------
+ * Firmware crash report left in MSA.
+ *
+ * snoc.c ath10k_snoc_fw_crashed_dump() reads the target's RAM out of the MSA
+ * region after a firmware crash; on WCN3990 that is the 2 MiB
+ * wlan_fw_region@8b500000 that picasso.dts hands over as
+ * qcom,wlan-msa-fixed-region.  Whatever the firmware printed when it reset is
+ * still there on the next boot - but only until WLFW downloads the image
+ * again, so it has to be read before the modem starts.
+ *
+ * The region is no-map, so it is read through a fresh mapping.  Device memory
+ * does not allow the wide or unaligned loads a plain memcpy emits (that is
+ * CVE-2026-90348 in the same Linux function), hence one aligned 32-bit load
+ * at a time.  msadump=1 enables the scan.
+ * ------------------------------------------------------------------------- */
+#define WLAN_MSA_PA   0x8b500000ull
+#define WLAN_MSA_SIZE 0x200000ull
+
+static const char * const g_msa_keys[] = {
+	"ssert", "panic", "PANIC", "crash", "CRASH", "halt", "HALT",
+	"xception", "atchdog", "imeout", "ERROR", "FATAL",
+};
+
+static void
+wlan_msa_crash_scan(void)
+{
+	IOMemoryMap *m;
+	volatile const uint32_t *w;
+	uint32_t off;
+	char line[96];
+	unsigned len = 0, printed = 0, words = 0, nonzero = 0;
+
+	LOG("msa: scanning %llx+%llx for the previous boot's firmware report",
+	    (unsigned long long)WLAN_MSA_PA, (unsigned long long)WLAN_MSA_SIZE);
+	m = map_phys(WLAN_MSA_PA, WLAN_MSA_SIZE, false);
+	if (m == NULL) {
+		LOG("msa: cannot map the region");
+		return;
+	}
+	w = (volatile const uint32_t *)m->getVirtualAddress();
+	for (off = 0; off + 4 <= WLAN_MSA_SIZE; off += 4) {
+		uint32_t v = w[off / 4];
+		unsigned k;
+
+		words++;
+		if (v != 0 && v != 0xffffffffu) nonzero++;
+		for (k = 0; k < 4; k++) {
+			uint8_t c = (uint8_t)(v >> (8 * k));
+
+			if (c >= 0x20 && c < 0x7f && len < sizeof(line) - 1) {
+				line[len++] = (char)c;
+				continue;
+			}
+			line[len] = 0;
+			if (len >= 8) {
+				unsigned x;
+
+				for (x = 0; x < sizeof(g_msa_keys) / sizeof(g_msa_keys[0]); x++) {
+					if (strstr(line, g_msa_keys[x]) != NULL) {
+						if (printed < 30) {
+							LOG("msa: %06x %s", off - len, line);
+							printed++;
+						}
+						break;
+					}
+				}
+			}
+			len = 0;
+		}
+	}
+	LOG("msa: %u words, %u non-blank, %u interesting strings",
+	    words, nonzero, printed);
+	m->release();
+}
+
 extern "C" void
 picasso_modem_init(void)
 {
@@ -6125,6 +6200,13 @@ picasso_modem_init(void)
 		return;
 	}
 	started = true;
+	{
+		uint32_t msadump = 0;
+
+		/* Before the modem thread reloads the WLAN image over it. */
+		if (PE_parse_boot_argn("msadump", &msadump, sizeof(msadump)) && msadump)
+			wlan_msa_crash_scan();
+	}
 	picasso_wlan_net_attach();
 	if (kernel_thread_start(modem_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
