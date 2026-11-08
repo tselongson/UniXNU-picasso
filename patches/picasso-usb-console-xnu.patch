@@ -1506,7 +1506,6 @@ index e6d38d3..3a02700 100644
  
  	cons_ops[idx].putc(c, poll);
  }
-
 diff --git a/osfmk/kern/printf.c b/osfmk/kern/printf.c
 
 index aeac9d3..7700994 100644
@@ -1528,7 +1527,6 @@ index aeac9d3..7700994 100644
  	console_write_unbuffered(c);
  
  	debug_putc(c);
-
 diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
 
 index e9daeed833924a653c2243f46615527a3e9b4195..1d670170759e04d18f6d57f3f78d6e420ade0812 100644
@@ -1609,7 +1607,6 @@ index e9daeed833924a653c2243f46615527a3e9b4195..1d670170759e04d18f6d57f3f78d6e42
  	for (;;) {
  #if defined(__arm__) || defined(__arm64__)
  		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
-
 diff --git a/iokit/Kernel/IOLib.cpp b/iokit/Kernel/IOLib.cpp
 
 index 7addbb3..de3d6bb 100644
@@ -1651,7 +1648,6 @@ index 7addbb3..de3d6bb 100644
  	    debug_mode_active() || !gCPUsRunning,
  	    "IOLog called with interrupts disabled");
  }
-
 diff --git a/osfmk/arm/model_dep.c b/osfmk/arm/model_dep.c
 
 --- a/osfmk/arm/model_dep.c
