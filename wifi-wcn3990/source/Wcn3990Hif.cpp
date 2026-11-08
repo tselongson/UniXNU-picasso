@@ -193,6 +193,29 @@ hif_le32(const uint8_t *p)
 	    ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+/* Hex dump, 16 bytes per line.  The firmware is the only place that knows
+ * how it laid a TLV event out, and the serial console is the only channel
+ * it speaks through, so anything we cannot name yet is printed raw before
+ * it is thrown away. */
+static void
+hif_dump_hex(const char *what, const uint8_t *p, uint32_t n)
+{
+	char line[3 * 16 + 1];
+	uint32_t i, j;
+
+	for (i = 0; i < n; i += 16) {
+		uint32_t chunk = (n - i > 16) ? 16 : (n - i);
+		for (j = 0; j < chunk; j++) {
+			static const char hex[] = "0123456789abcdef";
+			line[j * 3 + 0] = hex[p[i + j] >> 4];
+			line[j * 3 + 1] = hex[p[i + j] & 15];
+			line[j * 3 + 2] = (j + 1 == chunk) ? '\0' : ' ';
+		}
+		line[chunk * 3] = '\0';
+		HIF_LOG("%s +%u: %s", what, i, line);
+	}
+}
+
 static inline void
 hif_put16(uint8_t *p, uint16_t v)
 {
@@ -418,6 +441,8 @@ static int g_hif_mode = 0;
 static int g_ce_quiet;
 static int g_tx3_rotate;      /* 0 = legacy single buffer, 1 = 8 rotating */
 static int g_autoscan;        /* issue START_SCAN once WMI is ready */
+static int g_scan_wait;       /* scanwait=N: delay the scan N seconds */
+static uint32_t g_scan_at;    /* poll count at which autoscan may fire */
 static int g_autoscan_sent;
 /* hifstop: bisect the two WMI commands sent right after WMI READY.
  * 0 = both, 1 = skip PDEV_SET_REGDOMAIN, 2 = skip VDEV_CREATE,
@@ -819,6 +844,7 @@ static uint32_t g_rx_packets;
 static bool g_scan_active;
 static uint32_t g_scan_polls;
 static uint32_t g_beacons;
+static uint32_t g_mgmt_seen;
 static void (*g_frame_sink)(const uint8_t *, size_t, int16_t, uint16_t);
 
 extern "C" int wcn3990_hif_state(void) { return (int)g_state; }
@@ -1555,6 +1581,15 @@ hif_handle_mgmt_rx(const uint8_t *tlvs, uint32_t len)
 
 	if (!frame || !buf_len || buf_len > frame_len) return;
 	if (rssi > 0 || rssi < -120) rssi = -60;
+	if (g_mgmt_seen < 12) {
+		g_mgmt_seen++;
+		/* fc, dur, addr1..3 and the beacon's fixed fields: enough to tell
+		 * a beacon (0x80) from a probe response (0x50) and to see the
+		 * BSSID the firmware reported. */
+		HIF_LOG("MGMT rx #%u: %u bytes freq %u rssi %d",
+		    g_mgmt_seen, buf_len, channel, (int)rssi);
+		hif_dump_hex("MGMT hdr", frame, buf_len < 48 ? buf_len : 48);
+	}
 	if (g_frame_sink) {
 		uint16_t freq = (channel > 1000 && channel < 6000) ? (uint16_t)channel : 2412;
 		g_frame_sink(frame, (size_t)buf_len, (int16_t)rssi, freq);
@@ -1645,9 +1680,6 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 			(void)hif_htt_version_req();
 			if (g_htt_setup >= 2) hif_htt_setup_finish();
 		}
-		/* mac.c ath10k_update_channel_list() runs before regd_update():
-		 * the target gets its channel/power table first. */
-		if (g_chan_list) (void)hif_send_scan_chan_list();
 		/* hifstop=1/3: skip PDEV_SET_REGDOMAIN.  The WCN3990 firmware
 		 * has a documented deterministic crash shortly after vdev_create;
 		 * bisecting which host command precedes it tells us whether the
@@ -1658,6 +1690,12 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 		} else {
 			hif_send_pdev_regdomain();
 		}
+		/* mac.c ath10k_update_channel_list() is reached through
+		 * ath10k_regd_update(), i.e. *after* ath10k_core_start() has sent
+		 * PDEV_SET_REGDOMAIN.  The channel table carries per-channel power
+		 * rules that only exist once the domain is known, so Linux never
+		 * sends it first - the old order here did. */
+		if (g_chan_list) (void)hif_send_scan_chan_list();
 		if (g_ready_stop == 2 || g_ready_stop == 3 ||
 		    g_ready_stop == 4) {
 			g_state = HIF_READY;
@@ -1692,10 +1730,16 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 			    hif_le32(payload + 24), hif_le32(payload + 28),
 			    g_beacons);
 		}
+		/* The reason code is what matters: 0 = completed, 1 = aborted,
+		 * 2 = failed, 3 = early exit.  Dump the block so the field
+		 * offsets can be checked against the firmware's own bytes. */
+		hif_dump_hex("WMI scan ev", payload, len < 40 ? len : 40);
 		g_scan_active = false;
 		break;
 	default:
 		HIF_LOG("WMI: event 0x%x (%u bytes)", event_id, len);
+		if (event_id != WMI_MGMT_RX_EVENTID)
+			hif_dump_hex("WMI ev", payload, len < 24 ? len : 24);
 		break;
 	}
 }
@@ -1860,9 +1904,20 @@ wcn3990_hif_poll(void)
 		hif_finish_vdev();
 	}
 	if (g_autoscan && !g_autoscan_sent && g_state == HIF_READY) {
-		g_autoscan_sent = 1;
-		HIF_LOG("autoscan: WMI ready, issuing START_SCAN");
-		(void)wcn3990_hif_start_scan(40);
+		bool too_early = false;
+		if (g_scan_wait != 0) {
+			if (g_scan_at == 0) {
+				g_scan_at = g_polls + (uint32_t)g_scan_wait * 500u;
+				HIF_LOG("autoscan: deferred %d s (%u polls)",
+				    g_scan_wait, g_scan_at - g_polls);
+			}
+			too_early = g_polls < g_scan_at;
+		}
+		if (!too_early) {
+			g_autoscan_sent = 1;
+			HIF_LOG("autoscan: WMI ready, issuing START_SCAN");
+			(void)wcn3990_hif_start_scan(40);
+		}
 	}
 	if (g_scan_active) g_scan_polls++;
 
@@ -2303,13 +2358,17 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("httring", &v, sizeof(v)) && v <= 63) {
 		g_htt_ring = (int)v;
 	}
+	v = 0;
+	if (PE_parse_boot_argn("scanwait", &v, sizeof(v)) && v <= 120) {
+		g_scan_wait = (int)v;
+	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
 	    "wmiinit=%d; scanchans=%d; tlvpad=%d; chanlist=%d; vdevup=%d; "
-	    "scanlinux=%d; httconn=%d; httsetup=%d; httring=%d",
+	    "scanlinux=%d; httconn=%d; httsetup=%d; httring=%d; scanwait=%d",
 	    g_tx3_rotate ? "8 rotating" : "single (legacy)", g_autoscan,
 	    g_ready_stop, g_vdev_pre, g_wmi_init_full, g_scan_chans,
 	    g_tlv_pad, g_chan_list, g_vdev_up, g_scan_linux, g_htt_connect,
-	    g_htt_setup, g_htt_ring);
+	    g_htt_setup, g_htt_ring, g_scan_wait);
 	{
 		uint64_t dma_pa = 0;
 		g_dma = (struct hif_dma_block *)picasso_wlan_ce_dma_alloc(
