@@ -1942,7 +1942,7 @@ wcn3990_hif_poll(void)
 		 * fetched START_SCAN at all, the CE1 destination index whether
 		 * it answered, and the SMP2P "wlan" bits whether the firmware
 		 * reported a fatal error.  IMEM keeps these across the reset. */
-		if ((g_scan_polls % 20) == 0) {
+		if ((g_scan_polls % 2) == 0) {
 			uint32_t srri3 = hif_reg_read(3, CE_CURRENT_SRRI);
 			uint32_t drri1 = hif_reg_read(1, CE_CURRENT_DRRI);
 			uint32_t smp = picasso_wlan_smp2p_wlan();
