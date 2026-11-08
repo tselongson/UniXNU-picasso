@@ -251,6 +251,9 @@ hif_put32(uint8_t *p, uint32_t v)
 /* ce.c: shadow_sr_wr_ind_addr() */
 #define CE0_SHADOW_SR_WR         0x00032000u
 #define CE3_SHADOW_SR_WR         0x0003200Cu
+/* snoc.c target_shadow_reg_cfg_map[] also covers CE4/CE5/CE7, one 4-byte
+ * slot each in the wrapper's shadow array (src_wr_idx offset 0x3C). */
+#define CE4_SHADOW_SR_WR         0x00032010u
 /* ce.h: CE_DESC_ADDR_MASK = GENMASK_ULL(34, 0) */
 #define CE_DESC_ADDR_MASK        0x7ffffffffull
 #define CE_DESC_RING_ALIGN       8
@@ -318,6 +321,10 @@ struct hif_dma_block {
 	 * it -> SMMU external fault -> ARM64 SError "Unhandled implementation
 	 * specific error" from sleh_serror.  Rotate over 8 buffers instead. */
 	uint8_t tx3[8][CE_BUF_BYTES];
+	/* HTT H2T scratch.  snoc.c gives CE4 src_sz_max = 256, so every
+	 * htt_cmd (4-byte header + payload) must fit in 256 bytes.  Four
+	 * rotating buffers for the same reason as tx3. */
+	uint8_t tx4[4][256];
 	/* wcn3990 keeps the per-CE read indices in DDR (hw_params.rri_on_ddr);
 	 * ce.c: ath10k_ce_alloc_rri() points the wrapper at this array. */
 	uint32_t rri[16];
@@ -404,7 +411,11 @@ static int g_chan_list;       /* chanlist=1: WMI_SCAN_CHAN_LIST before regdomain
 static int g_vdev_up;         /* vdevup=1: WMI_VDEV_UP after VDEV_CREATE */
 static int g_scan_linux;      /* scanlinux=1: Linux-exact START_SCAN arguments */
 static int g_htt_connect;     /* httconn=1: connect HTT before SETUP_COMPLETE */
+static int g_htt_setup;       /* httsetup=1: send HTT VERSION_REQ (htt_setup) */
 static uint8_t g_htt_eid;
+static uint32_t g_wr4;        /* CE4 (HTT H2T) source ring write index */
+static uint32_t g_sw1, g_post1; /* CE1 (HTT T2H) dst ring software/posted */
+static uint32_t g_htt_rx;     /* HTT messages seen on CE1 */
 static int g_vdev_pending;
 static uint32_t g_vdev_at;
 static uint32_t g_quiet_probe_polls;
@@ -486,8 +497,11 @@ hif_ce_send(uint32_t ce, uint8_t *buf, uint32_t len)
 	switch (ce) {
 	case 0:  ring = s_src0; entries = hif_shape[0].src_n; wr = &g_wr0; break;
 	case 3:  ring = s_src3; entries = hif_shape[3].src_n; wr = &g_wr3; break;
+	case 4:  ring = g_dma->src4; entries = hif_shape[4].src_n; wr = &g_wr4; break;
 	default: return -1;
 	}
+
+	if (len > hif_shape[ce].dmax && hif_shape[ce].dmax != 0) return -1;
 
 	idx = *wr;
 	pa = hif_pa_of(buf);
@@ -516,6 +530,7 @@ hif_ce_send(uint32_t ce, uint8_t *buf, uint32_t len)
 	 * per-CE 0x3c register. */
 	if (ce == 0) shadow = (uint8_t *)(uintptr_t)CE0_SHADOW_SR_WR;
 	else if (ce == 3) shadow = (uint8_t *)(uintptr_t)CE3_SHADOW_SR_WR;
+	else if (ce == 4) shadow = (uint8_t *)(uintptr_t)CE4_SHADOW_SR_WR;
 	if (shadow) {
 		*(volatile uint32_t *)(uintptr_t)(g_ce_va + (uintptr_t)shadow) = *wr;
 		hif_mb();
@@ -550,6 +565,50 @@ hif_ce2_repost(uint32_t idx)
 
 	g_post2 = (slot + 1) & (CE2_ENTRIES - 1);
 	hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
+}
+
+/* CE1 is the target->host HTT pipe.  Until 491 it was only *posted* (31
+ * buffers) and never serviced, so every HTT response the firmware sent -
+ * including the VERSION_CONF that ath10k_htt_setup() waits for - was dropped
+ * into a ring nobody read.  Service it exactly like CE2, but keep the two
+ * paths separate so a fault here cannot disturb the WMI ring. */
+static void
+hif_service_ce1(void)
+{
+	uint32_t n = hif_shape[1].dst_n;
+	uint32_t budget = n;
+	uint32_t drri = hif_reg_read(1, CE_CURRENT_DRRI) & (n - 1);
+
+	if (g_dr_desc[1] == NULL || g_buf_va[1] == NULL) return;
+	while (budget-- > 0 && drri != g_sw1) {
+		struct wcn_ce_desc_64 *d = &g_dr_desc[1][g_sw1];
+		uint32_t nbytes = d->nbytes;
+
+		if (nbytes == 0) break;          /* not completed yet */
+		if (nbytes > hif_shape[1].buf_sz) nbytes = hif_shape[1].buf_sz;
+		d->nbytes = 0;                   /* claim before reposting */
+		if (g_htt_rx < 8) {
+			const uint8_t *b = g_buf_va[1] +
+			    (uint64_t)g_sw1 * hif_shape[1].buf_sz;
+			HIF_LOG("htt rx #%u len=%u type=%u", g_htt_rx, nbytes,
+			    nbytes ? b[0] : 0);
+			g_htt_rx++;
+		}
+		{
+			uint32_t slot = g_post1 & (n - 1);
+			struct wcn_ce_desc_64 *w = &g_dr_desc[1][slot];
+
+			w->addr = (g_buf_pa[1] +
+			    (uint64_t)slot * hif_shape[1].buf_sz) & CE_DESC_ADDR_MASK;
+			w->nbytes = 0;
+			w->flags = 0;
+			w->toeplitz = 0;
+			hif_mb();
+			g_post1 = (slot + 1) & (n - 1);
+			hif_reg_write(1, CE_DST_WR_INDEX, g_post1);
+		}
+		g_sw1 = (g_sw1 + 1) & (n - 1);
+	}
 }
 
 static void
@@ -624,6 +683,14 @@ hif_dump_regs(const char *why)
 #define WMI_HOST_SCAN_REQ_ID_PREFIX   0xa000u
 #define WMI_HOST_SCAN_REQUESTOR_PREFIX 0xa000u
 
+/* htt.h: struct htt_cmd_hdr is { u8 msg_type; } and struct htt_cmd puts it in
+ * front of a union, so every H2T message starts with 4 bytes: the type and
+ * three padding bytes.  htt_tx.c ath10k_htt_h2t_ver_req_msg() sends exactly
+ * hdr + htt_ver_req (3 pad bytes) = 4 bytes for VERSION_REQ. */
+#define HTT_HDR_BYTES                 4
+#define HTT_H2T_MSG_TYPE_VERSION_REQ  0
+#define HTT_T2H_MSG_TYPE_VERSION_CONF 0
+
 enum hif_state {
 	HIF_OFF = 0,
 	HIF_CE_UP,          /* rings programmed, waiting for HTC READY */
@@ -695,6 +762,35 @@ hif_wmi_command(uint32_t cmd_id, const uint8_t *tlvs, uint32_t len)
 	if (len && tlvs) memcpy(b + 12, tlvs, len);
 
 	return hif_ce_send(3, b, total);
+}
+
+/* HTC frame carrying an htt_cmd on the HTT endpoint (CE4).  htc.c wraps every
+ * endpoint message in the same 8-byte htc_hdr: eid, flags, payload length. */
+static int
+hif_htt_send(uint8_t msg_type, const uint8_t *payload, uint32_t len)
+{
+	uint8_t *b = g_dma->tx4[g_wr4 & 3];
+	uint32_t total = HTC_HDR_BYTES + HTT_HDR_BYTES + len;
+
+	if (g_htt_eid == 0) return -1;   /* HTT service was never connected */
+	if (total > 256) return -1;      /* CE4 src_sz_max */
+	memset(b, 0, total);
+	b[0] = g_htt_eid;
+	/* htc.c: HTT data service runs with credit flow control disabled, so no
+	 * NEED_CREDIT_UPDATE flag and no per-endpoint sequence number. */
+	b[1] = 0;
+	hif_put16(b + 2, (uint16_t)(HTT_HDR_BYTES + len));
+	b[8] = msg_type;
+	if (len && payload) memcpy(b + HTC_HDR_BYTES + HTT_HDR_BYTES, payload, len);
+	return hif_ce_send(4, b, total);
+}
+
+/* htt_tx.c ath10k_htt_h2t_ver_req_msg(): hdr + 3 pad bytes. */
+static int
+hif_htt_version_req(void)
+{
+	HIF_LOG("HTT: send VERSION_REQ (eid=%u)", g_htt_eid);
+	return hif_htt_send(HTT_H2T_MSG_TYPE_VERSION_REQ, NULL, 0);
 }
 
 /* wmi-tlv.h: struct wmi_tlv { __le16 len; __le16 tag; u8 value[]; }.
@@ -1201,6 +1297,9 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 	}
 	case WMI_READY_EVENTID:
 		HIF_LOG("WMI: READY (0x%x) - WMI is up, creating the scan vdev", event_id);
+		/* core.c ath10k_htt_setup() runs here, after wait_for_unified_ready
+		 * and before the interface exists.  First message is VERSION_REQ. */
+		if (g_htt_setup) (void)hif_htt_version_req();
 		/* mac.c ath10k_update_channel_list() runs before regd_update():
 		 * the target gets its channel/power table first. */
 		if (g_chan_list) (void)hif_send_scan_chan_list();
@@ -1476,6 +1575,9 @@ wcn3990_hif_poll(void)
 	if (g_state == HIF_CE_UP && (g_polls % 2000) == 0) {
 		hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
 	}
+
+	/* HTT responses arrive on CE1; drain them on the same 1 ms tick. */
+	hif_service_ce1();
 }
 
 /* --------------------------------------------------------------------- init */
@@ -1811,12 +1913,17 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("httconn", &v, sizeof(v)) && v <= 1) {
 		g_htt_connect = (int)v;
 	}
+	v = 0;
+	if (PE_parse_boot_argn("httsetup", &v, sizeof(v)) && v <= 1) {
+		g_htt_setup = (int)v;
+	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
 	    "wmiinit=%d; scanchans=%d; tlvpad=%d; chanlist=%d; vdevup=%d; "
-	    "scanlinux=%d; httconn=%d",
+	    "scanlinux=%d; httconn=%d; httsetup=%d",
 	    g_tx3_rotate ? "8 rotating" : "single (legacy)", g_autoscan,
 	    g_ready_stop, g_vdev_pre, g_wmi_init_full, g_scan_chans,
-	    g_tlv_pad, g_chan_list, g_vdev_up, g_scan_linux, g_htt_connect);
+	    g_tlv_pad, g_chan_list, g_vdev_up, g_scan_linux, g_htt_connect,
+	    g_htt_setup);
 	{
 		uint64_t dma_pa = 0;
 		g_dma = (struct hif_dma_block *)picasso_wlan_ce_dma_alloc(
@@ -1919,6 +2026,12 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	g_sw2 = 0;
 	g_post2 = 0;
 	g_wr0 = g_wr3 = 0;
+	g_wr4 = 0;
+	/* snoc.c ath10k_snoc_rx_post_pipe() leaves one slot free, so the CE's
+	 * write index sits at dst_n-1 and the host consumes from 0. */
+	g_sw1 = 0;
+	g_post1 = (hif_shape[1].dst_n > 0) ? (uint32_t)(hif_shape[1].dst_n - 1) : 0;
+	g_htt_rx = 0;
 	g_polls = 0;
 	g_rx_packets = 0;
 	g_beacons = 0;
