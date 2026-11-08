@@ -3394,6 +3394,63 @@ static void picasso_parse_beacon_frame(const uint8_t *frame, size_t len, int16_t
 extern "C" unsigned rpmhVoteCryptoPath(void);
 static int g_wlan_rpmh = 1;
 
+/* On-screen probe trail.  The console dies at the doorbell while the display
+ * keeps scanning out, so the quiet poller paints one 24 px cell per probe
+ * along the bottom edge of the framebuffer: green means the copy engine's
+ * read index moved since the previous probe (the target is consuming the
+ * receive ring), red means it did not, grey means no ring was posted.  The
+ * first cell is painted blue as soon as the painter is alive. */
+static volatile uint32_t *g_fb;
+static uint32_t g_fb_stride = 4320u, g_fb_width = 1080u, g_fb_height = 2400u;
+
+static void
+wlan_fb_map(void)
+{
+	if (g_fb) return;
+	g_fb = (volatile uint32_t *)ml_io_map(0xa0000000ull, 0x9e3400u);
+}
+
+static void
+wlan_fb_cell(uint32_t i, uint32_t color)
+{
+	uint32_t cx, cy, x, y;
+
+	if (g_fb == NULL) return;
+	cx = 8u + i * 26u;
+	cy = (g_fb_height > 64u) ? g_fb_height - 44u : 0u;
+	if (cx + 24u > g_fb_width) return;
+	for (y = 0; y < 24u; y++) {
+		for (x = 0; x < 24u; x++) {
+			g_fb[(cy + y) * (g_fb_stride / 4u) + cx + x] = color;
+		}
+	}
+}
+
+/* Called from the hif poller's quiet probe: one cell per probe.  Green when
+ * the copy engine's read index moved since the last probe, red when it did
+ * not, grey when the ring was never posted. */
+void
+picasso_wlan_probe_paint(uint32_t probe, uint32_t drri, uint32_t nbytes)
+{
+	static uint32_t last_drri;
+	static int have_last;
+	uint32_t color = 0xff505050u;
+
+	wlan_fb_map();
+	if (nbytes == 0) {
+		color = 0xff505050u;
+	} else if (!have_last) {
+		color = 0xffc0c000u;
+		have_last = 1;
+	} else if (drri != last_drri) {
+		color = 0xff00cc44u;
+	} else {
+		color = 0xff1414c8u;
+	}
+	last_drri = drri;
+	wlan_fb_cell(probe + 1u, color);
+}
+
 static void
 picasso_wlan_ce_init(void)
 {
@@ -3410,6 +3467,8 @@ picasso_wlan_ce_init(void)
 			    voted, voted ? "" : " (RSC/cmd-db did not map)");
 		}
 	}
+	wlan_fb_map();
+	wlan_fb_cell(0, 0x0044ccffu);   /* blue: the painter is alive */
 	if (!g_wlan_ce_map) {
 		g_wlan_ce_map = map_phys(WLAN_CE_BASE_PA, WLAN_CE_SIZE, false);
 		if (!g_wlan_ce_map) {

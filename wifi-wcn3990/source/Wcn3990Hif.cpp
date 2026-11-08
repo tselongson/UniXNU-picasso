@@ -1128,7 +1128,10 @@ wcn3990_hif_poll(void)
 		if (g_quiet_probe_polls != 0 && g_polls >= g_quiet_probe_polls) {
 			uint32_t drri = hif_reg_read(2, CE_CURRENT_DRRI);
 			uint32_t nb = (unsigned)s_dst2[0].nbytes;
+			extern void picasso_wlan_probe_paint(uint32_t probe,
+			    uint32_t drri, uint32_t nbytes);
 
+			picasso_wlan_probe_paint(g_quiet_probed, drri, nb);
 			hif_bb(10, g_quiet_probed, drri);
 			hif_bb(11, 0x51500000u | (g_quiet_probed & 0xffffu), nb);
 			if (g_quiet_probed == 0) {
