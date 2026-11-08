@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3332 @@
+@@ -0,0 +1,3337 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -2485,6 +2485,11 @@ new file mode 100644
 +		}
 +		pup_put(text[i]);
 +	}
++	if (size > 1 || text[size - 1] == '\n' ||
++	    pup_ring.total - pup_pos >= 512) {
++		picasso_usb_panic_flush();
++	}
++}
 +
 +/* Build 481 reached WMI READY and then panicked, but only the marker reached
 + * the host: one 21-byte line, no panic text at all.  Build 480's panic
