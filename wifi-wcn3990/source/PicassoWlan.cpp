@@ -3406,8 +3406,20 @@ static uint32_t g_fb_stride = 4320u, g_fb_width = 1080u, g_fb_height = 2400u;
 static void
 wlan_fb_map(void)
 {
+	uint32_t probe = 0;
+
 	if (g_fb) return;
+	/* Mapping the whole 1080x2400 framebuffer asks kmem_alloc() for
+	 * round_page(0x9e3400) = 0x9e4000 (10,371,072) bytes of kernel VA.
+	 * Late in boot the zone map cannot supply it and XNU panics inside
+	 * io_map() - build 480 died there on BOTH variants, before HIF init,
+	 * with "kmem_alloc(..., 10371072): failed with 3 @vm_kern.c:180".
+	 * The on-screen trail is a diagnostic, not a boot requirement, so it
+	 * is opt-in.  Nothing calls ml_io_map() on this path by default. */
+	(void)PE_parse_boot_argn("wlan_fb_probe", &probe, sizeof(probe));
+	if (!probe) return;
 	g_fb = (volatile uint32_t *)ml_io_map(0xa0000000ull, 0x9e3400u);
+	if (g_fb) LOG("wlan fb probe: mapped 0x9e3400 at %p", (void *)g_fb);
 }
 
 static void

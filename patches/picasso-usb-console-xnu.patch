@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3283 @@
+@@ -0,0 +1,3289 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -918,13 +918,19 @@ new file mode 100644
 +		 * test build moves 0xc0 to the dedicated translated context. */
 +		(void)PE_parse_boot_argn("wlansmmu", &domain, sizeof(domain));
 +		bank = domain ? 4u : plan->bank;
-+		for (i = 0; i < 128u; i++) {
-+			uint32_t smr = usb_rd(smmu, 0x800u + 4u * i);
-+			uint32_t s2cr = usb_rd(smmu, 0xc00u + 4u * i);
-+			if ((smr & 0x80000000u) && ((s2cr >> 16) & 3u) == 0 &&
-+			    (s2cr & 0xffu) == bank) {
-+				taken = 1;
-+				break;
++		/* Only the dedicated CB4 needs a free-bank check.  On the control
++		 * path bank is the console's own bypass bank, which of course already
++		 * has an SMR pointing at it - treating that as "taken" skipped the
++		 * 0xc0 bind entirely (build 480 control logged "skipped"). */
++		if (domain) {
++			for (i = 0; i < 128u; i++) {
++				uint32_t smr = usb_rd(smmu, 0x800u + 4u * i);
++				uint32_t s2cr = usb_rd(smmu, 0xc00u + 4u * i);
++				if ((smr & 0x80000000u) && ((s2cr >> 16) & 3u) == 0 &&
++				    (s2cr & 0xffu) == bank) {
++					taken = 1;
++					break;
++				}
 +			}
 +		}
 +		while (slot < 128 &&
