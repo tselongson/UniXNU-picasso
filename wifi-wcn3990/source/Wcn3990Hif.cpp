@@ -437,6 +437,7 @@ static int g_wmi_init_full = 1; /* Linux WCN3990 resource config (the 44-field o
 static int g_init_arr;        /* initarr: 0 omit, 1 tag 19, 2 tag 18 */
 static int g_scan_shape;      /* scanshp: 0 full, 1 struct only, 2 +empty array */
 static int g_vdev_start;      /* vdstart=1: WMI_VDEV_START before the scan */
+static int g_msdu_desc;       /* msdudesc=N: override resource_config[28] */
 static int g_scan_chans = -1; /* scanchans=N: cap the START_SCAN channel list */
 /* wmi-tlv.c ath10k_wmi_tlv_iter() advances by exactly tlv_len, with no
  * roundup.  This driver used to round every TLV up to 4 bytes.  Three of
@@ -1148,6 +1149,9 @@ hif_send_wmi_init(void)
 	for (i = 0; i < 44; i++) cfg[i] = 0;
 	if (g_wmi_init_full) {
 		memcpy(cfg, g_wmi_cfg_full, sizeof(cfg));
+		/* num_msdu_desc should describe the host's RX ring, not Linux's
+		 * 1056: this port only hands the target 128 ring entries. */
+		if (g_msdu_desc) cfg[28] = (uint32_t)g_msdu_desc;
 		HIF_LOG("WMI: INIT full Linux cfg vdevs=%u peers=%u tids=%u "
 		    "msdu=%u decap=%u max_frag=%u host_capab=0x%x",
 		    cfg[0], cfg[1], cfg[5], cfg[28], cfg[13], cfg[29], cfg[43]);
@@ -1439,23 +1443,66 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 
 	for (i = 0; i < nch; i++) hif_put32(chans + i * 4, g_scan_freqs[i]);
 
-	/* scanshp isolates "the firmware refuses this command" from "the
-	 * firmware refuses these arrays": 0 sends the full Linux command,
-	 * 1 sends only the struct (no array TLV at all), 2 sends the struct
-	 * plus one empty channel array.  With 1/2 the counts are zeroed so
-	 * the command stays self-consistent. */
-	if (g_scan_shape != 0) {
+	/* scanshp bisects the four array TLVs.  503 proved shape 1 (struct
+	 * only, 100 bytes) is accepted and the target answers with a scan
+	 * event, while shape 0 kills it - so the command struct is fine and
+	 * one of the arrays is not.
+	 *   0 full Linux command (tags 17/20/20/18)
+	 *   1 struct only
+	 *   2 struct + one empty channel array (tag 17)
+	 *   3 struct + 39-channel array, tag 17
+	 *   4 struct + 39-channel array, tag 16   (one less, the old value)
+	 *   5 struct + broadcast-BSSID array only, tag 20
+	 *   6 all four arrays with the old 16/19/19/17 tags */
+	switch (g_scan_shape) {
+	case 1:
+	case 2:
 		cmd.num_channels = 0;
 		cmd.num_bssids = 0;
+		break;
+	case 5:
+		cmd.num_channels = 0;
+		cmd.num_bssids = 1;
+		break;
+	case 3:
+	case 4:
+		cmd.num_channels = nch;
+		cmd.num_bssids = 0;
+		break;
+	default:
+		cmd.num_channels = nch;
+		cmd.num_bssids = 1;
+		break;
 	}
 	p = hif_put_tlv(p, WMI_TLV_START_SCAN_CMD, (uint16_t)sizeof(cmd), &cmd);
-	if (g_scan_shape == 0) {
+	switch (g_scan_shape) {
+	case 1:
+		break;
+	case 2:
+		p = hif_put_tlv(p, WMI_TLV_ARRAY_UINT32, 0, NULL);
+		break;
+	case 3:
+		p = hif_put_tlv(p, WMI_TLV_ARRAY_UINT32, (uint16_t)(nch * 4), chans);
+		break;
+	case 4:
+		p = hif_put_tlv(p, 16, (uint16_t)(nch * 4), chans);
+		break;
+	case 5:
+		p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT,
+		    (uint16_t)sizeof(bssid), bssid);
+		break;
+	case 6:
+		p = hif_put_tlv(p, 16, (uint16_t)(nch * 4), chans);
+		p = hif_put_tlv(p, 19, 0, NULL);
+		p = hif_put_tlv(p, 19, (uint16_t)sizeof(bssid), bssid);
+		p = hif_put_tlv(p, 17, 0, NULL);
+		break;
+	default:
 		p = hif_put_tlv(p, WMI_TLV_ARRAY_UINT32, (uint16_t)(nch * 4), chans);
 		p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT, 0, NULL);  /* ssids */
 		p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT, (uint16_t)sizeof(bssid), bssid);
 		p = hif_put_tlv(p, WMI_TLV_ARRAY_BYTE, 0, NULL);          /* ie */
-	} else if (g_scan_shape == 2) {
-		p = hif_put_tlv(p, WMI_TLV_ARRAY_UINT32, 0, NULL);
+		break;
 	}
 
 	HIF_LOG("WMI: send START_SCAN (scan_id 0x%x, linux=%d, %u channels, %u ms dwell, %u TLV bytes)",
@@ -2204,12 +2251,16 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_init_arr = (int)v;
 	}
 	v = 0;
-	if (PE_parse_boot_argn("scanshp", &v, sizeof(v)) && v <= 2) {
+	if (PE_parse_boot_argn("scanshp", &v, sizeof(v)) && v <= 6) {
 		g_scan_shape = (int)v;
 	}
 	v = 0;
 	if (PE_parse_boot_argn("vdstart", &v, sizeof(v)) && v <= 1) {
 		g_vdev_start = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("msdudesc", &v, sizeof(v)) && v > 0 && v <= 4096) {
+		g_msdu_desc = (int)v;
 	}
 	v = 0;
 	if (PE_parse_boot_argn("scanchans", &v, sizeof(v)) && v <= 39) {
