@@ -422,6 +422,9 @@ hif_pa_of(const void *p)
 extern "C" void *picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out,
     uint32_t assign_level);
 extern "C" void picasso_wlan_smmu_fault_read(uint32_t * out);
+/* smp2p_wlan_1_in entry "wlan": bit 0 force-fatal-error, bit 1 early-crash.
+ * 0xfffffff* when the mailbox cannot be parsed. */
+extern "C" uint32_t picasso_wlan_smp2p_wlan(void);
 extern "C" int picasso_wlan_smmu_s2cr_set(uint32_t index, uint32_t value,
     uint32_t * readback);
 
@@ -851,6 +854,8 @@ static uint32_t g_polls;
 static uint32_t g_rx_packets;
 static bool g_scan_active;
 static uint32_t g_scan_polls;
+static uint32_t g_smp2p_last;
+static int g_smp2p_seen;
 static uint32_t g_beacons;
 static uint32_t g_mgmt_seen;
 static void (*g_frame_sink)(const uint8_t *, size_t, int16_t, uint16_t);
@@ -1930,7 +1935,28 @@ wcn3990_hif_poll(void)
 			(void)wcn3990_hif_start_scan(40);
 		}
 	}
-	if (g_scan_active) g_scan_polls++;
+	if (g_scan_active) {
+		g_scan_polls++;
+		/* Record what the target does with the scan command before the
+		 * machine can die: the CE3 source read index says whether it
+		 * fetched START_SCAN at all, the CE1 destination index whether
+		 * it answered, and the SMP2P "wlan" bits whether the firmware
+		 * reported a fatal error.  IMEM keeps these across the reset. */
+		if ((g_scan_polls % 20) == 0) {
+			uint32_t srri3 = hif_reg_read(3, CE_CURRENT_SRRI);
+			uint32_t drri1 = hif_reg_read(1, CE_CURRENT_DRRI);
+			uint32_t smp = picasso_wlan_smp2p_wlan();
+
+			if (!g_smp2p_seen || smp != g_smp2p_last) {
+				g_smp2p_seen = 1;
+				HIF_LOG("scan[%u]: ce3 srri=%u ce1 drri=%u smp2p=%08x",
+				    g_scan_polls, srri3, drri1, smp);
+				g_smp2p_last = smp;
+			}
+			hif_bb(12, srri3, drri1);
+			hif_bb(13, smp, g_scan_polls);
+		}
+	}
 
 	if (g_ce_quiet) {
 		/* The console dies at the doorbell, so anything learned here has to
@@ -2263,6 +2289,9 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	 * into IMEM before its reset, then start recording this boot. */
 	hif_bb_init();
 	hif_bb_dump();
+	/* Baseline of the WCSS crash mailbox before any WMI traffic, so a later
+	 * change is attributable to the firmware and not to boot-time state. */
+	HIF_LOG("smp2p wlan baseline %08x", picasso_wlan_smp2p_wlan());
 
 	if (!ce_va || g_regs_live) return;
 

@@ -4615,6 +4615,69 @@ rmtfs_init_buf(void)
 }
 
 /* ---------------------------------------------------------------------------
+ * SMP2P "wlan" mailbox.
+ *
+ * The WCSS firmware reports force-fatal-error (bit 0) and early-crash-ind
+ * (bit 1) through smp2p_wlan_1_in, entry "wlan" (picasso.dts:7320-7323,
+ * entry-name "wlan", parent qcom,smp2p-mpss remote-pid 1).  WlanSmem.h is the
+ * kernel's own read-only smem/smp2p walk; this file only supplies the page
+ * mapping, so the HIF poller can ask "did the firmware report a crash?"
+ * instead of inferring it from a bus error on the next instruction.
+ * ------------------------------------------------------------------------- */
+#include "WlanSmem.h"
+
+static IOMemoryMap *g_wlan_smem_map;
+static int g_smp2p_pid_log;
+
+static int
+wlan_smem_read(void *ctx, uint32_t off, void *data, uint32_t len)
+{
+	volatile uint8_t *base;
+
+	(void)ctx;
+	if (!g_wlan_smem_map) return -22;
+	base = (volatile uint8_t *)g_wlan_smem_map->getVirtualAddress();
+	if (!base || off > WLAN_SMEM_SIZE || len > WLAN_SMEM_SIZE - off) return -22;
+	memcpy(data, (const void *)(base + off), len);
+	return 0;
+}
+
+/* Bit 0 = force-fatal-error, bit 1 = early-crash-ind.  0xfffffff0|code when
+ * the mailbox could not be parsed, so "unreadable" never looks like "quiet". */
+extern "C" uint32_t
+picasso_wlan_smp2p_wlan(void)
+{
+	static const uint16_t pids[4][2] = { { 1, 1 }, { 0, 1 }, { 1, 0 }, { 0, 0 } };
+	struct wlan_smem_io io = { NULL, wlan_smem_read };
+	struct wlan_smem_partition part;
+	struct wlan_smem_item item;
+	uint32_t v = 0;
+	int rc;
+	unsigned i;
+
+	if (!g_wlan_smem_map) {
+		g_wlan_smem_map = map_phys(WLAN_SMEM_BASE, WLAN_SMEM_SIZE, false);
+		if (!g_wlan_smem_map) return 0xffffffffu;
+	}
+	rc = wlan_smem_partition(&io, WLAN_SMEM_IN, WLAN_SMEM_OUT, &part);
+	if (rc) return 0xfffffff0u | (uint32_t)(-rc & 0xfu);
+	rc = wlan_smem_find(&io, &part, WLAN_SMEM_IN, &item);
+	if (rc) return 0xffffffe0u | (uint32_t)(-rc & 0xfu);
+	for (i = 0; i < 4; i++) {
+		rc = wlan_smp2p_wlan(&io, &item, pids[i][0], pids[i][1], &v);
+		if (rc == 0) {
+			if (g_smp2p_pid_log != (int)(i + 1)) {
+				g_smp2p_pid_log = (int)(i + 1);
+				LOG("smp2p wlan: local=%u remote=%u value=%08x",
+				    pids[i][0], pids[i][1], v);
+			}
+			return v;
+		}
+	}
+	return 0xffffffd0u;
+}
+
+/* ---------------------------------------------------------------------------
  * wifi-wcn3990: host-side CE DMA memory.
  *
  * Linux gives the CE rings to dma_alloc_coherent().  On WCN3990 the node has
