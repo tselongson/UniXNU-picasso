@@ -6120,8 +6120,29 @@ picasso_wlan_smmu_early(void)
  * CVE-2026-90348 in the same Linux function), hence one aligned 32-bit load
  * at a time.  msadump=1 enables the scan.
  * ------------------------------------------------------------------------- */
-#define WLAN_MSA_PA   0x8b500000ull
-#define WLAN_MSA_SIZE 0x200000ull
+/* The kernel does not export strstr: libkern.h carries strcmp/memcmp but no
+ * substring search, and the MSA scan only needs a plain one. */
+static const char *
+wlan_strstr(const char *hay, const char *needle)
+{
+	if (*needle == '\0') return hay;
+	for (; *hay != '\0'; hay++) {
+		const char *a = hay, *b = needle;
+
+		while (*a != '\0' && *b != '\0' && *a == *b) {
+			a++;
+			b++;
+		}
+		if (*b == '\0') return hay;
+	}
+	return NULL;
+}
+
+/* The crash-dump region: qcom,wlan-msa-fixed-region (phandle 0xac in
+ * work/base.dts) is a separate 2 MiB pool at 0x8b500000, distinct from the
+ * WLAN_MSA_PA above, which is the modem-load MSA window. */
+#define WLAN_MSA_DUMP_PA   0x8b500000ull
+#define WLAN_MSA_DUMP_SIZE 0x200000ull
 
 static const char * const g_msa_keys[] = {
 	"ssert", "panic", "PANIC", "crash", "CRASH", "halt", "HALT",
@@ -6138,14 +6159,14 @@ wlan_msa_crash_scan(void)
 	unsigned len = 0, printed = 0, words = 0, nonzero = 0;
 
 	LOG("msa: scanning %llx+%llx for the previous boot's firmware report",
-	    (unsigned long long)WLAN_MSA_PA, (unsigned long long)WLAN_MSA_SIZE);
-	m = map_phys(WLAN_MSA_PA, WLAN_MSA_SIZE, false);
+	    (unsigned long long)WLAN_MSA_DUMP_PA, (unsigned long long)WLAN_MSA_DUMP_SIZE);
+	m = map_phys(WLAN_MSA_DUMP_PA, WLAN_MSA_DUMP_SIZE, false);
 	if (m == NULL) {
 		LOG("msa: cannot map the region");
 		return;
 	}
 	w = (volatile const uint32_t *)m->getVirtualAddress();
-	for (off = 0; off + 4 <= WLAN_MSA_SIZE; off += 4) {
+	for (off = 0; off + 4 <= WLAN_MSA_DUMP_SIZE; off += 4) {
 		uint32_t v = w[off / 4];
 		unsigned k;
 
@@ -6163,7 +6184,7 @@ wlan_msa_crash_scan(void)
 				unsigned x;
 
 				for (x = 0; x < sizeof(g_msa_keys) / sizeof(g_msa_keys[0]); x++) {
-					if (strstr(line, g_msa_keys[x]) != NULL) {
+					if (wlan_strstr(line, g_msa_keys[x]) != NULL) {
 						if (printed < 30) {
 							LOG("msa: %06x %s", off - len, line);
 							printed++;
