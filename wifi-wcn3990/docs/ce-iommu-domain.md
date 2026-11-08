@@ -123,32 +123,67 @@ A/B。同时它也说明：0xc0 未注册时的表现是**静音**（无 panic�
 所以问题不在内存归属。（副产品：本机只有 `VMID_MSS_MSA` 能授成功，
 24/25 两个 VMID 被 TZ 拒绝。）
 
-## 484：真正的 SError 根因 —— CE3 发送缓冲区被所有 WMI 命令复用
+## 484：CE3 缓冲区复用是**真 bug，但不是 SError 的因**（假设已证伪）
 
 网上检索命中 **CVE-2022-50700 / Linux `wifi: ath10k: Delay the unmapping
 of the buffer`**：WCN3990 的 CE3（WMI 命令通道）copy-complete 到达时硬件
-可能仍在读源缓冲，host 立即解映射/复用会触发 SMMU fault + kernel panic，
-崩溃签名 `Unhandled context fault: fsr=0x402 ... Asserted in copy_engine`。
-我们日志里的 `cb61fsr=00000400` 与之同族。
+可能仍在读源缓冲，host 立即解映射/复用会触发 SMMU fault + kernel panic。
+代码里确实存在更严重的同型 bug：`hif_wmi_command()` 把每条 WMI 命令都写进
+同一个静态 DMA 缓冲 `s_tx3`，于是 CE3 每个描述符都指向**同一个物理地址**。
 
-**代码里是更严重的同型 bug**：`hif_wmi_command()` 把每条 WMI 命令都写进
-同一个静态 DMA 缓冲 `s_tx3`，于是 CE3 的每个描述符都指向**同一个物理地址**
-（483 `a0`：desc 0/1/2 全是 `pa cdd9ae40`）。WMI READY 之后背靠背发
-`PDEV_SET_REGDOMAIN` 和 `VDEV_CREATE`，第二条 `memset`+`memcpy` 直接覆盖
-还在搬运的第一条 → 固件/CE 读到损坏命令 → SMMU 外部中止 → APSS SError。
-这也解释了为什么 panic 时间稳定落在 WMI 完成后 0.2 s、以及
-`WMI: event 0x401f (1148 bytes)` 之后。
+修复（`d00b0b8`）保留：`tx3` 改成 8 个 2 KiB 槽、按 `hif_ce_send()` 用的
+同一个 `g_wr3` 索引取槽；编译期 `hif_dma_window_check` 保证 512 KiB 窗口
+仍装得下；`wcn3990-hif-tx3=0/1` 单变量 A/B；`wcn3990-hif-autoscan=1`
+在 `HIF_READY` 后自动发 `START_SCAN`。
 
-修复（`d00b0b8`）：
+**但 484 三组实测把这个假设证伪了**：
 
-- `tx3` 改成 8 个 2 KiB 槽，`hif_wmi_command()` 用与 `hif_ce_send()` 相同的
-  `g_wr3` 索引取槽，任意两个在飞描述符不可能共享字节；
-- 编译期 `hif_dma_window_check` 保证 512 KiB DMA 窗口仍装得下（+14 KiB）；
-- `wcn3990-hif-tx3=0/1` 单变量 A/B；
-- `wcn3990-hif-autoscan=1` 在 `HIF_READY` 后自动发 `START_SCAN`，用来把
-  `WMI_MGMT_RX → HEARD BEACON → BSS 列表` 整条路一次验证完。
+| 组 | 配置 | `ce3 send` 物理地址 | 结果 |
+|---|---|---|---|
+| `t0` | 单缓冲 | `cdc3ae40` ×3 | WMI READY → SError |
+| `t1` | 8 槽轮换 | `cdd7ae40` / `cdd7b640` / `cdd7be40` | **同样位置 SError** |
+| `t2` | 8 槽 + autoscan | 前三条不同，第四条 `cdd3c640` | 发出 `START_SCAN`（292 B）→ **同样 SError** |
 
-484 正在构建并跑 `t0`（旧行为）/ `t1`（独立缓冲）/ `t2`（独立缓冲+自动扫描）。
+三组 HIF 行 79/79/82，panic 首行全是
+`caller=0xfffffff007cb4eb8 fmt: Unhandled implementation specific error`。
+缓冲区确实分离了，外部中止没变。**所以 CE3 race 不是本次故障的成因**，
+修复只是消除了一个潜在 DMA 竞态。
+
+panic 前的固定序列（484 `t1`）：
+
+```
+WMI: READY → send PDEV_SET_REGDOMAIN → send VDEV_CREATE
+→ WMI: event 0x401f (1148 bytes)
+→ HTC: control message 1025 ×2
+→ PICASSO CDC PANIC BEGIN
+```
+
+用 ath11k `wmi.h` 的事件表对照，日志里此前不认识的三个事件都是**合法的
+固件指示**，不是损坏数据：`0x4009` = `SERVICE_READY_EXT`（980 B）、
+`0x4022` = `SERVICE_READY_EXT2`（20 B）、
+`0x401f` = `PDEV_COLD_BOOT_CAL_DATA`（1148 B）。
+
+## 485：不再猜，改用硬件寄存器 + 命令二分
+
+网上另命中一条形状**几乎完全一致**的已知问题：WCN3990（WLAN.HL.3.2）
+固件在 `ath10k_start()` 的 quiet-mode WMI 命令后崩溃，
+「~17 ms after the subsequent vdev_create command, cascades into a full
+modem crash」。我们没发 quiet-mode，但崩溃紧跟 `VDEV_CREATE` 这一点一致。
+
+485（`f23e168`）加两件仪器，默认不改任何行为：
+
+1. **panic 同步转储 SMMU 故障寄存器**：USB 控制台记住自己早期的
+   apps-SMMU 映射，在 `panic_trap_to_debugger()` 的同步首行里用无锁
+   十六进制打印 `scr0/gfsr/gfsynr0..2`、0xc0 所在 slot 的 SMR/S2CR、
+   CB61 与 CB4 的 `SCTLR/FSR/FAR/FARHI/FSYNR0`。异步外部中止应当在
+   这里留下故障地址；常规 printf 在这个 panic 里根本不执行，这是唯一
+   能读到它的地方。
+2. **`hifstop=0..3`**：在 WMI READY 之后跳过 `PDEV_SET_REGDOMAIN`
+   和/或 `VDEV_CREATE`，把「我们的命令把固件弄崩」和「固件自己把主机
+   弄崩」分开。0 = 两条都发（默认），1 = 跳过 regdomain，
+   2 = 跳过 vdev_create，3 = 两条都跳过。
+
+`work/chain-485.sh` 在同一镜像上跑 `s0/s1/s2/s3` 四组各 150 秒。
 
 ## 距离「完全可用」还差什么（代码摸底结论，2026-11-08）
 
@@ -162,7 +197,8 @@ says: power, 1` 已经出现，但在发出 scan 之前就 SError 了。
 
 **明确还缺的三块**：
 
-1. **消除 post-WMI SError** —— 当前 483 在测 `assign_level`。这是所有后续的前提。
+1. **消除 post-WMI SError** —— 483 已证伪 TZ 授权、484 已证伪 CE3 缓冲复用；
+   485 用 SMMU 故障寄存器转储 + `hifstop` 命令二分继续定位。这是所有后续的前提。
 2. **关联是假的** —— `picasso_sta_join()` 只打印
    `"4-way WPA2-PSK handshake authenticated successfully"`，没有发任何
    `WMI_VDEV_START` / `WMI_PEER_CREATE` / 密钥安装命令，找不到 BSS 时甚至
