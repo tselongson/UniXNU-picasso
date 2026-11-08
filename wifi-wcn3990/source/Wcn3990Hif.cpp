@@ -308,13 +308,24 @@ struct hif_dma_block {
 	uint8_t rx11[32][CE_BUF_BYTES];
 	/* transmit scratch */
 	uint8_t tx0[CE_BUF_BYTES];
-	uint8_t tx3[CE_BUF_BYTES];
+	/* CVE-2022-50700 / Linux "wifi: ath10k: Delay the unmapping of the
+	 * buffer": on WCN3990 the CE3 copy-complete interrupt can arrive while
+	 * the engine is still reading the source buffer.  A single shared tx3
+	 * scratch buffer meant every WMI command reused the SAME physical
+	 * address (all three "ce3 send" lines logged pa cdd9ae40).  WMI READY
+	 * then issues PDEV_SET_REGDOMAIN and VDEV_CREATE back-to-back, so the
+	 * second memset/memcpy overwrites the first while CE3 is still fetching
+	 * it -> SMMU external fault -> ARM64 SError "Unhandled implementation
+	 * specific error" from sleh_serror.  Rotate over 8 buffers instead. */
+	uint8_t tx3[8][CE_BUF_BYTES];
 	/* wcn3990 keeps the per-CE read indices in DDR (hw_params.rri_on_ddr);
 	 * ce.c: ath10k_ce_alloc_rri() points the wrapper at this array. */
 	uint32_t rri[16];
 };
 
 #define HIF_DMA_SIZE   0x80000u          /* 512 KiB, >sizeof(hif_dma_block) */
+/* 8 rotating CE3 buffers add 14 KiB; make an overflow a build error. */
+typedef char hif_dma_window_check[(sizeof(struct hif_dma_block) <= HIF_DMA_SIZE) ? 1 : -1];
 static struct hif_dma_block *g_dma;
 static uint64_t g_dma_pa;         /* physical base of the uncached alias */
 /* The CE DMA block is a Normal non-cacheable / write-combining mapping, so
@@ -331,7 +342,8 @@ hif_pa_of(const void *p)
 #define s_src3  (g_dma->src3)
 #define s_rx2   (g_dma->rx2)
 #define s_tx0   (g_dma->tx0)
-#define s_tx3   (g_dma->tx3)
+#define s_tx3   (g_dma->tx3[0])
+#define s_tx3_slot(i) (g_dma->tx3[(i) & 7u])
 #define s_rri   (g_dma->rri)
 
 extern "C" void *picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out,
@@ -362,6 +374,9 @@ static int g_hif_mode = 0;
  * single probe read is made five seconds after the doorbell, and whether
  * the heartbeat stops there says which access it was. */
 static int g_ce_quiet;
+static int g_tx3_rotate;      /* 0 = legacy single buffer, 1 = 8 rotating */
+static int g_autoscan;        /* issue START_SCAN once WMI is ready */
+static int g_autoscan_sent;
 static uint32_t g_quiet_probe_polls;
 static int g_quiet_probed;
 static bool g_bases_programmed;
@@ -616,7 +631,9 @@ hif_htc_control(uint16_t msg_id, const uint8_t *payload, uint32_t len)
 static int
 hif_wmi_command(uint32_t cmd_id, const uint8_t *tlvs, uint32_t len)
 {
-	uint8_t *b = s_tx3;
+	/* idx in hif_ce_send() is g_wr3, so use the same index here: no two
+	 * in-flight CE3 descriptors can ever point at the same bytes. */
+	uint8_t *b = g_tx3_rotate ? s_tx3_slot(g_wr3) : s_tx3;
 	uint32_t total = HTC_HDR_BYTES + 4 + len;
 
 	if (total > CE_BUF_BYTES) return -1;
@@ -1115,6 +1132,11 @@ wcn3990_hif_poll(void)
 	}
 
 	if (g_stage < 3) return;
+	if (g_autoscan && !g_autoscan_sent && g_state == HIF_READY) {
+		g_autoscan_sent = 1;
+		HIF_LOG("autoscan: WMI ready, issuing START_SCAN");
+		(void)wcn3990_hif_start_scan(40);
+	}
 	if (g_scan_active) g_scan_polls++;
 
 	if (g_ce_quiet) {
@@ -1481,6 +1503,16 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("wcn3990-hif-assign", &v, sizeof(v)) && v <= 3) {
 		assign_level = v;
 	}
+	v = 0;
+	if (PE_parse_boot_argn("wcn3990-hif-tx3", &v, sizeof(v)) && v <= 1) {
+		g_tx3_rotate = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("wcn3990-hif-autoscan", &v, sizeof(v)) && v <= 1) {
+		g_autoscan = (int)v;
+	}
+	HIF_LOG("CE3 tx buffers: %s; autoscan=%d",
+	    g_tx3_rotate ? "8 rotating" : "single (legacy)", g_autoscan);
 	{
 		uint64_t dma_pa = 0;
 		g_dma = (struct hif_dma_block *)picasso_wlan_ce_dma_alloc(
