@@ -391,6 +391,7 @@ static int g_ready_stop;
  * hifstop=4 skips it and forces an autoscan to see whether the firmware
  * will scan without a vdev at all. */
 static int g_vdev_pre;
+static int g_wmi_init_full;   /* wmiinit=1: Linux WCN3990 resource config */
 static int g_vdev_pending;
 static uint32_t g_vdev_at;
 static uint32_t g_quiet_probe_polls;
@@ -722,6 +723,47 @@ hif_send_setup_complete(void)
 }
 
 /* wmi-tlv.c: ath10k_wmi_tlv_op_gen_init() */
+/* wmi-tlv.c ath10k_wmi_tlv_op_gen_init() for ATH10K_FW_WMI_OP_VERSION_TLV
+ * (WCN3990), with hw.h TARGET_TLV_* values.  Index map is the field order of
+ * struct wmi_tlv_resource_config (44 __le32).  The legacy config below left
+ * 32 of these at zero - including the RX reorder timeouts, max_frag_entries,
+ * rx_decap_mode (comment said native wifi, value was 0 = RAW), num_msdu_desc
+ * (128 instead of 1056) and host_capab.  The firmware only touches those
+ * pools when a vdev is created or a scan starts, which is exactly when this
+ * port takes an ARM64 SError with clean SMMU fault registers. */
+static const uint32_t g_wmi_cfg_full[44] = {
+	4,                        /* 0  num_vdevs   TARGET_TLV_NUM_VDEVS */
+	33,                       /* 1  num_peers   TARGET_TLV_NUM_PEERS */
+	0, 0,                     /* 2  num_offload_peers / reorder bufs */
+	2,                        /* 4  num_peer_keys */
+	66,                       /* 5  num_tids   2 * TARGET_TLV_NUM_PEERS */
+	0,                        /* 6  ast_skid_limit */
+	7, 7,                     /* 7  tx_chain_mask / 8 rx_chain_mask */
+	0x64, 0x64, 0x64, 0x28,   /* 9..12 rx_timeout_pri[4] */
+	1,                        /* 13 rx_decap_mode ATH10K_HW_TXRX_NATIVE_WIFI */
+	4,                        /* 14 scan_max_pending_reqs */
+	4, 4,                     /* 15 bmiss / 16 roam offload max vdev */
+	8,                        /* 17 roam_offload_max_ap_profiles */
+	0, 0, 0,                  /* 18..20 mcast */
+	0x400,                    /* 21 tx_dbg_log_size */
+	0,                        /* 22 num_wds_entries */
+	0, 0, 0, 0,               /* 23..26 dma/mac/defrag/vow */
+	2,                        /* 27 gtk_offload_max_vdev */
+	1056,                     /* 28 num_msdu_desc TARGET_TLV_NUM_MSDU_DESC */
+	2,                        /* 29 max_frag_entries */
+	1,                        /* 30 num_tdls_vdevs */
+	0x20,                     /* 31 num_tdls_conn_table_entries */
+	2,                        /* 32 beacon_tx_offload_max_vdev */
+	5,                        /* 33 num_multicast_filter_entries */
+	22,                       /* 34 num_wow_filters */
+	6,                        /* 35 num_keep_alive_pattern */
+	0,                        /* 36 keep_alive_pattern_size */
+	1, 1,                     /* 37..38 tdls sleep/buffer sta */
+	0,                        /* 39 wmi_send_separate */
+	0, 0, 0,                  /* 40..42 ocb */
+	0x200,                    /* 43 host_capab WMI_TLV_FLAG_MGMT_BUNDLE_TX_COMPL */
+};
+
 static int
 hif_send_wmi_init(void)
 {
@@ -751,18 +793,25 @@ hif_send_wmi_init(void)
 	 * 22 num_wds_entries, 28 num_msdu_desc, 34 num_wow_filters,
 	 * 39 wmi_send_separate, 43 host_capab. */
 	for (i = 0; i < 44; i++) cfg[i] = 0;
-	cfg[0] = 2;      /* num_vdevs */
-	cfg[1] = 16;     /* num_peers */
-	cfg[4] = 2;      /* num_peer_keys */
-	cfg[5] = 16;     /* num_tids */
-	cfg[7] = 3;      /* tx_chain_mask */
-	cfg[8] = 3;      /* rx_chain_mask */
-	cfg[13] = 0;     /* rx_decap_mode = native wifi */
-	cfg[14] = 4;     /* scan_max_pending_reqs */
-	cfg[22] = 0;     /* num_wds_entries */
-	cfg[28] = 128;   /* num_msdu_desc */
-	cfg[34] = 0;     /* num_wow_filters */
-	cfg[39] = 0;     /* wmi_send_separate */
+	if (g_wmi_init_full) {
+		memcpy(cfg, g_wmi_cfg_full, sizeof(cfg));
+		HIF_LOG("WMI: INIT full Linux cfg vdevs=%u peers=%u tids=%u "
+		    "msdu=%u decap=%u max_frag=%u host_capab=0x%x",
+		    cfg[0], cfg[1], cfg[5], cfg[28], cfg[13], cfg[29], cfg[43]);
+	} else {
+		cfg[0] = 2;      /* num_vdevs */
+		cfg[1] = 16;     /* num_peers */
+		cfg[4] = 2;      /* num_peer_keys */
+		cfg[5] = 16;     /* num_tids */
+		cfg[7] = 3;      /* tx_chain_mask */
+		cfg[8] = 3;      /* rx_chain_mask */
+		cfg[13] = 0;     /* rx_decap_mode = native wifi */
+		cfg[14] = 4;     /* scan_max_pending_reqs */
+		cfg[22] = 0;     /* num_wds_entries */
+		cfg[28] = 128;   /* num_msdu_desc */
+		cfg[34] = 0;     /* num_wow_filters */
+		cfg[39] = 0;     /* wmi_send_separate */
+	}
 
 	p = hif_put_tlv(p, WMI_TLV_INIT_CMD, (uint16_t)sizeof(init), &init);
 	p = hif_put_tlv(p, WMI_TLV_RESOURCE_CONFIG, (uint16_t)sizeof(cfg), cfg);
@@ -1590,9 +1639,13 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("vdevpre", &v, sizeof(v)) && v <= 1) {
 		g_vdev_pre = (int)v;
 	}
-	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d",
+	v = 0;
+	if (PE_parse_boot_argn("wmiinit", &v, sizeof(v)) && v <= 1) {
+		g_wmi_init_full = (int)v;
+	}
+	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; wmiinit=%d",
 	    g_tx3_rotate ? "8 rotating" : "single (legacy)", g_autoscan,
-	    g_ready_stop, g_vdev_pre);
+	    g_ready_stop, g_vdev_pre, g_wmi_init_full);
 	{
 		uint64_t dma_pa = 0;
 		g_dma = (struct hif_dma_block *)picasso_wlan_ce_dma_alloc(
