@@ -594,3 +594,38 @@ cb61_fsr=0x400    cb4_fsr=0x400        (只有 FORMAT 位，不是 fault)
 panic 里加了两段扫描：所有 `CBn_FSR != 0 且 != 0x400` 的上下文（连 FAR/FARHi/
 FSYNR0 一起打），以及所有非零的 `SMRn`/`S2CRn` 对。一次 panic 就能看出
 到底有没有某个 bank 在 fault、WLAN 子系统究竟注册了哪些 stream。
+
+## 494→496：不是"第二条消息"，是消息内容
+
+三个单变量，同一个镜像（`boot-494.img` / `boot-496.img`）：
+
+| 组 | 第二次 HTT 消息 | 结果 |
+|---|---|---|
+| `rx` | type 2 = RX_RING_CFG（59 B） | platform error |
+| `ag` | type 5 = AGGR_CFG（15 B） | platform error |
+| `rep` | **type 0 = 同一个 VERSION_REQ（12 B）** | **不崩，心跳 36000** |
+
+`rep` 是这轮最重要的负面对照：同一条 CE4 描述符（desc 1）、同一个
+`seq_no=0`、同一个 HTC 长度字段都没问题。所以：
+
+1. 不是"CE4 第二次发送"坏了 —— `rep` 用的就是 desc 1。
+2. 不是 `seq_no` 重复 —— `rep` 两次都是 0。
+3. 是**消息类型/内容**：type 0 可以，type 2 和 type 5 都让固件死。
+
+顺带发现固件回给我们的 `VERSION_CONF` **只有 12 字节**（HTC 8 + htt_cmd
+头 4，没有 `htt_ver_resp` 的 4 字节 body），所以主机侧拿不到 HTT 版本号——
+Linux 的 `ath10k_htt_verify_version()` 会因为 body 缺失读到 0。这条先记下，
+它意味着**不能假设固件的 HTT 方言和 ath10k 主线的 v3 完全一致**。
+
+### 498：把"类型"和"载荷"分开
+
+| 位 | 探针 |
+|---|---|
+| `httring=16` | 发 type 2，但载荷长度 0（只有 4 字节 htt_cmd 头） |
+| `httring=32` | 发一个协议里不存在的 type 99 |
+
+判读：
+- 99 活着 + 空 type 2 死 → 固件认识 type 2 却拒绝空载荷（会在解析里 assert）
+- 99 活着 + 空 type 2 也活 → 死因是载荷内容（回到 47 字节的布局）
+- 99 也死 → 固件对任何"未实现"的类型都 assert，说明它这套 HTT 只认 0，
+  那么 type 2/5 的**方言**就可能不是主线 v3 的格式
