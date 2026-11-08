@@ -1286,6 +1286,7 @@ hif_ce_post_ring(uint32_t ce)
 
 	/* Keep one slot free so the ring can never look full to the target. */
 	hif_reg_write(ce, CE_DST_WR_INDEX, n - 1);
+	if (g_ce_quiet) g_quiet_probe_polls = g_polls + 5000;
 	HIF_LOG("CE%u posted %u receive buffers (desc.addr=%llx buf=%u)",
 	    ce, n - 1, (unsigned long long)g_buf_pa[ce], sh->buf_sz);
 	hif_bb(BB_DOOR_REAL, 0x100u + ce, n - 1);
