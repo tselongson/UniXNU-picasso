@@ -1312,27 +1312,43 @@ hif_send_scan_chan_list(void)
 	    (uint32_t)(p - tlv));
 }
 
-/* wmi-tlv.c ath10k_wmi_tlv_op_gen_vdev_start(): three TLVs - the 64-byte
- * request, one STRUCT_CHANNEL, and an empty ARRAY_STRUCT for the nested
- * p2p-noa descriptor list.  mac.c ath10k_vdev_start_restart() gives the vdev
- * a home channel; without one the firmware's scan scheduler has no channel
- * context and asserts the moment START_SCAN arrives. */
+/* wmi-tlv.c ath10k_wmi_tlv_op_gen_vdev_start(): three TLVs - the request,
+ * one STRUCT_CHANNEL, and an empty ARRAY_STRUCT for the nested p2p-noa
+ * descriptor list.  mac.c ath10k_vdev_start_restart() gives the vdev a home
+ * channel; without one the firmware's scan scheduler has no channel context.
+ *
+ * The request is `struct wmi_tlv_vdev_start_cmd` (wmi-tlv.h), 72 packed
+ * bytes, in this order: vdev_id, requestor_id, bcn_intval, dtim_period,
+ * flags, struct wmi_ssid (ssid_len + ssid[32]), bcn_tx_rate, bcn_tx_power,
+ * num_noa_descr, disable_hw_ack.  The previous 64-byte layout here had no
+ * requestor_id and put ssid_len after disable_hw_ack, so the firmware read
+ * num_noa_descr out of the following TLV header (tag | len << 16) and walked
+ * a NOA list that does not exist.  That is the reset seen right after
+ * VDEV_START. */
+struct hif_vdev_start_cmd {
+	uint32_t vdev_id;
+	uint32_t requestor_id;
+	uint32_t bcn_intval;
+	uint32_t dtim_period;
+	uint32_t flags;
+	uint32_t ssid_len;
+	uint8_t ssid[32];
+	uint32_t bcn_tx_rate;
+	uint32_t bcn_tx_power;
+	uint32_t num_noa_descr;
+	uint32_t disable_hw_ack;
+} __attribute__((packed));
+
+/* wmi_tlv_vdev_start_cmd is 72 bytes; a mismatch is a build error. */
+typedef char hif_vdev_start_size_check[
+    sizeof(struct hif_vdev_start_cmd) == 72 ? 1 : -1];
+
 static int
 hif_send_vdev_start(void)
 {
 	uint8_t tlv[160];
 	uint8_t *p = tlv;
-	struct {
-		uint32_t vdev_id;
-		uint32_t bcn_intval;
-		uint32_t dtim_period;
-		uint32_t flags;
-		uint32_t bcn_tx_rate;
-		uint32_t bcn_tx_power;
-		uint32_t disable_hw_ack;
-		uint32_t ssid_len;
-		uint8_t ssid[32];
-	} __attribute__((packed)) cmd;
+	struct hif_vdev_start_cmd cmd;
 	uint8_t ch[24];
 
 	memset(tlv, 0, sizeof(tlv));
@@ -1409,7 +1425,7 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 {
 	uint8_t tlv[768];
 	uint8_t *p = tlv;
-	struct {
+	struct hif_start_scan_cmd {
 		/* wmi.h: struct wmi_start_scan_common is exactly 15 __le32 fields
 		 * (60 bytes).  An extra word here shifted burst_duration_ms and
 		 * every following field by 4 bytes. */
@@ -1422,7 +1438,11 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 		uint32_t num_probes;
 		uint8_t mac_addr[6];
 		uint8_t mac_mask[6];
-	} __attribute__((packed)) cmd;
+	} __attribute__((packed));
+	struct hif_start_scan_cmd cmd;
+	/* wmi_tlv_start_scan_cmd is 96 bytes. */
+	typedef char hif_start_scan_size_check[
+	    sizeof(struct hif_start_scan_cmd) == 96 ? 1 : -1];
 	uint32_t i, nch = (uint32_t)(sizeof(g_scan_freqs) / sizeof(g_scan_freqs[0]));
 	uint8_t chans[256];
 	uint8_t bssid[6];
