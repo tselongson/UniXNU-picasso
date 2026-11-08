@@ -717,10 +717,25 @@ hif_dump_regs(const char *why)
 #define WMI_MGMT_RX_EVENTID           0x7001   /* WMI_GRP_MGMT  = 7 */
 
 /* wmi-tlv.h: enum wmi_tlv_tag (values computed from the enum order) */
-#define WMI_TLV_ARRAY_UINT32          16
-#define WMI_TLV_ARRAY_BYTE            17
-#define WMI_TLV_ARRAY_STRUCT          18
-#define WMI_TLV_ARRAY_FIXED_STRUCT    19
+/* wmi-tlv.h enum wmi_tlv_tag:
+ *   WMI_TLV_TAG_LAST_RESERVED      = 15
+ *   WMI_TLV_TAG_FIRST_ARRAY_ENUM   = 16   <- not a usable tag
+ *   WMI_TLV_TAG_ARRAY_UINT32       = 17
+ *   WMI_TLV_TAG_ARRAY_BYTE         = 18
+ *   WMI_TLV_TAG_ARRAY_STRUCT       = 19
+ *   WMI_TLV_TAG_ARRAY_FIXED_STRUCT = 20
+ *
+ * These four were all one too low (16..19), i.e. every array TLV the driver
+ * ever emitted carried the wrong tag: the frequency list of START_SCAN was
+ * labelled FIRST_ARRAY_ENUM, its SSID/BSSID arrays were labelled
+ * ARRAY_STRUCT, and SCAN_CHAN_LIST's channel array too.  Single-struct
+ * commands (WMI_INIT up to RX_RING_CFG) all worked because they contain no
+ * arrays at all, and a zero-length array is silently ignored - which is why
+ * the bug stayed hidden until the first command that really carries one. */
+#define WMI_TLV_ARRAY_UINT32          17
+#define WMI_TLV_ARRAY_BYTE            18
+#define WMI_TLV_ARRAY_STRUCT          19
+#define WMI_TLV_ARRAY_FIXED_STRUCT    20
 #define WMI_TLV_MGMT_RX_HDR           44
 #define WMI_TLV_INIT_CMD              74
 #define WMI_TLV_RESOURCE_CONFIG       75
