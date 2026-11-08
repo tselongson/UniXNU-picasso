@@ -117,13 +117,28 @@ A/B。同时它也说明：0xc0 未注册时的表现是**静音**（无 panic�
 `offline-hid-swipe-delay=8` 等长换成 `wcn3990-hif-assign=0` 槽位，不需重建），
 `work/chain-483.sh` 会在同一镜像上跑 `=0/1/2/3` 四个值。
 
-## 距离「完全可用」还差什么
+## 距离「完全可用」还差什么（代码摸底结论，2026-11-08）
 
-CE/HTC/WMI 控制面已通，但日志里**还没有** `WMI: send START_SCAN`、
-`HEARD BEACON` 或任何扫描结果。后续是软件活：
+**已经齐的链路**：用户态 `apple80211` → `hakios_sta_attach(&picasso_sta_ops)`
+→ `picasso_sta_scan()` → `wcn3990_hif_start_scan()` → `hif_send_wmi_start_scan()`
+（39 信道、TLV、probe request）→ 固件 `WMI_MGMT_RX_EVENTID` →
+`hif_handle_mgmt_rx()` → `wcn3990_hif_set_frame_sink(picasso_parse_beacon_frame)`
+→ `picasso_add_bss()` → `ops->heard()`。也就是说**扫描代码不用重写**，
+只差系统稳得住、用户态真的发起扫描。482 日志里 `apple80211: the station
+says: power, 1` 已经出现，但在发出 scan 之前就 SError 了。
 
-- 触发并解析 `START_SCAN` / `WMI_SCAN_EVENTID`，把 BSS 交给 `picasso_sta_scan()` 的 `ops->heard()`；
-- association（`picasso_sta_join`）与数据面 HTT/CE 管道；
-- 解决上述 post-WMI panic，否则系统无法稳定停留到用户态发起扫描。
+**明确还缺的三块**：
+
+1. **消除 post-WMI SError** —— 当前 483 在测 `assign_level`。这是所有后续的前提。
+2. **关联是假的** —— `picasso_sta_join()` 只打印
+   `"4-way WPA2-PSK handshake authenticated successfully"`，没有发任何
+   `WMI_VDEV_START` / `WMI_PEER_CREATE` / 密钥安装命令，找不到 BSS 时甚至
+   编造默认 BSSID `24:4b:fe:11:22:33` 和 RSSI `-45`。要真连 AP 必须重写。
+3. **数据面 HTT 完全没有** —— `Wcn3990Hif.cpp` 里 CE1/4/5/9/10 的 HTT 环
+   只是占位（注释写着 unused），没有 MSDU 收发、没有 `ifnet` 输入输出对接。
+   `picasso_sta_power()` 也只是打日志返回 0。
+
+因此「WiFi 开关能打开、能扫出 AP 列表」和「能真正连网」是两个量级，
+前者依赖第 1 项，后者还要做完第 2、3 项。
 
 **当前状态：控制面打通、根因闭环到 SMMU 流注册；WiFi 尚未完全修复，不宣称可连网。**
