@@ -209,6 +209,13 @@ hif_put32(uint8_t *p, uint32_t v)
 	p[3] = (uint8_t)(v >> 24);
 }
 
+static inline void
+hif_put64(uint8_t *p, uint64_t v)
+{
+	hif_put32(p, (uint32_t)v);
+	hif_put32(p + 4, (uint32_t)(v >> 32));
+}
+
 /* ------------------------------------------------------------------ CE regs */
 
 /* hw.c: wcn3990_regs.ceN_base_address (offsets inside the 0x18800000 BAR) */
@@ -272,6 +279,23 @@ typedef char wcn_ce_desc_size_check[(sizeof(struct wcn_ce_desc_64) == 16) ? 1 : 
 #define CE3_ENTRIES   32     /* snoc.c: target_ce_config_wlan[3] nentries */
 #define CE_BUF_BYTES  2048    /* nbytes_max for CE0/2/3 */
 
+/* ---- sizes shared by the DMA block and the HTT code below ----------------
+ * htc.h: every CE buffer starts with an 8-byte HTC header.
+ * htt.h: struct htt_cmd_hdr is { u8 msg_type; } and struct htt_cmd puts it in
+ * front of a union, so every H2T message starts with 4 bytes: the type and
+ * three padding bytes.  htt_tx.c ath10k_htt_h2t_ver_req_msg() sends exactly
+ * hdr + htt_ver_req (3 pad bytes) = 4 bytes for VERSION_REQ.
+ * HTT_RX_RING_SIZE_MIN is 128; the real kernel uses 2048 entries (4 MiB of
+ * buffers), MIN keeps the target's RX path alive and fits the 1 MiB window. */
+#define HTC_HDR_BYTES                 8
+#define HTT_HDR_BYTES                 4
+#define HTT_H2T_MSG_TYPE_VERSION_REQ  0
+#define HTT_H2T_MSG_TYPE_RX_RING_CFG  2
+#define HTT_H2T_MSG_TYPE_AGGR_CFG     5
+#define HTT_T2H_MSG_TYPE_VERSION_CONF 0
+#define HTT_RX_RING_ENTRIES           128
+#define HTT_RX_BUF_SIZE               2048
+
 /* Linux gives the CE rings to dma_alloc_coherent(), which maps them into the
  * WLAN device's IOMMU domain.  Here there is no DMA API: static .bss pages are
  * HLOS-only, and v333 proved that the moment CE2 starts writing them the SoC
@@ -328,10 +352,17 @@ struct hif_dma_block {
 	/* wcn3990 keeps the per-CE read indices in DDR (hw_params.rri_on_ddr);
 	 * ce.c: ath10k_ce_alloc_rri() points the wrapper at this array. */
 	uint32_t rri[16];
+	/* HTT RX ring handed to the target by RX_RING_CFG: an array of buffer
+	 * physical addresses plus the 4-byte alloc index the firmware bumps.
+	 * Without this the target has nowhere to put anything it receives. */
+	uint64_t htt_ring[HTT_RX_RING_ENTRIES];
+	uint32_t htt_alloc_idx;
+	uint8_t htt_buf[HTT_RX_RING_ENTRIES][HTT_RX_BUF_SIZE];
 };
 
-#define HIF_DMA_SIZE   0x80000u          /* 512 KiB, >sizeof(hif_dma_block) */
-/* 8 rotating CE3 buffers add 14 KiB; make an overflow a build error. */
+#define HIF_DMA_SIZE   0x100000u         /* 1 MiB: rings + CE bufs + HTT RX ring */
+/* 8 rotating CE3 buffers and the 256 KiB HTT RX ring must fit; make an
+ * overflow a build error. */
 typedef char hif_dma_window_check[(sizeof(struct hif_dma_block) <= HIF_DMA_SIZE) ? 1 : -1];
 static struct hif_dma_block *g_dma;
 static uint64_t g_dma_pa;         /* physical base of the uncached alias */
@@ -412,10 +443,13 @@ static int g_vdev_up;         /* vdevup=1: WMI_VDEV_UP after VDEV_CREATE */
 static int g_scan_linux;      /* scanlinux=1: Linux-exact START_SCAN arguments */
 static int g_htt_connect;     /* httconn=1: connect HTT before SETUP_COMPLETE */
 static int g_htt_setup;       /* httsetup=1: send HTT VERSION_REQ (htt_setup) */
+static int g_htt_ring;        /* httring=1: send RX_RING_CFG + AGGR_CFG */
 static uint8_t g_htt_eid;
 static uint32_t g_wr4;        /* CE4 (HTT H2T) source ring write index */
 static uint32_t g_sw1, g_post1; /* CE1 (HTT T2H) dst ring software/posted */
 static uint32_t g_htt_rx;     /* HTT messages seen on CE1 */
+static int g_htt_ring_done;   /* RX_RING_CFG + AGGR_CFG already sent */
+static void hif_htt_setup_finish(void);
 static int g_vdev_pending;
 static uint32_t g_vdev_at;
 static uint32_t g_quiet_probe_polls;
@@ -582,17 +616,32 @@ hif_service_ce1(void)
 	if (g_dr_desc[1] == NULL || g_buf_va[1] == NULL) return;
 	while (budget-- > 0 && drri != g_sw1) {
 		struct wcn_ce_desc_64 *d = &g_dr_desc[1][g_sw1];
+		const uint8_t *b = g_buf_va[1] +
+		    (uint64_t)g_sw1 * hif_shape[1].buf_sz;
 		uint32_t nbytes = d->nbytes;
 
 		if (nbytes == 0) break;          /* not completed yet */
 		if (nbytes > hif_shape[1].buf_sz) nbytes = hif_shape[1].buf_sz;
 		d->nbytes = 0;                   /* claim before reposting */
+		/* Every CE buffer starts with the 8-byte HTC header; the
+		 * htt_resp (and therefore the message type) follows it.  Reading
+		 * b[0] here returns the endpoint id, not the message type. */
 		if (g_htt_rx < 8) {
-			const uint8_t *b = g_buf_va[1] +
-			    (uint64_t)g_sw1 * hif_shape[1].buf_sz;
-			HIF_LOG("htt rx #%u len=%u type=%u", g_htt_rx, nbytes,
-			    nbytes ? b[0] : 0);
+			HIF_LOG("htt rx #%u len=%u eid=%u type=%u",
+			    g_htt_rx, nbytes, nbytes ? b[0] : 0,
+			    nbytes > HTC_HDR_BYTES ? b[HTC_HDR_BYTES] : 0xff);
 			g_htt_rx++;
+		}
+		/* htt.c ath10k_htt_setup() waits for VERSION_CONF before it
+		 * sends the RX ring and the aggregation limits.  For the very
+		 * first bring-up the message type is not yet trusted - 492
+		 * showed a single 12-byte T2H reply whose type byte has never
+		 * been read correctly - so any completed htt_resp counts as the
+		 * go-ahead and the type is logged for the record. */
+		if (g_htt_ring && !g_htt_ring_done && nbytes > HTC_HDR_BYTES) {
+			HIF_LOG("HTT: first T2H reply type=%u, continuing htt_setup",
+			    b[HTC_HDR_BYTES]);
+			hif_htt_setup_finish();
 		}
 		{
 			uint32_t slot = g_post1 & (n - 1);
@@ -641,7 +690,6 @@ hif_dump_regs(const char *why)
 #define HTC_SVC_HTT_DATA_MSG          0x0300  /* htc.h: SVC(3, 0) */
 #define HTC_CONN_DISABLE_CREDIT_FLOW  0x0008  /* ATH10K_HTC_CONN_FLAGS_... */
 #define HTC_EP0                       0
-#define HTC_HDR_BYTES                 8
 
 /* wmi.h: WMI_CMD_GRP(grp) = (grp << 12) | 1, WMI_GRP_START = 3 */
 #define WMI_INIT_CMDID                0x0001
@@ -683,13 +731,41 @@ hif_dump_regs(const char *why)
 #define WMI_HOST_SCAN_REQ_ID_PREFIX   0xa000u
 #define WMI_HOST_SCAN_REQUESTOR_PREFIX 0xa000u
 
-/* htt.h: struct htt_cmd_hdr is { u8 msg_type; } and struct htt_cmd puts it in
- * front of a union, so every H2T message starts with 4 bytes: the type and
- * three padding bytes.  htt_tx.c ath10k_htt_h2t_ver_req_msg() sends exactly
- * hdr + htt_ver_req (3 pad bytes) = 4 bytes for VERSION_REQ. */
-#define HTT_HDR_BYTES                 4
-#define HTT_H2T_MSG_TYPE_VERSION_REQ  0
-#define HTT_T2H_MSG_TYPE_VERSION_CONF 0
+/* HTT constants (HTC_HDR_BYTES, HTT_HDR_BYTES, the H2T/T2H message types and
+ * the RX ring sizes) live up with CE_BUF_BYTES so the DMA block can use them. */
+
+/* htt_rx.c ath10k_htt_rx_ring_fill_n() / ath10k_htt_rx_msdu_buff_replenish():
+ * the target writes the index of the next descriptor it will use into the
+ * shadow word handed over in RX_RING_CFG; everything between the host read
+ * index and that value is a received MPDU.  The buffers themselves never move,
+ * so draining is only a matter of walking the window and moving the index -
+ * but it must happen, otherwise the ring wraps and the target stalls. */
+static uint32_t g_htt_ring_rd;
+static uint32_t g_htt_ring_seen;
+
+static void
+hif_service_htt_ring(void)
+{
+	uint32_t fw_idx, budget = HTT_RX_RING_ENTRIES;
+
+	if (!g_htt_ring || !g_htt_ring_done || g_dma == NULL) return;
+
+	fw_idx = g_dma->htt_alloc_idx & (HTT_RX_RING_ENTRIES - 1);
+	while (g_htt_ring_rd != fw_idx && budget-- > 0) {
+		const uint8_t *b = g_dma->htt_buf[g_htt_ring_rd];
+
+		if (g_htt_ring_seen < 8) {
+			/* rx_desc.h: struct rx_attention sits at offset 4 and
+			 * rx_hdr_status at 296 for the wcn3990 descriptor. */
+			HIF_LOG("htt ring #%u idx=%u attn=%02x%02x%02x%02x hdr0=%02x%02x",
+			    g_htt_ring_seen, g_htt_ring_rd,
+			    b[7], b[6], b[5], b[4], b[297], b[296]);
+			g_htt_ring_seen++;
+		}
+		g_htt_ring_rd = (g_htt_ring_rd + 1) &
+		    (HTT_RX_RING_ENTRIES - 1);
+	}
+}
 
 enum hif_state {
 	HIF_OFF = 0,
@@ -791,6 +867,90 @@ hif_htt_version_req(void)
 {
 	HIF_LOG("HTT: send VERSION_REQ (eid=%u)", g_htt_eid);
 	return hif_htt_send(HTT_H2T_MSG_TYPE_VERSION_REQ, NULL, 0);
+}
+
+/* htt_tx.c ath10k_htt_send_rx_ring_cfg_64().  This is the message that gives
+ * the target somewhere to put received frames; until it is sent the firmware
+ * has a null RX ring.  The ten offsets are
+ * offsetof(struct htt_rx_desc_v2, member) / 4 for the wcn3990 descriptor
+ * (rx_desc.h), computed offline by work/rxdesc-offsets.py. */
+static const uint16_t g_htt_rx_offsets[10] = {
+	74,  /* mac80211_hdr_offset  = rx_hdr_status  */
+	90,  /* msdu_payload_offset  = msdu_payload  */
+	27,  /* ppdu_start_offset                    */
+	37,  /* ppdu_end_offset                      */
+	4,   /* mpdu_start_offset                    */
+	26,  /* mpdu_end_offset                      */
+	7,   /* msdu_start_offset                    */
+	12,  /* msdu_end_offset                      */
+	1,   /* rx_attention_offset                  */
+	2,   /* frag_info_offset                     */
+};
+
+static int
+hif_htt_rx_ring_cfg(void)
+{
+	uint8_t p[3 + 44];
+	uint64_t ring_pa, idx_pa;
+	uint32_t i;
+
+	if (!g_dma) return -1;
+	ring_pa = hif_pa_of(g_dma->htt_ring);
+	idx_pa = hif_pa_of(&g_dma->htt_alloc_idx);
+	if (!ring_pa || !idx_pa) return -1;
+
+	/* Hand every buffer to the target before announcing the ring.
+	 * htt_rx.c ath10k_htt_set_paddrs_ring_64() stores the plain 64-bit
+	 * paddr, no descriptor mask. */
+	for (i = 0; i < HTT_RX_RING_ENTRIES; i++) {
+		g_dma->htt_ring[i] = hif_pa_of(g_dma->htt_buf[i]);
+	}
+	g_dma->htt_alloc_idx = 0;
+	hif_mb();
+
+	memset(p, 0, sizeof(p));
+	p[0] = 1;                              /* num_rings */
+	/* p[1..2] = rsvd0 */
+	hif_put64(p + 3, idx_pa);              /* fw_idx_shadow_reg_paddr */
+	hif_put64(p + 11, ring_pa);            /* rx_ring_base_paddr */
+	hif_put16(p + 19, HTT_RX_RING_ENTRIES);/* rx_ring_len (entries) */
+	hif_put16(p + 21, HTT_RX_BUF_SIZE);    /* rx_ring_bufsize */
+	hif_put16(p + 23, 0xffff);             /* every report type */
+	hif_put16(p + 25, 0);                  /* fw_idx_init_val */
+	for (i = 0; i < 10; i++) hif_put16(p + 27 + i * 2, g_htt_rx_offsets[i]);
+
+	HIF_LOG("HTT: send RX_RING_CFG ring=%llx idx=%llx n=%u buf=%u",
+	    (unsigned long long)ring_pa, (unsigned long long)idx_pa,
+	    HTT_RX_RING_ENTRIES, HTT_RX_BUF_SIZE);
+	return hif_htt_send(HTT_H2T_MSG_TYPE_RX_RING_CFG, p, (uint32_t)sizeof(p));
+}
+
+/* htt_tx.c ath10k_htt_h2t_aggr_cfg_msg_v2(): 3 bytes, no padding. */
+static int
+hif_htt_aggr_cfg(void)
+{
+	uint8_t p[3];
+
+	p[0] = 64;   /* max_num_ampdu_subframes */
+	p[1] = 6;    /* max_num_amsdu_subframes (0x1f mask) */
+	p[2] = 0;
+	HIF_LOG("HTT: send AGGR_CFG ampdu=%u amsdu=%u", p[0], p[1]);
+	return hif_htt_send(HTT_H2T_MSG_TYPE_AGGR_CFG, p, (uint32_t)sizeof(p));
+}
+
+/* htt.c ath10k_htt_setup() after VERSION_CONF: frag-desc bank (TX only, not
+ * needed for a scan), RX ring, aggregation limits. */
+static void
+hif_htt_setup_finish(void)
+{
+	if (g_htt_ring_done) return;
+	if (!g_htt_ring) {
+		HIF_LOG("HTT: VERSION_CONF seen; httring=0 so RX_RING_CFG is skipped");
+		return;
+	}
+	g_htt_ring_done = 1;
+	(void)hif_htt_rx_ring_cfg();
+	(void)hif_htt_aggr_cfg();
 }
 
 /* wmi-tlv.h: struct wmi_tlv { __le16 len; __le16 tag; u8 value[]; }.
@@ -1298,8 +1458,14 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 	case WMI_READY_EVENTID:
 		HIF_LOG("WMI: READY (0x%x) - WMI is up, creating the scan vdev", event_id);
 		/* core.c ath10k_htt_setup() runs here, after wait_for_unified_ready
-		 * and before the interface exists.  First message is VERSION_REQ. */
-		if (g_htt_setup) (void)hif_htt_version_req();
+		 * and before the interface exists.  First message is VERSION_REQ;
+		 * the rest follows the target's VERSION_CONF.  httsetup=2 sends
+		 * RX_RING_CFG/AGGR_CFG immediately, for firmware that never
+		 * answers the version request. */
+		if (g_htt_setup) {
+			(void)hif_htt_version_req();
+			if (g_htt_setup >= 2) hif_htt_setup_finish();
+		}
 		/* mac.c ath10k_update_channel_list() runs before regd_update():
 		 * the target gets its channel/power table first. */
 		if (g_chan_list) (void)hif_send_scan_chan_list();
@@ -1578,6 +1744,8 @@ wcn3990_hif_poll(void)
 
 	/* HTT responses arrive on CE1; drain them on the same 1 ms tick. */
 	hif_service_ce1();
+	/* and the received-MPDU ring the target fills after RX_RING_CFG. */
+	hif_service_htt_ring();
 }
 
 /* --------------------------------------------------------------------- init */
@@ -1914,16 +2082,20 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_htt_connect = (int)v;
 	}
 	v = 0;
-	if (PE_parse_boot_argn("httsetup", &v, sizeof(v)) && v <= 1) {
+	if (PE_parse_boot_argn("httsetup", &v, sizeof(v)) && v <= 2) {
 		g_htt_setup = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("httring", &v, sizeof(v)) && v <= 1) {
+		g_htt_ring = (int)v;
 	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
 	    "wmiinit=%d; scanchans=%d; tlvpad=%d; chanlist=%d; vdevup=%d; "
-	    "scanlinux=%d; httconn=%d; httsetup=%d",
+	    "scanlinux=%d; httconn=%d; httsetup=%d; httring=%d",
 	    g_tx3_rotate ? "8 rotating" : "single (legacy)", g_autoscan,
 	    g_ready_stop, g_vdev_pre, g_wmi_init_full, g_scan_chans,
 	    g_tlv_pad, g_chan_list, g_vdev_up, g_scan_linux, g_htt_connect,
-	    g_htt_setup);
+	    g_htt_setup, g_htt_ring);
 	{
 		uint64_t dma_pa = 0;
 		g_dma = (struct hif_dma_block *)picasso_wlan_ce_dma_alloc(
