@@ -432,3 +432,47 @@ TLV 补齐到 4 字节。凡是长度不是 4 的倍数的 TLV，都被硬塞进
 每次只翻一个 token。判读顺序：`pad`（旧布局，应崩）→ `fix`（精确布局）
 → 其余开关 → `WMI: SCAN event` → `WMI_MGMT_RX` → `HEARD BEACON`。
 **结果待 491 链跑完后回填，此处不预先宣称已修复。**
+
+## 491 实测：TLV 修复是真的，但不是 SError 的根因
+
+一次 CI（`42467010946`，提交 `5d6e8c49`）+ 一个镜像 `boot-491.img` +
+7 次开机，每次只翻一个 boot-arg。先记录一个流程教训：**这次把采集窗口
+从 150 s 改成 120 s，结果 7 次开机一个 HIF 日志都没有** —— HIF 是在
+开机 ~94 s 才启动的（`console-exp-i1.log.times` 实测 t=93.9 s），而
+120 s 的窗口实际只采到 ~69 s。抓日志必须先量出关键事件的时间点再定窗口。
+
+判据是字节级的，不是猜的：`pad` 组 `ce3 send ... len 36` /
+`START_SCAN ... 280 TLV bytes`（旧布局），`fix` 组 `len 34` / `278 TLV
+bytes`（精确布局），`boot-491.img` 的 `tlvpad` 开关确实生效了。
+
+| 组 | 唯一变量 | 关键字节 | 结果 |
+|---|---|---|---|
+| `pad` | tlvpad=1（旧 bug） | VDEV_CREATE 36 B / START_SCAN 280 TLV | SError |
+| `fix` | tlvpad=0（精确） | VDEV_CREATE 34 B / START_SCAN 278 TLV | SError |
+| `lin` | scanlinux=1（0xA000 ID + ath10k 默认值 + passive XOR） | scan_id 0xa000 | SError |
+| `chan` | chanlist=1（SCAN_CHAN_LIST 39 信道） | | SError |
+| `htt` | httconn=1 | **HTT endpoint eid=2 已连上** | SError |
+| `zero` | scanchans=0（0 信道） | START_SCAN 122 TLV bytes | SError |
+| `all` | chanlist+vdevup+scanlinux+httconn 全开 | VDEV_UP 18 B TLV 已发出 | SError |
+
+七组 panic caller 全部 `0xfffffff007cb61b0`，崩溃前都没有任何
+`WMI: SCAN event` / `WMI_MGMT_RX`。
+
+**结论（这些是排除，不是猜测）：**
+
+1. TLV 填充 bug 客观存在且已修复（字节级可验证），命令现在是合法的
+   Linux 格式 —— 但它不是 START_SCAN SError 的原因。该修复保留。
+2. 扫描命令的内容基本被排除：scan ID 前缀、notify mask、passive 标志、
+   `burst_duration_ms`、信道数量（0 个也崩）、`SCAN_CHAN_LIST`、
+   HTT 服务连接、`VDEV_UP`，全都不改变结果。
+3. `scanchans=0` 仍然崩 ⇒ **崩溃不在射频/扫描结果回传路径**，固件是在
+   处理 START_SCAN 这条命令本身（或它无条件触发的第一步）时死的。
+
+**下一个最高价值假设**（`ath10k_core_start()` 里仍然缺的、且文档里早已
+列为下一步的）：`ath10k_htt_setup()` 的四条 HTT H2T 消息 ——
+`VERSION_REQ(0)` / `FRAG_DESC_BANK_CFG(6)` / `RX_RING_CFG(2)` /
+`AGGR_CFG(5)`。491 只做了 `httconn=1`（HTT *服务* 连上，eid=2），从没
+发过这四条；其中 `RX_RING_CFG` 要把 host 侧 HTT RX ring 的物理地址交给
+固件，本移植一直没有这块内存。参考树里只有 `htt.h` 的常量和结构体，
+`htt_tx.c` 的编码函数不在（`grep h2t_ver_req_msg` 只有 htt.c 的调用处），
+所以这一步要么补上游源码，要么按 `htt.h` 的线格式自己写。
