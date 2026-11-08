@@ -2514,8 +2514,8 @@ new file mode 100644
 +		b[i] = digits[v & 15u];
 +		v >>= 4;
 +	}
-+\tb[16] = '\0';
-+\tpicasso_usb_panic_write(b, 16);
++	b[16] = '\0';
++	picasso_usb_panic_write(b, 16);
 +}
 +
 +/* Build 484 proved the post-WMI ARM64 SError is NOT the CE3 buffer reuse:
@@ -2527,48 +2527,48 @@ new file mode 100644
 +static void
 +pup_reg(const char *label, uint32_t v)
 +{
-+\tint n = 0;
++	int n = 0;
 +
-+\twhile (n < 28 && label[n] != '\0') n++;
-+\tpicasso_usb_panic_write(label, n);
-+\tpicasso_usb_panic_write("=0x", 3);
-+\tpup_hex64((uint64_t)v);
-+\tpicasso_usb_panic_write("\r\n", 2);
++	while (n < 28 && label[n] != '\0') n++;
++	picasso_usb_panic_write(label, n);
++	picasso_usb_panic_write("=0x", 3);
++	pup_hex64((uint64_t)v);
++	picasso_usb_panic_write("\r\n", 2);
 +}
 +
 +static void
 +picasso_usb_panic_smmu_dump(void)
 +{
-+\tvm_offset_t b = pu_smmu_va;
-+\tvm_offset_t c;
-+\tuint32_t idr1, pages;
++	vm_offset_t b = pu_smmu_va;
++	vm_offset_t c;
++	uint32_t idr1, pages;
 +
-+\tif (b == 0) {
-+\t\tpicasso_usb_panic_write("SMMU dump: no va\r\n", 18);
-+\t\treturn;
-+\t}
-+\tidr1 = usb_rd(b, 0x024);
-+\tpages = 1u << (((idr1 >> 28) & 7u) + 1u);
-+\tpicasso_usb_panic_write("\r\nSMMU FAULT DUMP\r\n", 19);
-+\tpup_reg("idr1", idr1);
-+\tpup_reg("scr0", usb_rd(b, 0x000));
-+\tpup_reg("gfsr", usb_rd(b, 0x048));
-+\tpup_reg("gfsynr0", usb_rd(b, 0x050));
-+\tpup_reg("gfsynr1", usb_rd(b, 0x054));
-+\tpup_reg("gfsynr2", usb_rd(b, 0x058));
-+\tpup_reg("smr7", usb_rd(b, 0x800u + 4u * 7u));
-+\tpup_reg("s2cr7", usb_rd(b, 0xc00u + 4u * 7u));
-+\tc = b + (((uint64_t)(pages + 61u)) << 12);
-+\tpup_reg("cb61_sctlr", usb_rd(c, 0x00));
-+\tpup_reg("cb61_fsr", usb_rd(c, 0x58));
-+\tpup_reg("cb61_far", usb_rd(c, 0x60));
-+\tpup_reg("cb61_farhi", usb_rd(c, 0x64));
-+\tpup_reg("cb61_fsynr0", usb_rd(c, 0x68));
-+\tc = b + (((uint64_t)(pages + 4u)) << 12);
-+\tpup_reg("cb4_sctlr", usb_rd(c, 0x00));
-+\tpup_reg("cb4_fsr", usb_rd(c, 0x58));
-+\tpup_reg("cb4_far", usb_rd(c, 0x60));
-+\tpup_reg("cb4_fsynr0", usb_rd(c, 0x68));
++	if (b == 0) {
++		picasso_usb_panic_write("SMMU dump: no va\r\n", 18);
++		return;
++	}
++	idr1 = usb_rd(b, 0x024);
++	pages = 1u << (((idr1 >> 28) & 7u) + 1u);
++	picasso_usb_panic_write("\r\nSMMU FAULT DUMP\r\n", 19);
++	pup_reg("idr1", idr1);
++	pup_reg("scr0", usb_rd(b, 0x000));
++	pup_reg("gfsr", usb_rd(b, 0x048));
++	pup_reg("gfsynr0", usb_rd(b, 0x050));
++	pup_reg("gfsynr1", usb_rd(b, 0x054));
++	pup_reg("gfsynr2", usb_rd(b, 0x058));
++	pup_reg("smr7", usb_rd(b, 0x800u + 4u * 7u));
++	pup_reg("s2cr7", usb_rd(b, 0xc00u + 4u * 7u));
++	c = b + (((uint64_t)(pages + 61u)) << 12);
++	pup_reg("cb61_sctlr", usb_rd(c, 0x00));
++	pup_reg("cb61_fsr", usb_rd(c, 0x58));
++	pup_reg("cb61_far", usb_rd(c, 0x60));
++	pup_reg("cb61_farhi", usb_rd(c, 0x64));
++	pup_reg("cb61_fsynr0", usb_rd(c, 0x68));
++	c = b + (((uint64_t)(pages + 4u)) << 12);
++	pup_reg("cb4_sctlr", usb_rd(c, 0x00));
++	pup_reg("cb4_fsr", usb_rd(c, 0x58));
++	pup_reg("cb4_far", usb_rd(c, 0x60));
++	pup_reg("cb4_fsynr0", usb_rd(c, 0x68));
 +}
 +
 +void
