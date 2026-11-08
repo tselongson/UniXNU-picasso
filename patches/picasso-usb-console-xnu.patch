@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3235 @@
+@@ -0,0 +1,3259 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -898,6 +898,30 @@ new file mode 100644
 +	if (smr != (0x80000000u | USB_STREAM_ID) || s2cr != plan->bank) {
 +		printf("PICASSO USB: SMMU bind route readback FAIL\n");
 +		return false;
++	}
++	/* The WLAN copy engines are stream 0xc0, mask 1 (icnss iommus).  Route
++	 * them through the same translated context the firmware's own streams
++	 * use: XBL installed S2CR=3000033f for 0xc2, and that path demonstrably
++	 * carries the firmware's own DMA.  The bypass banks the console uses
++	 * are evidently not permitted to this master. */
++	{
++		uint32_t slot = plan->slot + 1;
++		uint32_t wsmr = 0x80000000u | (1u << 16) | 0x00c0u;
++
++		while (slot < 128 &&
++		    (usb_rd(smmu, 0x800u + 4u * slot) & 0x80000000u)) {
++			slot++;
++		}
++		if (slot < 128) {
++			picasso_usb_smmu_write(smmu, 0xc00u + 4u * slot,
++			    0x3000033fu);
++			picasso_usb_smmu_write(smmu, 0x800u + 4u * slot, wsmr);
++			printf("PICASSO USB: wlan stream c0 slot=%u smr=%08x s2cr=%08x\n",
++			    slot, usb_rd(smmu, 0x800u + 4u * slot),
++			    usb_rd(smmu, 0xc00u + 4u * slot));
++		} else {
++			printf("PICASSO USB: no free slot for the wlan stream\n");
++		}
 +	}
 +	return true;
 +}
