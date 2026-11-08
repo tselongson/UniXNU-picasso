@@ -537,3 +537,60 @@ WCN3990-HIF: heartbeat polls=30000 stage=3 state=5 rx=14
 
 开关是独立的 `httring=1`，`httring=0` 时与 492 字节等价，所以同一个镜像可以
 把「VERSION_REQ」和「RX ring」分开判读。**结果待 493 跑完回填。**
+
+## 493/494 实测：RX_RING_CFG 本身就是触发器
+
+`boot-493.img`（CI `42474046310`）两组，`boot-494.img`（CI `42476020651`）
+把 `httring` 拆成位掩码后两组：
+
+| 组 | 配置 | 结果 |
+|---|---|---|
+| `ring` | httring=1\|2（ring+aggr），不扫描 | platform error `0x...6588` |
+| `rscan` | 同上 + START_SCAN | 同一个 platform error |
+| `rx` | **httring=1（只发 RX_RING_CFG）** | 同一个 platform error `0x...659c` |
+| `ag` | httring=2（只发 AGGR_CFG） | 待回填 |
+
+`rx` 组是决定性的：**不发 AGGR_CFG、不发 START_SCAN，只要发 RX_RING_CFG
+就崩**。所以触发器就是 RX_RING_CFG。
+
+`ring` 组的原始日志：
+
+```
+WCN3990-HIF: HTT: send VERSION_REQ (eid=2)
+WCN3990-HIF: htt rx #0 len=12 eid=2 type=0        <- VERSION_CONF
+WCN3990-HIF: HTT: first T2H reply type=0, continuing htt_setup
+WCN3990-HIF: HTT: send RX_RING_CFG ring=cdc3c280 idx=cdc3c680 n=128 buf=2048
+WCN3990-HIF: HTT: send AGGR_CFG ampdu=64 amsdu=6
+PICASSO PANIC caller=0xfffffff007cb6588 reason=0x0000000000000000
+```
+
+### 异常类型变了，这是第一条硬证据
+
+| 配置 | panic caller | 符号 |
+|---|---|---|
+| 无 ring（492 `hs`） | `0xfffffff007cb61b8` | `_sleh_synchronous + 0xae8` |
+| 有 ring（493 `ring`） | `0xfffffff007cb6588` | `_arm64_platform_error.cold.1` |
+
+给了 ring 之后，从**同步异常**变成**异步 platform error（SError）**。也就是说
+RX ring 把故障点从"扫描命令解析"挪到了"固件开始自己动这块内存"。
+
+### SMMU 不是原因
+
+`ring` 组的转储：
+
+```
+gfsr=0  gfsynr0=0  gfsynr1=0  gfsynr2=0
+smr7=0x800100c0   s2cr7=0x0000003d
+cb61_fsr=0x400    cb4_fsr=0x400        (只有 FORMAT 位，不是 fault)
+```
+
+`0x3d & 3 = 1` → S2CR type 1 = **BYPASS**，stream `0xc0` 根本没走翻译；
+`GFSR=0` 也说明没有全局 fault。所以这不是 SMMU 翻译失败，是固件/NoC
+自己报的错——最可能是固件 assert。
+
+### 下一步：把 64 个 CB 全部打出来
+
+既然 CB61/CB4 干净，就不能再假设 MAC 用的是某个特定 bank。495 的镜像在
+panic 里加了两段扫描：所有 `CBn_FSR != 0 且 != 0x400` 的上下文（连 FAR/FARHi/
+FSYNR0 一起打），以及所有非零的 `SMRn`/`S2CRn` 对。一次 panic 就能看出
+到底有没有某个 bank 在 fault、WLAN 子系统究竟注册了哪些 stream。
