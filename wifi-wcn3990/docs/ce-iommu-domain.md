@@ -64,7 +64,20 @@ buffers`，`CE rings live` 只在故意不敲真实门铃的 `nodoor` 里出现�
 481 两组都在 WMI 完成后约 0.2 s（主机采集 t+94.5 s）panic，位置完全一致，
 且 `=== PICASSO CDC PANIC BEGIN ===` 之后**只有 21 字节、没有任何 panic 文本**
 （480 同类 panic 输出了 121 KB，说明输出通路本身可用）。因此这个 panic 让 CPU
-在常规 printf 路径之前就停住了，暂时无法定性是否与 WLAN 有关。
+在常规 printf 路径之前就停住了，暂时无法定性。
+
+**`wifi=0` 对照（用现成 481 镜像原地改参数，无需重建）已定性一半**：
+`out/full-flash/logs/console-exp-off481.log` 163,256 B，HIF 行 0，
+`CDC PANIC BEGIN` **0 次**，采集窗口内（attach 后 99 s，即设定的 150 s 结尾）
+控制台持续输出 GPU hangcheck / CPUFREQ / UFS cache 统计，系统正常跑到用户态。
+关键是这组**仍然执行了 0xc0 绑定**（`wlan stream c0 slot=7 ... domain=0`），
+只是 WLAN/modem 线程没启动、CE 没跑。所以：
+
+- 那个 panic 不是系统固有故障，也不是 0xc0 绑定本身，而是 **CE/WMI 真正跑起来之后**的路径引入的；
+- 三天里「控制台断流 + 整屏变灰 + 重启」也由此闭环到 WLAN 路径，不是 USB 或显示的独立问题。
+
+`wifi=0` 同时关掉了 modem 子系统，所以它只能圈定范围到 `PicassoModem`/WLAN
+初始化路径，不能单独指向 HIF。精确定位等 482 的 `panic_caller`。
 
 482（commit `d091a13`）已推出，做三件事：
 
