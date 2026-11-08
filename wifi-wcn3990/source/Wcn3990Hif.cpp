@@ -377,6 +377,12 @@ static int g_ce_quiet;
 static int g_tx3_rotate;      /* 0 = legacy single buffer, 1 = 8 rotating */
 static int g_autoscan;        /* issue START_SCAN once WMI is ready */
 static int g_autoscan_sent;
+/* hifstop: bisect the two WMI commands sent right after WMI READY.
+ * 0 = both, 1 = skip PDEV_SET_REGDOMAIN, 2 = skip VDEV_CREATE,
+ * 3 = skip both.  A WCN3990 firmware crash ~17 ms after vdev_create is
+ * a documented failure mode, so this separates "our command kills the
+ * firmware" from "the firmware kills the host on its own". */
+static int g_ready_stop;
 static uint32_t g_quiet_probe_polls;
 static int g_quiet_probed;
 static bool g_bases_programmed;
@@ -981,11 +987,21 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 	}
 	case WMI_READY_EVENTID:
 		HIF_LOG("WMI: READY (0x%x) - WMI is up, creating the scan vdev", event_id);
-		/* ath10k sets the regdomain during core start, and a scan can be
-		 * refused while no regdomain is in place.  No response event. */
-		hif_send_pdev_regdomain();
-		/* START_SCAN carries a vdev_id, so the vdev must exist first. */
-		if (hif_send_vdev_create() == 0) {
+		/* hifstop=1/3: skip PDEV_SET_REGDOMAIN.  The WCN3990 firmware
+		 * has a documented deterministic crash shortly after vdev_create;
+		 * bisecting which host command precedes it tells us whether the
+		 * firmware is dying on our input or on its own. */
+		if (g_ready_stop == 1 || g_ready_stop == 3) {
+			HIF_LOG("WMI: READY stop=%u, skipping PDEV_SET_REGDOMAIN",
+			    g_ready_stop);
+		} else {
+			hif_send_pdev_regdomain();
+		}
+		if (g_ready_stop == 2 || g_ready_stop == 3) {
+			g_state = HIF_READY;
+			HIF_LOG("WMI: READY stop=%u, skipping VDEV_CREATE",
+			    g_ready_stop);
+		} else if (hif_send_vdev_create() == 0) {
 			g_state = HIF_READY;
 			HIF_LOG("WMI: scan vdev created, scanning is available");
 		} else {
@@ -1511,8 +1527,13 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("wcn3990-hif-autoscan", &v, sizeof(v)) && v <= 1) {
 		g_autoscan = (int)v;
 	}
-	HIF_LOG("CE3 tx buffers: %s; autoscan=%d",
-	    g_tx3_rotate ? "8 rotating" : "single (legacy)", g_autoscan);
+	v = 0;
+	if (PE_parse_boot_argn("hifstop", &v, sizeof(v)) && v <= 3) {
+		g_ready_stop = (int)v;
+	}
+	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d",
+	    g_tx3_rotate ? "8 rotating" : "single (legacy)", g_autoscan,
+	    g_ready_stop);
 	{
 		uint64_t dma_pa = 0;
 		g_dma = (struct hif_dma_block *)picasso_wlan_ce_dma_alloc(
