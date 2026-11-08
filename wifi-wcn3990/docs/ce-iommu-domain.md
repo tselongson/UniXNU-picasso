@@ -629,3 +629,46 @@ Linux 的 `ath10k_htt_verify_version()` 会因为 body 缺失读到 0。这条�
 - 99 活着 + 空 type 2 也活 → 死因是载荷内容（回到 47 字节的布局）
 - 99 也死 → 固件对任何"未实现"的类型都 assert，说明它这套 HTT 只认 0，
   那么 type 2/5 的**方言**就可能不是主线 v3 的格式
+
+## 根因：HTT 命令头是 1 字节，我们当成 4 字节
+
+`htt.h:52`：
+
+```c
+struct htt_cmd_hdr {
+	u8 msg_type;
+} __packed;
+
+struct htt_cmd {
+	struct htt_cmd_hdr hdr;
+	union { ... } __packed;      /* __packed，所以 union 从偏移 1 开始 */
+} __packed;
+```
+
+`htt_tx.c` 里每个构造器都用 `sizeof(cmd->hdr) == 1`：
+
+```c
+	len = sizeof(cmd->hdr) + sizeof(cmd->rx_setup_64.hdr) + sizeof(*ring);
+	                                            /* 1 + 3 + 44 = 48 */
+```
+
+而本移植的 `hif_htt_send()` 写的是 `b[8] = msg_type; memcpy(b + 8 + 4, ...)`，
+即**插入了 3 个 pad 字节**。后果：
+
+| 命令 | Linux 长度 | 我们发的 | 固件读到 |
+|---|---|---|---|
+| VERSION_REQ | 1 + 3 = 4 | 4 | **对的**（`htt_ver_req` 本身就是 3 字节 pad）|
+| AGGR_CFG | 1 + 3 = 4 | 7 | `max_num_ampdu` 落在 pad 上 = **0**，Linux 自己都规定 1..64 |
+| RX_RING_CFG | 1 + 3 + 44 = 48 | 51 | `num_rings` 落在 pad 上 = **0**，ring 基址整体错位 3 字节 |
+
+这完美解释了为什么**只有 type 0 活着**：它是唯一一条"错得刚好正确"的消息。
+也解释了 panic 为什么是异步 platform error 而不是 SMMU fault——固件拿到
+`num_rings=0` 之后自己 assert，NoC 把错误报到 AP。
+
+修复：`HTT_HDR_BYTES` 改成 1（`hif_htt_send` 里所有偏移都走这个宏），
+`hif_htt_version_req()` 显式带 3 字节 pad 以保持 4 字节。同时把
+`htt_ver_resp` 的 `b[9]/b[10]`（minor/major）打进日志——Linux 的
+`ath10k_htt_verify_version()` 要求 major 必须是 3，这个值此前从未被读过。
+
+**待 499 实测确认。** 判读：`rx` 组 RX_RING_CFG 之后不再 panic；若
+`http ring #` 出现，说明固件真的往 ring 里写了东西。
