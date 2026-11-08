@@ -448,6 +448,7 @@ static uint8_t g_htt_eid;
 static uint32_t g_wr4;        /* CE4 (HTT H2T) source ring write index */
 static uint32_t g_sw1, g_post1; /* CE1 (HTT T2H) dst ring software/posted */
 static uint32_t g_htt_rx;     /* HTT messages seen on CE1 */
+static uint8_t g_htt_seq;     /* HTC seq_no for the HTT endpoint (htc.h @5) */
 static int g_htt_ring_done;   /* RX_RING_CFG + AGGR_CFG already sent */
 static void hif_htt_setup_finish(void);
 static int g_vdev_pending;
@@ -853,9 +854,13 @@ hif_htt_send(uint8_t msg_type, const uint8_t *payload, uint32_t len)
 	memset(b, 0, total);
 	b[0] = g_htt_eid;
 	/* htc.c: HTT data service runs with credit flow control disabled, so no
-	 * NEED_CREDIT_UPDATE flag and no per-endpoint sequence number. */
+	 * NEED_CREDIT_UPDATE flag.  htc.h puts seq_no in a single byte at
+	 * offset 5 (union with control_byte1) and ath10k_htc_prepare_tx_skb()
+	 * increments it for every send regardless of credit flow, so do the
+	 * same here - the control endpoint already does (g_tx_seq). */
 	b[1] = 0;
 	hif_put16(b + 2, (uint16_t)(HTT_HDR_BYTES + len));
+	b[5] = g_htt_seq++;
 	b[8] = msg_type;
 	if (len && payload) memcpy(b + HTC_HDR_BYTES + HTT_HDR_BYTES, payload, len);
 	return hif_ce_send(4, b, total);
