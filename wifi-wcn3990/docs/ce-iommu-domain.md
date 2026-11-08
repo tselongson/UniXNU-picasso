@@ -672,3 +672,35 @@ struct htt_cmd {
 
 **待 499 实测确认。** 判读：`rx` 组 RX_RING_CFG 之后不再 panic；若
 `http ring #` 出现，说明固件真的往 ring 里写了东西。
+
+### 499 实测：RX_RING_CFG 修好了，START_SCAN 还在
+
+`boot-499.img`（CI `42479965962`，提交 `5ca8e54`）两组：
+
+| 组 | 配置 | 结果 |
+|---|---|---|
+| `rx` | httring=1（只有 RX_RING_CFG，不扫描） | **不崩**，心跳 **89000**（历史最长） |
+| `rscan` | httring=1 + autoscan | 仍崩，`_arm64_platform_error.cold.1` |
+
+日志：
+
+```
+WCN3990-HIF: HTT: send VERSION_REQ (eid=2)
+WCN3990-HIF: htt rx #0 len=12 eid=2 type=0 ver=81.3   <- major = 3，和 Linux 要求一致
+WCN3990-HIF: HTT: send RX_RING_CFG ring=cdc7f280 idx=cdc7f680 n=128 buf=2048
+WCN3990-HIF: heartbeat polls=89000
+```
+
+两点收获：
+
+1. **1 字节头的判断被证实**：同一条 RX_RING_CFG（47 字节载荷 + 1 字节头 =
+   48，与 `htc_tx.c` 的 `sizeof(hdr)+sizeof(hdr)+sizeof(ring)` 完全一致）现在
+   被固件接受，不再 assert。此前 51 字节的版本必然被拒。
+2. **`ver=81.3`**：固件回报的 `htt_ver_resp` 是 minor=81 / major=**3**。
+   Linux 的 `ath10k_htt_verify_version()` 只接受 major 3，这条以前从没被读过。
+
+`rscan` 仍然崩，但**异常类型变了**：修之前是 `_sleh_synchronous`（同步），
+现在是 `_arm64_platform_error`（异步 SError），而且是在 `START_SCAN` 之后。
+解释：RX ring 合法之后，固件真正开始往里写扫描结果，这时才碰到下一个问题。
+下一步要分清是"扫描命令本身"还是"往 ring 写"——`rx` 组 89000 次心跳说明
+静态的 ring 无害，只有真的产生 RX 才触发。
