@@ -433,8 +433,9 @@ static int g_ready_stop;
  * hifstop=4 skips it and forces an autoscan to see whether the firmware
  * will scan without a vdev at all. */
 static int g_vdev_pre;
-static int g_wmi_init_full;   /* wmiinit=1: Linux WCN3990 resource config */
+static int g_wmi_init_full = 1; /* Linux WCN3990 resource config (the 44-field one) */
 static int g_init_arr;        /* initarr: 0 omit, 1 tag 19, 2 tag 18 */
+static int g_scan_shape;      /* scanshp: 0 full, 1 struct only, 2 +empty array */
 static int g_scan_chans = -1; /* scanchans=N: cap the START_SCAN channel list */
 /* wmi-tlv.c ath10k_wmi_tlv_iter() advances by exactly tlv_len, with no
  * roundup.  This driver used to round every TLV up to 4 bytes.  Three of
@@ -1392,11 +1393,24 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 
 	for (i = 0; i < nch; i++) hif_put32(chans + i * 4, g_scan_freqs[i]);
 
+	/* scanshp isolates "the firmware refuses this command" from "the
+	 * firmware refuses these arrays": 0 sends the full Linux command,
+	 * 1 sends only the struct (no array TLV at all), 2 sends the struct
+	 * plus one empty channel array.  With 1/2 the counts are zeroed so
+	 * the command stays self-consistent. */
+	if (g_scan_shape != 0) {
+		cmd.num_channels = 0;
+		cmd.num_bssids = 0;
+	}
 	p = hif_put_tlv(p, WMI_TLV_START_SCAN_CMD, (uint16_t)sizeof(cmd), &cmd);
-	p = hif_put_tlv(p, WMI_TLV_ARRAY_UINT32, (uint16_t)(nch * 4), chans);
-	p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT, 0, NULL);  /* ssids */
-	p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT, (uint16_t)sizeof(bssid), bssid);
-	p = hif_put_tlv(p, WMI_TLV_ARRAY_BYTE, 0, NULL);          /* ie */
+	if (g_scan_shape == 0) {
+		p = hif_put_tlv(p, WMI_TLV_ARRAY_UINT32, (uint16_t)(nch * 4), chans);
+		p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT, 0, NULL);  /* ssids */
+		p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT, (uint16_t)sizeof(bssid), bssid);
+		p = hif_put_tlv(p, WMI_TLV_ARRAY_BYTE, 0, NULL);          /* ie */
+	} else if (g_scan_shape == 2) {
+		p = hif_put_tlv(p, WMI_TLV_ARRAY_UINT32, 0, NULL);
+	}
 
 	HIF_LOG("WMI: send START_SCAN (scan_id 0x%x, linux=%d, %u channels, %u ms dwell, %u TLV bytes)",
 	    cmd.common[0], g_scan_linux, nch, dwell_ms, (unsigned)(p - tlv));
@@ -1628,7 +1642,17 @@ hif_handle_htc_control(const uint8_t *payload, uint32_t len)
 		break;
 	}
 	default:
-		HIF_LOG("HTC: control message %u (%u bytes)", msg_id, len);
+		/* A target that is about to assert reports it here first; the
+		 * payload is only a handful of bytes, so print it. */
+		HIF_LOG("HTC: control message %u (%u bytes) %02x %02x %02x %02x "
+		    "%02x %02x %02x %02x %02x %02x %02x %02x",
+		    msg_id, len,
+		    len > 0 ? payload[0] : 0, len > 1 ? payload[1] : 0,
+		    len > 2 ? payload[2] : 0, len > 3 ? payload[3] : 0,
+		    len > 4 ? payload[4] : 0, len > 5 ? payload[5] : 0,
+		    len > 6 ? payload[6] : 0, len > 7 ? payload[7] : 0,
+		    len > 8 ? payload[8] : 0, len > 9 ? payload[9] : 0,
+		    len > 10 ? payload[10] : 0, len > 11 ? payload[11] : 0);
 		break;
 	}
 }
@@ -2131,6 +2155,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	v = 0;
 	if (PE_parse_boot_argn("initarr", &v, sizeof(v)) && v <= 2) {
 		g_init_arr = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("scanshp", &v, sizeof(v)) && v <= 2) {
+		g_scan_shape = (int)v;
 	}
 	v = 0;
 	if (PE_parse_boot_argn("scanchans", &v, sizeof(v)) && v <= 39) {
