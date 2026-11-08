@@ -949,6 +949,15 @@ hif_htt_setup_finish(void)
 		return;
 	}
 	g_htt_ring_done = 1;
+	/* bit3 = 8: the "second message" control.  RX_RING_CFG (bit0) and
+	 * AGGR_CFG (bit1) each kill the target on their own, so the content
+	 * may not be what it hates - resending VERSION_REQ, which the target
+	 * already accepted once, tells the two apart. */
+	if (g_htt_ring & 8) {
+		HIF_LOG("HTT: resend VERSION_REQ as the second H2T message");
+		(void)hif_htt_version_req();
+		return;
+	}
 	/* bit0 = RX_RING_CFG, bit1 = AGGR_CFG.  They are split because the
 	 * pair sent together killed the target with a platform error; one
 	 * boot per bit tells which command the firmware refuses. */
@@ -2089,7 +2098,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_htt_setup = (int)v;
 	}
 	v = 0;
-	if (PE_parse_boot_argn("httring", &v, sizeof(v)) && v <= 3) {
+	if (PE_parse_boot_argn("httring", &v, sizeof(v)) && v <= 15) {
 		g_htt_ring = (int)v;
 	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
