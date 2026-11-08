@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3289 @@
+@@ -0,0 +1,3332 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -937,7 +937,11 @@ new file mode 100644
 +		    (usb_rd(smmu, 0x800u + 4u * slot) & 0x80000000u)) {
 +			slot++;
 +		}
-+		if (taken || slot >= 128) {
++		if (domain == 2) {
++			/* Deliberate negative control: leave 0xc0 with NO S2CR route,
++			 * exactly the state of every pre-481 build. */
++			printf("PICASSO USB: wlan stream c0 DELIBERATELY UNBOUND (wlansmmu=2)\n");
++		} else if (taken || slot >= 128) {
 +			printf("PICASSO USB: wlan stream c0 skipped (bank %u taken=%u slot=%u)\n",
 +			    bank, taken, slot);
 +		} else {
@@ -2481,10 +2485,49 @@ new file mode 100644
 +		}
 +		pup_put(text[i]);
 +	}
-+	if (size > 1 || text[size - 1] == '\n' ||
-+	    pup_ring.total - pup_pos >= 512) {
-+		picasso_usb_panic_flush();
++
++/* Build 481 reached WMI READY and then panicked, but only the marker reached
++ * the host: one 21-byte line, no panic text at all.  Build 480's panic
++ * produced 121 KB, so the sink works - this panic stops the CPU before the
++ * normal printf path can run.  Emit the one line that matters synchronously
++ * from panic_trap_to_debugger(), before any debugger/trap machinery.  No
++ * vsnprintf, no allocation, no locks: a hand-rolled hex printer only.
++ * panic_caller can be symbolised against kernel.macho afterwards. */
++static void
++pup_hex64(uint64_t v)
++{
++	static const char digits[] = "0123456789abcdef";
++	char b[17];
++	int i;
++
++	for (i = 15; i >= 0; i--) {
++		b[i] = digits[v & 15u];
++		v >>= 4;
 +	}
++	b[16] = '\0';
++	picasso_usb_panic_write(b, 16);
++}
++
++void
++picasso_usb_panic_enter(const char *fmt, unsigned int reason,
++    unsigned long caller)
++{
++	int n = 0;
++
++	if (!pu_panic_active) return;
++	picasso_usb_panic_write("\r\nPICASSO PANIC caller=0x", 25);
++	pup_hex64((uint64_t)caller);
++	picasso_usb_panic_write(" reason=0x", 10);
++	pup_hex64((uint64_t)reason);
++	picasso_usb_panic_write("\r\nfmt: ", 7);
++	if (fmt != NULL) {
++		while (n < 400 && fmt[n] != '\0') n++;
++		picasso_usb_panic_write(fmt, n);
++	} else {
++		picasso_usb_panic_write("(null)", 6);
++	}
++	picasso_usb_panic_write("\r\n", 2);
++	picasso_usb_panic_flush();
 +}
 +
 +void
@@ -3395,13 +3438,16 @@ diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
 index e9daeed833924a653c2243f46615527a3e9b4195..1d670170759e04d18f6d57f3f78d6e420ade0812 100644
 --- a/osfmk/kern/debug.c
 +++ b/osfmk/kern/debug.c
-@@ -1132,6 +1132,10 @@ void
+@@ -1132,6 +1132,13 @@ void
  panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsigned int reason, void *ctx,
      uint64_t panic_options_mask, void *panic_data_ptr, unsigned long panic_caller)
  {
 +	{
 +		extern void picasso_usb_panic_begin(void);
++		extern void picasso_usb_panic_enter(const char *, unsigned int,
++		    unsigned long);
 +		picasso_usb_panic_begin();
++		picasso_usb_panic_enter(panic_format_str, reason, panic_caller);
 +	}
  #pragma clang diagnostic pop
  

@@ -60,7 +60,45 @@ XBL 的表里 0xc0/0xc1 本来就是空的（0xc2/0xc3 才是 XBL 给固件自�
 - `=1` 与 `=0` 完全一样 → 「翻译上下文」这条假设被证伪，转去查 TZ VMID 授权
   （`wcn3990-hif-assign=3`，即把 CE 内存授给 VMID 15，这个调用在 rmtfs 上已验证返回 0）。
 
+## 480 的教训：先排除自己引入的 panic（已修，commit 48597d0）
+
+479 第一次 A/B 两组都是 0 字节、手机掉线（`CM_PROB_PHANTOM`），属于设备/采集问题。
+480 设备回来后两组都流了 28–30 万字节，但**都在同一个地方 panic，且都不是 CE**：
+
+```
+panic(cpu 7 caller 0xfffffff007c9b2d0):
+  kmem_alloc(0x..., 10371072, 0x100021): failed with 3 @vm_kern.c:180
+```
+
+用 CI 产出的 `kernel.macho` 符号表（脚本 `work/macho-syms.py`）解析调用栈：
+
+```
+Call_continuation
+modem_thread +0x2dac
+svc_rx       +0x181c
+io_map       +0x160
+kmem_alloc_guard_internal +0x6b8
+kmem_invalid_size_idx      <- Assert/panic
+```
+
+`10371072 = round_page(0x9e3400)`，正是 1080×2400 RGBA 帧缓冲大小，对应
+`wlan_fb_map()` 里 `ml_io_map(0xa0000000, 0x9e3400)`。这个屏幕色块探针是
+11:24 那次提交加的，位置在 `picasso_wlan_ce_init()` 里、**`wcn3990_hif_init()`
+之前**；启动后期 zone map 拿不出 10 MB 连续内核 VA，XNU 在 `io_map()` 里直接
+panic。所以两组日志里连一行 `WCN3990-HIF` 都没有，CE 根本没被初始化。
+
+修复：探针改成 `wlan_fb_probe=1` 才启用，默认路径不做任何大映射。
+
+同一个 480 日志还暴露了对照组不纯：控制组早期绑定打印
+`wlan stream c0 skipped (bank 61 taken=1 slot=7)`。空闲判断把控制台自己的
+bypass bank 当成「被占用」，于是控制组压根没绑 0xc0。已修为只有专用 CB4
+才做空闲检查。
+
+**方法论**：连续两轮 A/B 无效，原因都不在 WiFi —— 一次设备掉线，一次是我
+自己上一轮引入的诊断代码 panic。判读前必须先确认日志里有没有
+`WCN3990-HIF` 行和 `kmem_alloc` panic，否则「控制台静音」会被误当成 CE 故障。
+
 ## 还没做
 
 - association / 数据面（HTT）仍未实现；扫描结果不等于能连网。
-- 上述 A/B 还没跑完硬件验证，本文档只记录定位依据，不宣称修复完成。
+- IOMMU domain 假设的硬件 A/B 仍在跑（481），本文不宣称修复完成。

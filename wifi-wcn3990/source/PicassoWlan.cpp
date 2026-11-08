@@ -3513,6 +3513,10 @@ picasso_wlan_smmu_context(void)
 	const uint64_t attrs = (1ull << 10) | (1ull << 6);
 
 	(void)PE_parse_boot_argn("wlansmmu", &want, sizeof(want));
+	if (want == 2) {
+		LOG("wlan smmu ctx: NEGATIVE CONTROL (stream c0 deliberately unbound)");
+		return 0;
+	}
 	if (!want) {
 		LOG("wlan smmu ctx: OFF (control: stream c0 on bank %u, no tables, SCTLR.M=0)",
 		    WLAN_CE_CONTEXT);

@@ -1298,7 +1298,7 @@ hif_program_bases(void)
 		 * page (index 0xc0 is beyond the S2CR array); keep them on the
 		 * control path only, so the A/B differs in one variable. */
 		(void)PE_parse_boot_argn("wlansmmu", &ctx, sizeof(ctx));
-		if (ctx) {
+		if (ctx == 1) {
 			HIF_LOG("stage 2.5: skipped, stream c0 is on a translated context");
 		} else {
 			picasso_wlan_smmu_s2cr_set(0x20, WLAN_SMMU_PASSTHRU_BANK, &rb);
