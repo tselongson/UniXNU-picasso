@@ -27,6 +27,7 @@
 #include <vm/vm_kern.h>
 #include <sys/errno.h>
 #include <machine/atomic.h>
+#include "WlanSmem.h"      /* read-only SMEM/SMP2P wire format (header only) */
 
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern "C" void flush_dcache64(addr64_t pa, unsigned int len, boolean_t phys);
@@ -4624,7 +4625,6 @@ rmtfs_init_buf(void)
  * mapping, so the HIF poller can ask "did the firmware report a crash?"
  * instead of inferring it from a bus error on the next instruction.
  * ------------------------------------------------------------------------- */
-#include "WlanSmem.h"
 
 static IOMemoryMap *g_wlan_smem_map;
 static int g_smp2p_pid_log;
