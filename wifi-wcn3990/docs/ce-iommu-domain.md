@@ -780,3 +780,28 @@ fmt: Unhandled implementation specific error
 SError。503 把这两条消息的前 12 字节原样打出来，并同时验证三个假设：
 `vdstart`（先给 vdev 一个 home channel）、`scanshp=1`（START_SCAN 完全不带数组）、
 `c1`（先发 SCAN_CHAN_LIST）。
+
+## 503 实测：START_SCAN 的结构体是对的，害死它的是数组
+
+一个镜像、三次开机、每次只翻一个 boot-arg：
+
+| 组 | 变量 | 结果 |
+|---|---|---|
+| `vds` | `vdstart=1`：先发 `WMI_VDEV_START`（vdev 有 home channel 2412/MODE_11G） | 命令本身**不崩**，START_SCAN 仍然 SError |
+| `sp1` | `scanshp=1`：START_SCAN **只发 96 字节结构体**，不带任何数组（100 TLV 字节） | **不崩！心跳 92000，而且收到 `WMI: SCAN event`** |
+| `c1` | `chanlist=1`：先发 `WMI_SCAN_CHAN_LIST`（39 信道，1104 TLV 字节） | 信道表本身**不崩**，START_SCAN 仍然 SError |
+
+`sp1` 是这个移植第一次让固件**接受扫描命令并回事件**：
+
+```
+WCN3990-HIF: WMI: send START_SCAN (scan_id 0x1000, linux=0, 39 channels, 40 ms dwell, 100 TLV bytes)
+WCN3990-HIF: WMI: SCAN event type=2359324 reason=64 freq=4 beacons=0
+```
+
+顺带发现事件解析也错了：`WMI: SCAN event` 是 TLV 编码，`payload+4` 是 TLV 头
+（长度 28、tag 36），不是 `wmi_scan_event.event_type`——所以 `type` 打出来是
+`0x0024001c`。已改成从 `payload+8` 起读七个 u32。
+
+结论：**96 字节的命令头/common 块完全正确，四条数组 TLV 里有一条是致命的**。
+504 逐条二分：`scanshp=3`（信道数组 tag 17）、`4`（信道数组 tag 16，旧值）、
+`5`（只发广播 BSSID 数组）。
