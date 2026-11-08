@@ -183,7 +183,32 @@ modem crash」。我们没发 quiet-mode，但崩溃紧跟 `VDEV_CREATE` 这一�
    弄崩」分开。0 = 两条都发（默认），1 = 跳过 regdomain，
    2 = 跳过 vdev_create，3 = 两条都跳过。
 
-`work/chain-485.sh` 在同一镜像上跑 `s0/s1/s2/s3` 四组各 150 秒。
+`work/chain-485.sh` 在同一镜像上跑 `s0/s1/s2/s3` 四组各 150 秒。**实测结果**：
+
+| 组 | WMI READY 之后发的命令 | panic | 存活 |
+|---|---|---|---|
+| `s0` | PDEV_SET_REGDOMAIN + VDEV_CREATE | SError @ t+94.3s | 否 |
+| `s1` | 仅 VDEV_CREATE | **同样的 SError** | 否 |
+| `s2` | 仅 PDEV_SET_REGDOMAIN | **无** | 99.6 s，HIF 心跳 1000→5000，rx=12 |
+| `s3` | 都不发 | **无** | 正常 |
+
+所以 **VDEV_CREATE 是唯一触发点**，与 regdomain 无关。
+
+**SMMU 故障转储（485 新增的同步 panic 转储）证明不是 IOMMU 故障**：
+`gfsr=0`、`gfsynr0/1/2=0`、`smr7=800100c0`、`s2cr7=0000003d`（0xc0 正确绑到 CB61），
+`cb61_fsr=0x400`、`cb4_fsr=0x400`、`cb61_far=37943e81`、`cb4_far=1e4bd6cc`。
+对照 Linux `arm-smmu.h`：`CB_FSR` 的故障位是 bit1/2/3/4/5/6/7/8/30/31，
+**bit10 属于 `FSR_FORMAT[10:9]`，是 LPAE 上下文格式标志，不是故障**；
+`FSR_FAULT` 掩码完全不含 0x400。FAR 是残留值。因此这个 SError 不是
+SMMU 翻译/权限错误，而是别处的总线错误（最可能是固件在 vdev 起来后
+开始使用我们从未配置的数据通路而崩掉）。
+
+**对照原系统**：Linux `ath10k_core_start()` 在 WMI READY 之后会发
+`WMI_PDEV_SET_BASE_MACADDR`，接着 `ath10k_htt_connect()`（第二个 HTC 服务）、
+`ath10k_htt_setup()`（HTT 版本协商 + FRAG_DESC_BANK_CFG + RX_RING_CFG +
+AGGR_CFG），而 `VDEV_CREATE` 是很久以后 `mac_op_add_interface()` 里才发的。
+这几步本移植全跳过了。486 用 `vdevpre` / `hifstop=5/6` / `hifstop=4`
+分别测「补发 base MAC」「延迟 vdev」「干脆不要 vdev 能否扫描」。
 
 ## 距离「完全可用」还差什么（代码摸底结论，2026-11-08）
 
