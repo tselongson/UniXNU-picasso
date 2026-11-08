@@ -63,8 +63,26 @@ buffers`，`CE rings live` 只在故意不敲真实门铃的 `nodoor` 里出现�
 
 481 两组都在 WMI 完成后约 0.2 s（主机采集 t+94.5 s）panic，位置完全一致，
 且 `=== PICASSO CDC PANIC BEGIN ===` 之后**只有 21 字节、没有任何 panic 文本**
-（480 同类 panic 输出了 121 KB，说明输出通路本身可用）。因此这个 panic 让 CPU
-在常规 printf 路径之前就停住了，暂时无法定性。
+（480 同类 panic 输出了 121 KB，说明输出通路本身可用）。
+
+**482 已把这个 panic 定性：它不是软件 bug，是 ARM64 SError（异步外部中止）。**
+`ctl482` 的同步首行：
+
+```
+PICASSO PANIC caller=0xfffffff007cb4d94 reason=0x0000000000000000
+fmt: Unhandled implementation specific error
+```
+
+用 `work/symbolize.py` 对 482 的 `kernel.macho`（134663 符号、slide=0）解析：
+
+```
+0xfffffff007cb4d94  _arm64_platform_error.cold.1 + 0x0
+0xfffffff007cb4d90  _sleh_serror + 0x23c
+```
+
+即 `sleh_serror()` 的默认分支，CPU 收到一笔没有处理程序的外部中止。
+这与「总线/DMA 事务被拒」一致，也解释了为什么此前控制台只会突然静音、
+`gfsr` 干净却整屏变灰。它不是空指针、不是 `kmem_alloc`、不是看门狗。
 
 **`wifi=0` 对照（用现成 481 镜像原地改参数，无需重建）已定性一半**：
 `out/full-flash/logs/console-exp-off481.log` 163,256 B，HIF 行 0，
@@ -77,17 +95,27 @@ buffers`，`CE rings live` 只在故意不敲真实门铃的 `nodoor` 里出现�
 - 三天里「控制台断流 + 整屏变灰 + 重启」也由此闭环到 WLAN 路径，不是 USB 或显示的独立问题。
 
 `wifi=0` 同时关掉了 modem 子系统，所以它只能圈定范围到 `PicassoModem`/WLAN
-初始化路径，不能单独指向 HIF。精确定位等 482 的 `panic_caller`。
+初始化路径，不能单独指向 HIF。串口还读到 `time_ms=2626837`（约 44 分钟连续
+运行），排除了「150 s 窗口里恰好没崩」。
 
-482（commit `d091a13`）已推出，做三件事：
+## 482 三组：因果闭环完成
 
-1. `panic_trap_to_debugger()` 入口同步输出一行
-   `PICASSO PANIC caller=0x... reason=0x... fmt: <原始格式串>`，纯手写十六进制
-   打印、不用 `vsnprintf`/不加锁/不分配；`panic_caller` 可用 `work/macho-syms.py`
-   对 CI `kernel.macho` 符号化，直接定位 panic 源。
-2. `wlansmmu=2`：同一镜像**故意不绑 0xc0** 的负对照，把「0xc0 路由是因」从
-   跨内核的历史比较升级为真正的单镜像 A/B。预期退回 `posted 63`。
-3. `wifi=0`：判断 post-WMI panic 是否由 WLAN 路径引入。
+| 组 | 0xc0 | HIF 行 | 结果 |
+|---|---|---|---|
+| `ctl482` | 绑定 bank 61 | 78 | `posted 63` → `CE rings live` → `HTC READY` → `WMI READY` → `scan vdev created` → SError panic |
+| `nb482` (`wlansmmu=2`) | **故意不绑** | 45 | 停在 `posted 63`，无 `CE rings live`、无 HTC/WMI、无 panic marker —— **精确复现历史全部实验** |
+| `off482` (`wifi=0`) | 绑定 bank 61 | 0 | 无 HIF、无 panic，正常进桌面 |
+
+`nb482` 与 `ctl482` 是**同一镜像、只差 0xc0 一个 SMR/S2CR 条目**，
+因此「0xc0 未注册是 CE 卡死的根因」不再是跨内核的相关性推断，而是单变量
+A/B。同时它也说明：0xc0 未注册时的表现是**静音**（无 panic），注册后 CE 真跑
+起来才会触发 SError —— 两个不同故障，之前一直被混为一谈。
+
+**下一个从未测过的变量**：全部十几次实验都是 `assign_level=0`，即 CE 内存
+从未通过 SCM `hyp_assign()` 授权给任何固件 VMID，而 SError 正是「访问未授权
+内存」的典型硬件表现。483 已备好 `out/full-flash/boot-483.img`（把
+`offline-hid-swipe-delay=8` 等长换成 `wcn3990-hif-assign=0` 槽位，不需重建），
+`work/chain-483.sh` 会在同一镜像上跑 `=0/1/2/3` 四个值。
 
 ## 距离「完全可用」还差什么
 
