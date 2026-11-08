@@ -393,6 +393,18 @@ static int g_ready_stop;
 static int g_vdev_pre;
 static int g_wmi_init_full;   /* wmiinit=1: Linux WCN3990 resource config */
 static int g_scan_chans = -1; /* scanchans=N: cap the START_SCAN channel list */
+/* wmi-tlv.c ath10k_wmi_tlv_iter() advances by exactly tlv_len, with no
+ * roundup.  This driver used to round every TLV up to 4 bytes.  Three of
+ * the TLVs we emit are not 4-aligned (VDEV_CREATE 18, scan bssid 6, base
+ * MAC 6), so two zero bytes were injected after each: VDEV_CREATE ended
+ * with a 2-byte tail that cannot even hold a TLV header.  tlvpad=1 restores
+ * the old behaviour as an in-chain negative control. */
+static int g_tlv_pad;         /* 0 = Linux-exact TLV lengths */
+static int g_chan_list;       /* chanlist=1: WMI_SCAN_CHAN_LIST before regdomain */
+static int g_vdev_up;         /* vdevup=1: WMI_VDEV_UP after VDEV_CREATE */
+static int g_scan_linux;      /* scanlinux=1: Linux-exact START_SCAN arguments */
+static int g_htt_connect;     /* httconn=1: connect HTT before SETUP_COMPLETE */
+static uint8_t g_htt_eid;
 static int g_vdev_pending;
 static uint32_t g_vdev_at;
 static uint32_t g_quiet_probe_polls;
@@ -567,6 +579,8 @@ hif_dump_regs(const char *why)
 /* htc.h: SVC(group, idx) = group << 8 | idx */
 #define HTC_SVC_RSVD_CTRL             0x0001
 #define HTC_SVC_WMI_CONTROL           0x0100
+#define HTC_SVC_HTT_DATA_MSG          0x0300  /* htc.h: SVC(3, 0) */
+#define HTC_CONN_DISABLE_CREDIT_FLOW  0x0008  /* ATH10K_HTC_CONN_FLAGS_... */
 #define HTC_EP0                       0
 #define HTC_HDR_BYTES                 8
 
@@ -578,6 +592,8 @@ hif_dump_regs(const char *why)
 #define WMI_VDEV_CREATE_CMDID         0x5001   /* wmi.h: WMI_CMD_GRP(WMI_GRP_VDEV) */
 #define WMI_PDEV_SET_BASE_MACADDR_CMDID 0x400d /* WMI_TLV_PDEV_SET_BASE_MACADDR_CMDID */
 #define WMI_PDEV_SET_REGDOMAIN_CMDID  0x4001   /* WMI_CMD_GRP(WMI_GRP_PDEV) */
+#define WMI_SCAN_CHAN_LIST_CMDID      0x3003   /* WMI_TLV_SCAN_CHAN_LIST_CMDID */
+#define WMI_VDEV_UP_CMDID             0x5005   /* WMI_TLV_VDEV_UP_CMDID */
 #define WMI_SCAN_EVENTID              0x3001
 #define WMI_MGMT_RX_EVENTID           0x7001   /* WMI_GRP_MGMT  = 7 */
 
@@ -591,7 +607,10 @@ hif_dump_regs(const char *why)
 #define WMI_TLV_RESOURCE_CONFIG       75
 #define WMI_TLV_START_SCAN_CMD        77
 #define WMI_TLV_PDEV_SET_REGDOMAIN_CMD 81
+#define WMI_TLV_SCAN_CHAN_LIST_CMD    79
+#define WMI_TLV_CHANNEL               80
 #define WMI_TLV_VDEV_CREATE_CMD       86      /* wmi-tlv.h enum wmi_tlv_tag */
+#define WMI_TLV_VDEV_UP_CMD           92
 #define WMI_TLV_PDEV_SET_BASE_MACADDR_CMD 172 /* enum wmi_tlv_tag, master */
 /* wmi-tlv.c: WMI_TLV_ABI_VER0 / VER1 / VER_NS0 */
 #define WMI_TLV_ABI_VER0              0x01000000u
@@ -600,6 +619,10 @@ hif_dump_regs(const char *why)
 #define WMI_TLV_ABI_VER_NS1           0x00004c4du   /* wmi-tlv.c: "ML" */
 /* wmi.h: WMI_SCAN_FILTER_PROBE_REQ */
 #define WMI_SCAN_FILTER_PROBE_REQ     0x20
+#define WMI_SCAN_CHAN_STAT_EVENT      0x10
+#define WMI_SCAN_FLAG_PASSIVE         0x01
+#define WMI_HOST_SCAN_REQ_ID_PREFIX   0xa000u
+#define WMI_HOST_SCAN_REQUESTOR_PREFIX 0xa000u
 
 enum hif_state {
 	HIF_OFF = 0,
@@ -674,19 +697,23 @@ hif_wmi_command(uint32_t cmd_id, const uint8_t *tlvs, uint32_t len)
 	return hif_ce_send(3, b, total);
 }
 
-/* wmi-tlv.h: struct wmi_tlv { __le16 len; __le16 tag; u8 value[]; }.  All
- * TLVs we emit have 4-byte-aligned lengths, matching ath10k's pointer walk. */
+/* wmi-tlv.h: struct wmi_tlv { __le16 len; __le16 tag; u8 value[]; }.
+ * wmi-tlv.c ath10k_wmi_tlv_iter() advances by *exactly* tlv_len; there is
+ * no roundup in either the host iterator or the command builders.  Rounding
+ * up injected two zero bytes after each 18/6-byte TLV (VDEV_CREATE, scan
+ * bssid, base MAC), which the target parses as a truncated extra TLV. */
 static uint8_t *
 hif_put_tlv(uint8_t *p, uint16_t tag, uint16_t len, const void *value)
 {
 	hif_put16(p, len);
 	hif_put16(p + 2, tag);
 	if (len && value) memcpy(p + 4, value, len);
-	return p + 4 + ((len + 3) & ~3u);
+	if (g_tlv_pad) return p + 4 + ((len + 3) & ~3u);   /* legacy bug repro */
+	return p + 4 + len;
 }
 
 static int
-hif_send_connect_service(void)
+hif_send_connect_service(uint16_t svc)
 {
 	struct {
 		uint16_t service_id;
@@ -694,16 +721,20 @@ hif_send_connect_service(void)
 		uint8_t pad[2];
 	} __attribute__((packed)) req;
 
-	req.service_id = HTC_SVC_WMI_CONTROL;
+	req.service_id = svc;
 	/* htc.c: ath10k_htc_get_credit_allocation() hands the WMI control
 	 * service every credit advertised in HTC READY and passes the count in
-	 * ATH10K_HTC_CONN_FLAGS_RECV_ALLOC (bits 8-15).  Sending zero - which
-	 * this driver did - tells the target to allocate no receive credit at
-	 * all, so it never delivers a single WMI event. */
-	req.flags = (uint16_t)(((g_credit_count ? g_credit_count : 1) & 0xffu) << 8);
+	 * ATH10K_HTC_CONN_FLAGS_RECV_ALLOC (bits 8-15).  Only WMI control uses
+	 * credit flow control; every other service gets DISABLE_CREDIT_FLOW_CTRL
+	 * and no receive allocation. */
+	if (svc == HTC_SVC_WMI_CONTROL) {
+		req.flags = (uint16_t)(((g_credit_count ? g_credit_count : 1) & 0xffu) << 8);
+	} else {
+		req.flags = HTC_CONN_DISABLE_CREDIT_FLOW;
+	}
 	req.pad[0] = req.pad[1] = 0;
 
-	HIF_LOG("HTC: send CONNECT_SERVICE svc=0x%04x", HTC_SVC_WMI_CONTROL);
+	HIF_LOG("HTC: send CONNECT_SERVICE svc=0x%04x flags=0x%04x", svc, req.flags);
 	return hif_htc_control(HTC_MSG_CONNECT_SERVICE, (const uint8_t *)&req, sizeof(req));
 }
 
@@ -862,6 +893,73 @@ hif_send_pdev_regdomain(void)
 	return hif_wmi_command(WMI_PDEV_SET_REGDOMAIN_CMDID, tlv, (uint32_t)(p - tlv));
 }
 
+/* wmi-tlv.c ath10k_wmi_tlv_op_gen_scan_chan_list() + mac.c
+ * ath10k_update_channel_list(): the regulatory channel list is programmed
+ * before WMI_PDEV_SET_REGDOMAIN and long before the first scan.  Each entry
+ * is a nested 24-byte STRUCT_CHANNEL TLV (wmi.h struct wmi_channel) inside
+ * an ARRAY_STRUCT.  chanlist=1 adds this Linux step. */
+static int
+hif_send_scan_chan_list(void)
+{
+	static uint8_t tlv[1200];
+	static uint8_t arr[39 * 28];
+	uint8_t *p = tlv, *q = arr;
+	uint8_t nbuf[4];
+	uint32_t i, n = (uint32_t)(sizeof(g_scan_freqs) / sizeof(g_scan_freqs[0]));
+
+	if (g_scan_chans >= 0 && (uint32_t)g_scan_chans < n) n = (uint32_t)g_scan_chans;
+	memset(tlv, 0, sizeof(tlv));
+	memset(arr, 0, sizeof(arr));
+	for (i = 0; i < n; i++) {
+		uint8_t ch[24];
+		uint32_t f = g_scan_freqs[i];
+
+		memset(ch, 0, sizeof(ch));
+		hif_put32(ch + 0, f);                  /* mhz */
+		hif_put32(ch + 4, f);                  /* band_center_freq1 */
+		hif_put32(ch + 8, 0);                  /* band_center_freq2 */
+		hif_put32(ch + 12, f < 3000 ? 1u : 0u); /* mode: 11G(1) / 11A(0) */
+		ch[16] = 0;                            /* min_power */
+		ch[17] = 40;                           /* max_power, 0.5 dBm */
+		ch[18] = 40;                           /* reg_power, 0.5 dBm */
+		ch[19] = 0;                            /* reg_classid */
+		ch[20] = 0;                            /* antenna_max */
+		ch[21] = 40;                           /* max_tx_power */
+		q = hif_put_tlv(q, WMI_TLV_CHANNEL, (uint16_t)sizeof(ch), ch);
+	}
+	hif_put32(nbuf, n);
+	p = hif_put_tlv(p, WMI_TLV_SCAN_CHAN_LIST_CMD,
+	    (uint16_t)sizeof(nbuf), nbuf);
+	p = hif_put_tlv(p, WMI_TLV_ARRAY_STRUCT, (uint16_t)(q - arr), arr);
+	HIF_LOG("WMI: send SCAN_CHAN_LIST (%u channels, %u TLV bytes)",
+	    n, (unsigned)(p - tlv));
+	return hif_wmi_command(WMI_SCAN_CHAN_LIST_CMDID, tlv,
+	    (uint32_t)(p - tlv));
+}
+
+/* wmi-tlv.c ath10k_wmi_tlv_op_gen_vdev_up(): mac80211 brings the interface
+ * up (ath10k_mac_op_start) before any scan.  The payload is 14 packed bytes:
+ * vdev_id, assoc_id, bssid. */
+static int
+hif_send_vdev_up(void)
+{
+	uint8_t tlv[32];
+	uint8_t *p = tlv;
+	struct {
+		uint32_t vdev_id;
+		uint32_t vdev_assoc_id;
+		uint8_t bssid[6];
+	} __attribute__((packed)) cmd;
+
+	memset(tlv, 0, sizeof(tlv));
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.bssid[0] = 0x02;
+	cmd.bssid[5] = 0x01;
+	p = hif_put_tlv(p, WMI_TLV_VDEV_UP_CMD, (uint16_t)sizeof(cmd), &cmd);
+	HIF_LOG("WMI: send VDEV_UP id=0 (%u TLV bytes)", (unsigned)(p - tlv));
+	return hif_wmi_command(WMI_VDEV_UP_CMDID, tlv, (uint32_t)(p - tlv));
+}
+
 static int
 hif_send_vdev_create(void)
 {
@@ -943,6 +1041,24 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 	cmd.ie_len = 0;
 	cmd.num_probes = 3;
 
+	if (g_scan_linux) {
+		/* mac.c ath10k_wmi_start_scan_init(), wmi.c
+		 * ath10k_wmi_put_start_scan_common() and the TLV path's XOR.
+		 * The two ID prefixes are ORed in by the host, not invented:
+		 * WMI_HOST_SCAN_REQ_ID_PREFIX / REQUESTOR_ID_PREFIX = 0xA000.
+		 * With no SSIDs Linux also asks for a passive scan. */
+		cmd.common[0] = WMI_HOST_SCAN_REQ_ID_PREFIX;
+		cmd.common[1] = WMI_HOST_SCAN_REQUESTOR_PREFIX | 1u;
+		cmd.common[4] = 0x11f;       /* started/completed/chan/dequeued */
+		cmd.common[5] = 50;
+		cmd.common[6] = 150;
+		cmd.common[7] = 50;
+		cmd.common[8] = 500;
+		cmd.common[14] = (WMI_SCAN_CHAN_STAT_EVENT |
+		    WMI_SCAN_FLAG_PASSIVE) ^ WMI_SCAN_FILTER_PROBE_REQ;
+		cmd.burst_duration_ms = 0;
+	}
+
 	/* ath10k_wmi_start_scan_init() always asks for one broadcast BSSID;
 	 * without it the firmware does not send broadcast probe requests. */
 	for (i = 0; i < 6; i++) bssid[i] = 0xff;
@@ -955,8 +1071,8 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 	p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT, (uint16_t)sizeof(bssid), bssid);
 	p = hif_put_tlv(p, WMI_TLV_ARRAY_BYTE, 0, NULL);          /* ie */
 
-	HIF_LOG("WMI: send START_SCAN (scan_id 0x1000, %u channels, %u ms dwell, %u TLV bytes)",
-	    nch, dwell_ms, (unsigned)(p - tlv));
+	HIF_LOG("WMI: send START_SCAN (scan_id 0x%x, linux=%d, %u channels, %u ms dwell, %u TLV bytes)",
+	    cmd.common[0], g_scan_linux, nch, dwell_ms, (unsigned)(p - tlv));
 	return hif_wmi_command(WMI_START_SCAN_CMDID, tlv, (uint32_t)(p - tlv));
 }
 
@@ -999,7 +1115,8 @@ hif_handle_mgmt_rx(const uint8_t *tlvs, uint32_t len)
 			frame = value;
 			frame_len = tlv_len;
 		}
-		off += 4 + ((tlv_len + 3) & ~3u);
+		/* Same exact-length walk as ath10k_wmi_tlv_iter(). */
+		off += 4 + (g_tlv_pad ? ((tlv_len + 3) & ~3u) : tlv_len);
 	}
 
 	if (!frame || !buf_len || buf_len > frame_len) return;
@@ -1035,6 +1152,7 @@ hif_finish_vdev(void)
 {
 	if (g_vdev_pre) (void)hif_send_base_macaddr();
 	if (hif_send_vdev_create() == 0) {
+		if (g_vdev_up) (void)hif_send_vdev_up();
 		g_state = HIF_READY;
 		HIF_LOG("WMI: scan vdev created, scanning is available");
 	} else {
@@ -1083,6 +1201,9 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 	}
 	case WMI_READY_EVENTID:
 		HIF_LOG("WMI: READY (0x%x) - WMI is up, creating the scan vdev", event_id);
+		/* mac.c ath10k_update_channel_list() runs before regd_update():
+		 * the target gets its channel/power table first. */
+		if (g_chan_list) (void)hif_send_scan_chan_list();
 		/* hifstop=1/3: skip PDEV_SET_REGDOMAIN.  The WCN3990 firmware
 		 * has a documented deterministic crash shortly after vdev_create;
 		 * bisecting which host command precedes it tells us whether the
@@ -1141,16 +1262,35 @@ hif_handle_htc_control(const uint8_t *payload, uint32_t len)
 		}
 		HIF_LOG("HTC: READY credits=%u size=%u max_ep=%u",
 		    g_credit_count, g_credit_size, len >= 7 ? payload[6] : 0);
-		if (hif_send_connect_service() == 0) g_state = HIF_CONNECT_SENT;
+		if (hif_send_connect_service(HTC_SVC_WMI_CONTROL) == 0)
+			g_state = HIF_CONNECT_SENT;
 		break;
-	case HTC_MSG_CONNECT_SERVICE_RESP:
+	case HTC_MSG_CONNECT_SERVICE_RESP: {
+		uint16_t svc;
+
 		if (len < 8) break;
+		svc = hif_le16(payload + 2);
 		HIF_LOG("HTC: CONNECT_SERVICE_RESP svc=0x%04x status=%u eid=%u max_msg=%u",
-		    hif_le16(payload + 2), payload[4], payload[5], hif_le16(payload + 6));
+		    svc, payload[4], payload[5], hif_le16(payload + 6));
 		if (payload[4] != 0) break;      /* ATH10K_HTC_CONN_SVC_STATUS_SUCCESS */
-		g_wmi_eid = payload[5];
+		if (svc == HTC_SVC_WMI_CONTROL) {
+			g_wmi_eid = payload[5];
+			/* core.c ath10k_htt_connect() connects HTT_DATA_MSG
+			 * before ath10k_htc_start() sends SETUP_COMPLETE_EX. */
+			if (g_htt_connect) {
+				(void)hif_send_connect_service(HTC_SVC_HTT_DATA_MSG);
+				g_state = HIF_CONNECT_SENT;
+				break;
+			}
+		} else if (svc == HTC_SVC_HTT_DATA_MSG) {
+			g_htt_eid = payload[5];
+			HIF_LOG("HTC: HTT endpoint eid=%u", g_htt_eid);
+		} else {
+			break;
+		}
 		if (hif_send_setup_complete() == 0) g_state = HIF_SETUP_SENT;
 		break;
+	}
 	default:
 		HIF_LOG("HTC: control message %u (%u bytes)", msg_id, len);
 		break;
@@ -1194,6 +1334,8 @@ hif_handle_rx(const uint8_t *buf, uint32_t nbytes)
 		hif_handle_htc_control(buf + HTC_HDR_BYTES, payload_len);
 	} else if (eid == g_wmi_eid) {
 		hif_handle_wmi(buf + HTC_HDR_BYTES, payload_len);
+	} else if (g_htt_connect && eid == g_htt_eid) {
+		HIF_LOG("rx: HTT eid=%u (%u bytes)", eid, nbytes);
 	} else {
 		HIF_LOG("rx: unhandled eid %u (%u bytes)", eid, nbytes);
 	}
@@ -1649,10 +1791,32 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("scanchans", &v, sizeof(v)) && v <= 39) {
 		g_scan_chans = (int)v;
 	}
+	v = 0;
+	if (PE_parse_boot_argn("tlvpad", &v, sizeof(v)) && v <= 1) {
+		g_tlv_pad = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("chanlist", &v, sizeof(v)) && v <= 1) {
+		g_chan_list = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("vdevup", &v, sizeof(v)) && v <= 1) {
+		g_vdev_up = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("scanlinux", &v, sizeof(v)) && v <= 1) {
+		g_scan_linux = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("httconn", &v, sizeof(v)) && v <= 1) {
+		g_htt_connect = (int)v;
+	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
-	    "wmiinit=%d; scanchans=%d",
+	    "wmiinit=%d; scanchans=%d; tlvpad=%d; chanlist=%d; vdevup=%d; "
+	    "scanlinux=%d; httconn=%d",
 	    g_tx3_rotate ? "8 rotating" : "single (legacy)", g_autoscan,
-	    g_ready_stop, g_vdev_pre, g_wmi_init_full, g_scan_chans);
+	    g_ready_stop, g_vdev_pre, g_wmi_init_full, g_scan_chans,
+	    g_tlv_pad, g_chan_list, g_vdev_up, g_scan_linux, g_htt_connect);
 	{
 		uint64_t dma_pa = 0;
 		g_dma = (struct hif_dma_block *)picasso_wlan_ce_dma_alloc(
