@@ -320,7 +320,14 @@ typedef char wcn_ce_desc_size_check[(sizeof(struct wcn_ce_desc_64) == 16) ? 1 : 
 #define HTT_H2T_MSG_TYPE_RX_RING_CFG  2
 #define HTT_H2T_MSG_TYPE_AGGR_CFG     5
 #define HTT_T2H_MSG_TYPE_VERSION_CONF 0
-#define HTT_RX_RING_ENTRIES           128
+/* wmi-tlv.h/hw.c: WCN3990 advertises rx_ring_fill_level =
+ * HTT_RX_RING_FILL_LEVEL_DUAL_MAC = HTT_RX_RING_SIZE - 1, and
+ * ath10k_htt_rx_ring_size() is fill_level + 1 = 2048.  The target is told
+ * that number and the host posts one buffer per entry minus the one slot
+ * that separates "full" from "empty".  128 is the driver-side minimum, but
+ * the firmware sizes its own bookkeeping from the value it is given, so
+ * follow Linux and hand it the real thing: 2048 entries, 4 MiB of buffers. */
+#define HTT_RX_RING_ENTRIES           2048
 #define HTT_RX_BUF_SIZE               2048
 
 /* Linux gives the CE rings to dma_alloc_coherent(), which maps them into the
@@ -387,9 +394,10 @@ struct hif_dma_block {
 	uint8_t htt_buf[HTT_RX_RING_ENTRIES][HTT_RX_BUF_SIZE];
 };
 
-#define HIF_DMA_SIZE   0x100000u         /* 1 MiB: rings + CE bufs + HTT RX ring */
-/* 8 rotating CE3 buffers and the 256 KiB HTT RX ring must fit; make an
- * overflow a build error. */
+#define HIF_DMA_SIZE   0x600000u         /* 6 MiB: rings + CE bufs + 4 MiB HTT RX ring */
+/* The rotating CE3 buffers and the HTT RX ring (2048 x 2048 bytes of
+ * buffers plus the 2048-entry paddr ring) must fit; make an overflow a
+ * build error. */
 typedef char hif_dma_window_check[(sizeof(struct hif_dma_block) <= HIF_DMA_SIZE) ? 1 : -1];
 static struct hif_dma_block *g_dma;
 static uint64_t g_dma_pa;         /* physical base of the uncached alias */
@@ -966,10 +974,11 @@ hif_htt_rx_ring_cfg(void)
 	idx_pa = hif_pa_of(&g_dma->htt_alloc_idx);
 	if (!ring_pa || !idx_pa) return -1;
 
-	/* Hand every buffer to the target before announcing the ring.
-	 * htt_rx.c ath10k_htt_set_paddrs_ring_64() stores the plain 64-bit
-	 * paddr, no descriptor mask. */
-	for (i = 0; i < HTT_RX_RING_ENTRIES; i++) {
+	/* Hand the target every buffer but the one slot that separates a full
+	 * ring from an empty one (htt.c ath10k_htt_rx_ring_fill_n() stops at
+	 * fill_level).  htt_rx.c ath10k_htt_set_paddrs_ring_64() stores the
+	 * plain 64-bit paddr, no descriptor mask. */
+	for (i = 0; i < HTT_RX_RING_ENTRIES - 1; i++) {
 		g_dma->htt_ring[i] = hif_pa_of(g_dma->htt_buf[i]);
 	}
 	g_dma->htt_alloc_idx = 0;
@@ -1864,10 +1873,12 @@ wcn3990_hif_poll(void)
 	 * deliberately cheap: no cache flushes and no CE register access until
 	 * the corresponding stage is entered. */
 	if ((g_polls % 1000) == 0) {
-		HIF_LOG("heartbeat polls=%u stage=%d state=%d rx=%u beacons=%u desc0.nbytes=%u drri=%x",
+		HIF_LOG("heartbeat polls=%u stage=%d state=%d rx=%u beacons=%u "
+		    "desc0.nbytes=%u drri=%x htt=%u httidx=%u mgmt=%u",
 		    g_polls, g_stage, (int)g_state, g_rx_packets, g_beacons,
 		    (unsigned)s_dst2[0].nbytes,
-		    g_bases_programmed ? hif_reg_read(2, CE_CURRENT_DRRI) : 0);
+		    g_bases_programmed ? hif_reg_read(2, CE_CURRENT_DRRI) : 0,
+		    g_htt_rx, g_dma ? g_dma->htt_alloc_idx : 0, g_mgmt_seen);
 		/* The other dst pipes' DDR read indices: a moving index means the
 		 * target consumed a buffer there, which the bring-up wants to
 		 * know about even though nothing drains those rings yet. */
