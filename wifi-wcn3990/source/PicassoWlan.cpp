@@ -27,7 +27,6 @@
 #include <vm/vm_kern.h>
 #include <sys/errno.h>
 #include <machine/atomic.h>
-#include "WlanSmem.h"      /* read-only SMEM/SMP2P wire format (header only) */
 
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern "C" void flush_dcache64(addr64_t pa, unsigned int len, boolean_t phys);
@@ -2727,6 +2726,13 @@ wlfw_select_bdf(void)
 {
 	char cand[32];
 	struct fw_file *f = NULL;
+	static char pick[16];
+	static int pick_done;
+
+	if (!pick_done) {
+		pick_done = 1;
+		(void)PE_parse_boot_argn("bdf", pick, sizeof(pick));
+	}
 
 	if (g_fat != NULL) {
 		if (fw_dir == 1) {
@@ -2738,6 +2744,25 @@ wlfw_select_bdf(void)
 		if (fw_dir != 1) {
 			fat_list_bdf(g_fat, fw_dir);
 		}
+	}
+	/* bdf=<name>: pick one of the per-board files in the modem image
+	 * (bdf_g7a.bin, bdwlan.104, ...) instead of the generic bdwlan.bin.
+	 * The board id the firmware reports is 0xff, so without this the
+	 * driver always lands on bdwlan.bin and the RF calibration data may
+	 * belong to another board. */
+	if (pick[0]) {
+		f = fw_get(pick);
+		if (f == NULL) {
+			snprintf(cand, sizeof(cand), "bdwlan.%s", pick);
+			f = fw_get(cand);
+		}
+		if (f == NULL) {
+			snprintf(cand, sizeof(cand), "bdf_%s.bin", pick);
+			f = fw_get(cand);
+		}
+		LOG("t=%u ms: WLFW BDF override '%s' -> %s", g_ms, pick,
+		    f != NULL ? f->name : "(not found)");
+		if (f != NULL) return f;
 	}
 	if (wlfw_board_id != 0xff && wlfw_board_id != 0) {
 		snprintf(cand, sizeof(cand), "bdwlan.b%02x", wlfw_board_id);
@@ -4618,63 +4643,26 @@ rmtfs_init_buf(void)
 /* ---------------------------------------------------------------------------
  * SMP2P "wlan" mailbox.
  *
- * The WCSS firmware reports force-fatal-error (bit 0) and early-crash-ind
- * (bit 1) through smp2p_wlan_1_in, entry "wlan" (picasso.dts:7320-7323,
- * entry-name "wlan", parent qcom,smp2p-mpss remote-pid 1).  WlanSmem.h is the
- * kernel's own read-only smem/smp2p walk; this file only supplies the page
- * mapping, so the HIF poller can ask "did the firmware report a crash?"
- * instead of inferring it from a bus error on the next instruction.
+ * The WCSS reports force-fatal-error (bit 0) and early-crash-ind (bit 1)
+ * through smp2p_wlan_1_in, entry "wlan" (picasso.dts:7320-7323, entry-name
+ * "wlan", parent qcom,smp2p-mpss remote-pid 1).  modem_alive_check() already
+ * walks that page for "slave-kernel"; keep the address of "wlan" the same way
+ * so the HIF poller can ask "did the firmware report a crash?" instead of
+ * inferring it from a bus error on the next instruction.
  * ------------------------------------------------------------------------- */
+static volatile uint32_t *g_smp2p_wlan_val;
 
-static IOMemoryMap *g_wlan_smem_map;
-static int g_smp2p_pid_log;
-
-static int
-wlan_smem_read(void *ctx, uint32_t off, void *data, uint32_t len)
-{
-	volatile uint8_t *base;
-
-	(void)ctx;
-	if (!g_wlan_smem_map) return -22;
-	base = (volatile uint8_t *)g_wlan_smem_map->getVirtualAddress();
-	if (!base || off > WLAN_SMEM_SIZE || len > WLAN_SMEM_SIZE - off) return -22;
-	memcpy(data, (const void *)(base + off), len);
-	return 0;
-}
-
-/* Bit 0 = force-fatal-error, bit 1 = early-crash-ind.  0xfffffff0|code when
- * the mailbox could not be parsed, so "unreadable" never looks like "quiet". */
+/* 0xffffffff means "entry not found", which never looks like a quiet
+ * mailbox.  Bit 0 = force-fatal-error, bit 1 = early-crash-indication. */
 extern "C" uint32_t
-picasso_wlan_smp2p_wlan(void)
+picasso_wlan_smp2p_bits(void)
 {
-	static const uint16_t pids[4][2] = { { 1, 1 }, { 0, 1 }, { 1, 0 }, { 0, 0 } };
-	struct wlan_smem_io io = { NULL, wlan_smem_read };
-	struct wlan_smem_partition part;
-	struct wlan_smem_item item;
-	uint32_t v = 0;
-	int rc;
-	unsigned i;
+	uint32_t v;
 
-	if (!g_wlan_smem_map) {
-		g_wlan_smem_map = map_phys(WLAN_SMEM_BASE, WLAN_SMEM_SIZE, false);
-		if (!g_wlan_smem_map) return 0xffffffffu;
-	}
-	rc = wlan_smem_partition(&io, WLAN_SMEM_IN, WLAN_SMEM_OUT, &part);
-	if (rc) return 0xfffffff0u | (uint32_t)(-rc & 0xfu);
-	rc = wlan_smem_find(&io, &part, WLAN_SMEM_IN, &item);
-	if (rc) return 0xffffffe0u | (uint32_t)(-rc & 0xfu);
-	for (i = 0; i < 4; i++) {
-		rc = wlan_smp2p_wlan(&io, &item, pids[i][0], pids[i][1], &v);
-		if (rc == 0) {
-			if (g_smp2p_pid_log != (int)(i + 1)) {
-				g_smp2p_pid_log = (int)(i + 1);
-				LOG("smp2p wlan: local=%u remote=%u value=%08x",
-				    pids[i][0], pids[i][1], v);
-			}
-			return v;
-		}
-	}
-	return 0xffffffd0u;
+	if (g_smp2p_wlan_val == NULL) return 0xffffffffu;
+	v = *g_smp2p_wlan_val;
+	__asm__ volatile ("dmb sy" ::: "memory");
+	return v;
 }
 
 /* ---------------------------------------------------------------------------
@@ -5501,6 +5489,9 @@ modem_alive_check(void)
 			LOG("smp2p in: \"%s\" = %08x", e[i].name, e[i].value);
 			if (strncmp(e[i].name, "slave-kernel", 16) == 0) {
 				g_slave_kernel = &e[i].value;
+			}
+			if (strncmp(e[i].name, "wlan", 16) == 0) {
+				g_smp2p_wlan_val = &e[i].value;
 			}
 		}
 	}

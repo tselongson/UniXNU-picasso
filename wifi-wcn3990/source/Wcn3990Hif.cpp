@@ -424,7 +424,7 @@ extern "C" void *picasso_wlan_ce_dma_alloc(uint64_t size, uint64_t *pa_out,
 extern "C" void picasso_wlan_smmu_fault_read(uint32_t * out);
 /* smp2p_wlan_1_in entry "wlan": bit 0 force-fatal-error, bit 1 early-crash.
  * 0xfffffff* when the mailbox cannot be parsed. */
-extern "C" uint32_t picasso_wlan_smp2p_wlan(void);
+extern "C" uint32_t picasso_wlan_smp2p_bits(void);
 extern "C" int picasso_wlan_smmu_s2cr_set(uint32_t index, uint32_t value,
     uint32_t * readback);
 
@@ -1939,21 +1939,25 @@ wcn3990_hif_poll(void)
 		g_scan_polls++;
 		/* Record what the target does with the scan command before the
 		 * machine can die: the CE3 source read index says whether it
-		 * fetched START_SCAN at all, the CE1 destination index whether
-		 * it answered, and the SMP2P "wlan" bits whether the firmware
-		 * reported a fatal error.  IMEM keeps these across the reset. */
-		if ((g_scan_polls % 2) == 0) {
-			uint32_t srri3 = hif_reg_read(3, CE_CURRENT_SRRI);
-			uint32_t drri1 = hif_reg_read(1, CE_CURRENT_DRRI);
-			uint32_t smp = picasso_wlan_smp2p_wlan();
+		 * fetched START_SCAN at all, the CE2 destination index whether
+		 * it filled an HTC buffer with an answer, and the SMP2P "wlan"
+		 * bits whether the firmware reported a fatal error.  IMEM keeps
+		 * these across the reset. */
+		if (g_scan_polls <= 20 || (g_scan_polls % 20) == 0) {
+			uint32_t smp = picasso_wlan_smp2p_bits();
+			uint32_t srri3, drri2;
 
-			if (!g_smp2p_seen || smp != g_smp2p_last) {
-				g_smp2p_seen = 1;
-				HIF_LOG("scan[%u]: ce3 srri=%u ce1 drri=%u smp2p=%08x",
-				    g_scan_polls, srri3, drri1, smp);
-				g_smp2p_last = smp;
-			}
-			hif_bb(12, srri3, drri1);
+			/* The mailbox is plain memory: print it before touching any
+			 * CE register, so a fault on the register read cannot hide
+			 * the one value that says whether the target asserted. */
+			HIF_LOG("scan[%u]: smp2p=%08x", g_scan_polls, smp);
+			g_smp2p_seen = 1;
+			g_smp2p_last = smp;
+			srri3 = hif_reg_read(3, CE_CURRENT_SRRI);
+			drri2 = hif_reg_read(2, CE_CURRENT_DRRI);
+			HIF_LOG("scan[%u]: ce3 srri=%u ce2 drri=%u",
+			    g_scan_polls, srri3, drri2);
+			hif_bb(12, srri3, drri2);
 			hif_bb(13, smp, g_scan_polls);
 		}
 	}
@@ -2291,7 +2295,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	hif_bb_dump();
 	/* Baseline of the WCSS crash mailbox before any WMI traffic, so a later
 	 * change is attributable to the firmware and not to boot-time state. */
-	HIF_LOG("smp2p wlan baseline %08x", picasso_wlan_smp2p_wlan());
+	HIF_LOG("smp2p wlan baseline %08x", picasso_wlan_smp2p_bits());
 
 	if (!ce_va || g_regs_live) return;
 
