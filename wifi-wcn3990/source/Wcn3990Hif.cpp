@@ -434,6 +434,7 @@ static int g_ready_stop;
  * will scan without a vdev at all. */
 static int g_vdev_pre;
 static int g_wmi_init_full;   /* wmiinit=1: Linux WCN3990 resource config */
+static int g_init_arr;        /* initarr: 0 omit, 1 tag 19, 2 tag 18 */
 static int g_scan_chans = -1; /* scanchans=N: cap the START_SCAN channel list */
 /* wmi-tlv.c ath10k_wmi_tlv_iter() advances by exactly tlv_len, with no
  * roundup.  This driver used to round every TLV up to 4 bytes.  Three of
@@ -1163,7 +1164,17 @@ hif_send_wmi_init(void)
 
 	p = hif_put_tlv(p, WMI_TLV_INIT_CMD, (uint16_t)sizeof(init), &init);
 	p = hif_put_tlv(p, WMI_TLV_RESOURCE_CONFIG, (uint16_t)sizeof(cfg), cfg);
-	p = hif_put_tlv(p, WMI_TLV_ARRAY_STRUCT, 0, NULL); /* no host mem chunks */
+	/* Linux always terminates INIT with an empty ARRAY_STRUCT
+	 * (wmi-tlv.c gen_init: sizeof(*tlv) + chunks_len, chunks_len 0 when
+	 * num_mem_chunks is 0).  This firmware panics on that tag: with
+	 * tag 18 (the old, wrong value) it booted, with tag 19 it dies
+	 * right after INIT.  initarr=0 omits the TLV entirely, 1 keeps the
+	 * Linux tag, 2 reproduces the old value - so one image can decide. */
+	if (g_init_arr == 1) {
+		p = hif_put_tlv(p, WMI_TLV_ARRAY_STRUCT, 0, NULL);
+	} else if (g_init_arr == 2) {
+		p = hif_put_tlv(p, 18, 0, NULL);
+	}
 
 	HIF_LOG("WMI: send INIT (abi 0x%08x, %u TLV bytes)", WMI_TLV_ABI_VER0,
 	    (unsigned)(p - tlv));
@@ -2116,6 +2127,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	v = 0;
 	if (PE_parse_boot_argn("wmiinit", &v, sizeof(v)) && v <= 1) {
 		g_wmi_init_full = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("initarr", &v, sizeof(v)) && v <= 2) {
+		g_init_arr = (int)v;
 	}
 	v = 0;
 	if (PE_parse_boot_argn("scanchans", &v, sizeof(v)) && v <= 39) {
