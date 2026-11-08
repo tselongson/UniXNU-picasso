@@ -354,6 +354,16 @@ static bool g_regs_live;
  * pins a stage (0 disables the HIF completely). */
 static int g_stage = 1;
 static int g_hif_mode = 0;
+/* wcn3990-hif-quiet=1: after the doorbell, stop touching the copy engines
+ * entirely and heartbeat from the poller instead.  The console dies within
+ * a millisecond of "posted 63 receive buffers" while the machine itself
+ * stays up, and this separates the two candidate causes: the doorbell
+ * wedging the interconnect, or the poller's very next CE access.  One
+ * single probe read is made five seconds after the doorbell, and whether
+ * the heartbeat stops there says which access it was. */
+static int g_ce_quiet;
+static uint32_t g_quiet_probe_polls;
+static int g_quiet_probed;
 static bool g_bases_programmed;
 /* Number of receive descriptors to hand to CE2 in stage 3. */
 static uint32_t g_post_count = CE2_ENTRIES - 1;
@@ -1107,6 +1117,23 @@ wcn3990_hif_poll(void)
 	if (g_stage < 3) return;
 	if (g_scan_active) g_scan_polls++;
 
+	if (g_ce_quiet) {
+		if ((g_polls % 1000) == 0) {
+			HIF_LOG("quiet heartbeat polls=%u probe=%d", g_polls,
+			    g_quiet_probed);
+		}
+		if (g_quiet_probe_polls != 0 && !g_quiet_probed &&
+		    g_polls >= g_quiet_probe_polls) {
+			g_quiet_probed = 1;
+			HIF_LOG("quiet probe: drri=%x srri0=%x srwr0=%x nbytes0=%u",
+			    hif_reg_read(2, CE_CURRENT_DRRI),
+			    hif_reg_read(0, CE_CURRENT_SRRI),
+			    hif_reg_read(0, CE_SR_WR_INDEX),
+			    (unsigned)s_dst2[0].nbytes);
+		}
+		return;
+	}
+
 	/* ath10k_snoc_hif_start() posts the buffers and services them right
 	 * away.  No post-doorbell watch, no gate: CoachZ's pure-poll wc_poll(1)
 	 * proves the CE works without a single interrupt registered. */
@@ -1424,6 +1451,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	 * leave the HIF inert on purpose rather than starting a doomed DMA. */
 	uint32_t assign_level = 0;
 	v = 0;
+	v = 0;
+	if (PE_parse_boot_argn("wcn3990-hif-quiet", &v, sizeof(v)) && v <= 1) {
+		g_ce_quiet = (int)v;
+	}
 	if (PE_parse_boot_argn("wcn3990-hif-assign", &v, sizeof(v)) && v <= 3) {
 		assign_level = v;
 	}
