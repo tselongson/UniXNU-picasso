@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3259 @@
+@@ -0,0 +1,3276 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -899,28 +899,45 @@ new file mode 100644
 +		printf("PICASSO USB: SMMU bind route readback FAIL\n");
 +		return false;
 +	}
-+	/* The WLAN copy engines are stream 0xc0, mask 1 (icnss iommus).  Route
-+	 * them through the same translated context the firmware's own streams
-+	 * use: XBL installed S2CR=3000033f for 0xc2, and that path demonstrably
-+	 * carries the firmware's own DMA.  The bypass banks the console uses
-+	 * are evidently not permitted to this master. */
++	/* WLAN copy engines are stream 0xc0, mask 1 (icnss iommus).  Linux's
++	 * arm-smmu gives that stream a free context bank with page tables before
++	 * any CE fetches a descriptor.  Global stream-match registers only accept
++	 * writes in this early window, so claim the route here; the WLAN driver
++	 * installs the bank's page tables later, just before the first doorbell.
++	 * With wlansmmu=0 the bank stays at SCTLR.M=0 (the bypass setup
++	 * every earlier build used); =1 turns on translation.  One image, one
++	 * variable. */
 +	{
++		const uint32_t bank = 4u;
 +		uint32_t slot = plan->slot + 1;
 +		uint32_t wsmr = 0x80000000u | (1u << 16) | 0x00c0u;
++		uint32_t i, taken = 0;
 +
++		for (i = 0; i < 128u; i++) {
++			uint32_t smr = usb_rd(smmu, 0x800u + 4u * i);
++			uint32_t s2cr = usb_rd(smmu, 0xc00u + 4u * i);
++			if ((smr & 0x80000000u) && ((s2cr >> 16) & 3u) == 0 &&
++			    (s2cr & 0xffu) == bank) {
++				taken = 1;
++				break;
++			}
++		}
 +		while (slot < 128 &&
 +		    (usb_rd(smmu, 0x800u + 4u * slot) & 0x80000000u)) {
 +			slot++;
 +		}
-+		if (slot < 128) {
-+			picasso_usb_smmu_write(smmu, 0xc00u + 4u * slot,
-+			    0x3000033fu);
-+			picasso_usb_smmu_write(smmu, 0x800u + 4u * slot, wsmr);
-+			printf("PICASSO USB: wlan stream c0 slot=%u smr=%08x s2cr=%08x\n",
-+			    slot, usb_rd(smmu, 0x800u + 4u * slot),
-+			    usb_rd(smmu, 0xc00u + 4u * slot));
++		if (taken || slot >= 128) {
++			printf("PICASSO USB: wlan stream c0 skipped (bank %u taken=%u slot=%u)\n",
++			    bank, taken, slot);
 +		} else {
-+			printf("PICASSO USB: no free slot for the wlan stream\n");
++			picasso_usb_smmu_write(smmu, 0x1000u + 4u * bank, 0x1f000u);
++			picasso_usb_smmu_write(smmu, 0x1800u + 4u * bank, 1u);
++			picasso_usb_smmu_write(smmu, 0xc00u + 4u * slot, bank);
++			picasso_usb_smmu_write(smmu, 0x800u + 4u * slot, wsmr);
++			printf("PICASSO USB: wlan stream c0 slot=%u smr=%08x s2cr=%08x bank=%u cbar=%08x\n",
++			    slot, usb_rd(smmu, 0x800u + 4u * slot),
++			    usb_rd(smmu, 0xc00u + 4u * slot), bank,
++			    usb_rd(smmu, 0x1000u + 4u * bank));
 +		}
 +	}
 +	return true;

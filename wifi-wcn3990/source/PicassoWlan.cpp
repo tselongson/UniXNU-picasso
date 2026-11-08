@@ -3428,8 +3428,12 @@ wlan_fb_cell(uint32_t i, uint32_t color)
 
 /* Called from the hif poller's quiet probe: one cell per probe.  Green when
  * the copy engine's read index moved since the last probe, red when it did
- * not, grey when the ring was never posted. */
-void
+ * not, grey when the ring was never posted.  The call site is inside an
+ * extern "C" function in Wcn3990Hif.cpp, so clang gives its block-scope
+ * declaration C linkage; without the explicit extern "C" here the definition
+ * is C++-mangled and the kernel fails to link with
+ * "Undefined symbols: _picasso_wlan_probe_paint" (CI 42442990677). */
+extern "C" void
 picasso_wlan_probe_paint(uint32_t probe, uint32_t drri, uint32_t nbytes)
 {
 	static uint32_t last_drri;
@@ -3449,6 +3453,173 @@ picasso_wlan_probe_paint(uint32_t probe, uint32_t drri, uint32_t nbytes)
 	}
 	last_drri = drri;
 	wlan_fb_cell(probe + 1u, color);
+}
+
+/* ------------------------------------------------------- WLAN CE IOMMU domain
+ * This is the step the original system performs and this port never did.
+ *
+ * Linux binds qcom,icnss (DT iommus = <&apps_smmu 0xc0 0x1>) to an
+ * arm-smmu domain: it takes a free context bank, installs page tables that
+ * map the qcom,iommu-dma-addr-pool IOVA window (0xa0000000 + 256 MiB) onto
+ * DDR, and only then hands those addresses to the copy engines.  The wcn6750
+ * XNU port (work/refs/hakios/drivers/wifi/hakios.wifi.c, radio_space_on)
+ * does exactly that too, and records the failure when it is missing:
+ *
+ *   "the radio's first reach for memory, at mission mode, was then a stream
+ *    the SMMU knows nothing of, and the phone went down without a word"
+ *
+ * That is our silent USB console + grey screen.  Everything tried so far
+ * (CB60/61 with SCTLR.M=0, CB0, S2CR direct-index writes, heap vs 0xa2....)
+ * kept the CE master on an *untranslated* route with no page tables.
+ *
+ * wlansmmu=1 installs the missing domain.  The early USB-console
+ * bind routes stream 0xc0 to WLAN_CE_CONTEXT with S2CR type 0 (translate)
+ * and sets that bank's CBAR/CBA2R; with the boot-arg off the bank is left at
+ * SCTLR.M=0, which is precisely the bypass setup every earlier build used.
+ * One image, one boot argument, one variable: only the context's translation
+ * state and its page tables change.
+ *
+ * The page table is the one this board's display driver already proved on
+ * hardware (NativeLegacyDisplay.cpp dpuEnable): a 4 KiB L1 whose entries 2
+ * and 3 are 1 GiB identity blocks.  Identity is sufficient here because the
+ * CE rings are ordinary DDR physical addresses; what the master needs is a
+ * real translated context, not a bypass bank.
+ */
+#define WLAN_CE_CONTEXT       4u
+#define WLAN_CE_SMR_VALUE     (0x80000000u | (1u << 16) | 0x00c0u)
+
+extern "C" int
+picasso_wlan_smmu_context(void)
+{
+	uint32_t want = 0;
+	vm_offset_t sva;
+	volatile uint32_t *r, *cb;
+	vm_offset_t tva = 0;
+	uint64_t *l1, tpa;
+	uint32_t idr0, idr1, banks, pages, slots, i, bound = 0xffffffffu;
+	uint32_t old_sctlr, spin;
+	const uint64_t attrs = (1ull << 10) | (1ull << 6);
+
+	(void)PE_parse_boot_argn("wlansmmu", &want, sizeof(want));
+	if (!want) {
+		LOG("wlan smmu ctx: OFF (control: stream c0 on bank %u, no tables, SCTLR.M=0)",
+		    WLAN_CE_CONTEXT);
+		return 0;
+	}
+
+	sva = ml_io_map(WLAN_SMMU_PA, 0x100000u);
+	if (sva == 0) {
+		LOG("wlan smmu ctx: ml_io_map failed, DMA left on the control path");
+		return -1;
+	}
+	r = (volatile uint32_t *)sva;
+	idr0 = r[0x020 >> 2];
+	idr1 = r[0x024 >> 2];
+	banks = idr1 & 0xffu;
+	pages = 1u << (((idr1 >> 28) & 7u) + 1u);
+	/* The boot chain leaves valid stream-match entries as high as SMR[127]
+	 * on this SMMU even though IDR0.NUMSMRG reads 0x51; scan the whole
+	 * register window so the route check sees everything. */
+	slots = 128u;
+	if (WLAN_CE_CONTEXT >= banks ||
+	    ((pages + WLAN_CE_CONTEXT) << 12) > 0x100000u) {
+		LOG("wlan smmu ctx: bank %u outside this SMMU (banks=%u pages=%u)",
+		    WLAN_CE_CONTEXT, banks, pages);
+		return -2;
+	}
+
+	/* The console writes SMR/S2CR in the only window TZ permits.  Verify
+	 * that route is really there before enabling translation behind it. */
+	for (i = 0; i < slots; i++) {
+		uint32_t smr = r[(0x800 >> 2) + i];
+		uint32_t s2 = r[(0xc00 >> 2) + i];
+
+		if ((smr & 0x80000000u) && (smr & 0x7fffu) == 0x00c0u &&
+		    ((s2 >> 16) & 3u) == 0 && (s2 & 0xffu) == WLAN_CE_CONTEXT) {
+			bound = i;
+			break;
+		}
+	}
+	LOG("wlan smmu ctx: idr0=%08x idr1=%08x banks=%u pages=%u c0 slot=%u",
+	    idr0, idr1, banks, pages, bound);
+	if (bound == 0xffffffffu) {
+		LOG("wlan smmu ctx: no translated route for stream c0; staying on the control path");
+		return -3;
+	}
+
+	/* One 4 KiB L1 table, physically contiguous, cleaned to the PoC. */
+	if (kmem_alloc_contig(kernel_map, &tva, 4096, PAGE_MASK, 0, 0,
+	    (kma_flags_t)(KMA_DATA | KMA_ZERO | KMA_PERMANENT),
+	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS || tva == 0) {
+		LOG("wlan smmu ctx: L1 allocation failed");
+		return -4;
+	}
+	tpa = ptoa_64(pmap_find_phys(kernel_pmap, (addr64_t)tva));
+	if (tpa == 0) {
+		LOG("wlan smmu ctx: no physical page for the L1 table");
+		return -5;
+	}
+	l1 = (uint64_t *)tva;
+	l1[0] = tpa | 3ull;
+	l1[2] = 0x80000000ull | attrs | 1ull;
+	l1[3] = 0xc0000000ull | attrs | 1ull;
+	flush_dcache64((addr64_t)tpa, 4096, TRUE);
+	__asm__ volatile ("dsb sy" ::: "memory");
+
+	cb = r + (((pages + WLAN_CE_CONTEXT) << 12) / 4);
+	old_sctlr = cb[0x00 / 4];
+	LOG("wlan smmu ctx: bank %u regs=%lx l1=%llx old sctlr=%08x cbar=%08x cba2r=%08x",
+	    WLAN_CE_CONTEXT, (unsigned long)(((pages + WLAN_CE_CONTEXT) << 12)),
+	    (unsigned long long)tpa, old_sctlr,
+	    r[(0x1000 >> 2) + WLAN_CE_CONTEXT],
+	    r[(0x1800 >> 2) + WLAN_CE_CONTEXT]);
+
+	/* Same order and values as the display driver's dpuEnable(). */
+	cb[0x00 / 4] = 0;                 /* SCTLR off while the tables change */
+	__asm__ volatile ("dsb sy" ::: "memory");
+	cb[0x20 / 4] = (uint32_t)tpa;     /* TTBR0 low */
+	cb[0x24 / 4] = (uint32_t)(tpa >> 32);
+	cb[0x28 / 4] = 0;                 /* TTBR1 low */
+	cb[0x2c / 4] = 0;
+	cb[0x10 / 4] = 5u | (7u << 15);  /* TCR2: PASIZE 5, SEP 7 */
+	cb[0x30 / 4] = 32u | (1u << 23); /* TCR: T0SZ 32 -> 1 GiB L1 blocks */
+	cb[0x38 / 4] = 0x44;              /* MAIR0 */
+	cb[0x3c / 4] = 0;                 /* MAIR1 */
+	cb[0x58 / 4] = 0xc00001feu;       /* clear any stale FSR */
+	__asm__ volatile ("dsb sy" ::: "memory");
+
+	if (cb[0x20 / 4] != (uint32_t)tpa || cb[0x30 / 4] != (32u | (1u << 23))) {
+		LOG("wlan smmu ctx: CONTEXT REGISTERS DID NOT TAKE, staying on control path");
+		cb[0x00 / 4] = old_sctlr;
+		return -6;
+	}
+
+	/* TLB invalidate + sync, exactly as dpuTlbFlush(). */
+	cb[0x618 / 4] = 0;
+	cb[0x7f0 / 4] = 0;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	for (spin = 0; spin < 100000u && (cb[0x7f4 / 4] & 1u); spin++) {
+		__asm__ volatile ("yield" ::: "memory");
+	}
+	if (spin == 100000u) {
+		LOG("wlan smmu ctx: TLB sync did not finish");
+		cb[0x00 / 4] = old_sctlr;
+		return -7;
+	}
+
+	cb[0x00 / 4] = 1u | (1u << 5) | (1u << 6);   /* M, CFRE, CFIE */
+	__asm__ volatile ("dsb sy; isb" ::: "memory");
+	LOG("wlan smmu ctx: ENABLED bank %u sctlr=%08x ttbr0=%08x%08x tcr=%08x fsr=%08x",
+	    WLAN_CE_CONTEXT, cb[0x00 / 4], cb[0x24 / 4], cb[0x20 / 4],
+	    cb[0x30 / 4], cb[0x58 / 4]);
+	if (!(cb[0x00 / 4] & 1u)) {
+		LOG("wlan smmu ctx: translation did not switch on");
+		return -8;
+	}
+	/* Identity L1[2]/L1[3] covers 0x80000000..0xffffffff, so every address
+	 * the HIF already programs (heap 0xcd...... or pool 0xa2......) is a
+	 * valid IOVA for this master.  No HIF address change is needed. */
+	return 1;
 }
 
 static void
@@ -3480,6 +3651,9 @@ picasso_wlan_ce_init(void)
 	/* Beacons delivered over WMI_MGMT_RX_EVENT go through the standard
 	 * 802.11 parser below, which fills g_picasso_bsss[]. */
 	wcn3990_hif_set_frame_sink(picasso_parse_beacon_frame);
+	/* Install the IOMMU domain the original system gives stream 0xc0
+	 * before any copy engine is allowed to fetch a descriptor. */
+	(void)picasso_wlan_smmu_context();
 	wcn3990_hif_init(g_wlan_ce_base, WLAN_CE_BASE_PA);
 }
 
