@@ -6,6 +6,12 @@ from pathlib import Path
 import urllib.request
 import picasso_touch_firmware as firmware
 
+# The upstream release asset occasionally answers 504 for hours at a time.
+# The exact same bytes are already embedded uncompressed in every composed
+# boot image, so keep a verified copy in-tree as a fallback.  firmware.verify()
+# enforces the pinned SHA256 and the Novatek markers either way.
+BUNDLED = Path(__file__).resolve().parent.parent / 'firmware' / 'touch' / firmware.NAME
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -18,8 +24,14 @@ def main():
         data = args.source.read_bytes()
     else:
         request = urllib.request.Request(firmware.URL, headers={'User-Agent': 'UniXNU-picasso'})
-        with urllib.request.urlopen(request, timeout=60) as response:
-            data = response.read(firmware.SIZE + 1)
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                data = response.read(firmware.SIZE + 1)
+        except Exception as exc:
+            if not BUNDLED.exists():
+                raise
+            print('touch firmware download failed (%s); using verified bundled copy' % exc)
+            data = BUNDLED.read_bytes()
     result = firmware.verify(data)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if not args.output.exists():
