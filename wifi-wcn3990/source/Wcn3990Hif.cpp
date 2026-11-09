@@ -684,6 +684,164 @@ hif_ce2_repost(uint32_t idx)
 	hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
 }
 
+/* ---- HTT receive path (grafted wholesale from wlan-wip wr_*, L4169-4270) -
+ * chain-536: after vdev up the firmware starts putting received frames into
+ * this ring, and with nobody draining it the target answered the 0x401
+ * early-crash message and the kernel panicked.  This is also the path EAPOL
+ * frames arrive on, which makes it the prerequisite for the four-way
+ * handshake.  Scope for this round: drain, refill, count and classify -
+ * Ethernet payloads are logged, not yet delivered to the stack. */
+static uint32_t g_htt_alloc;      /* refill index, mirrors htt_alloc_idx */
+static uint32_t g_htt_read;       /* RX_IND consumption cursor */
+static uint64_t g_htt_buf_pa;     /* physical base of htt_buf[0] */
+static uint32_t g_wr_rx_ind, g_wr_rx_in_ord, g_wr_rx_frames, g_wr_rx_eapol,
+    g_wr_rx_bad, g_wr_rx_undone;
+
+static uint8_t *
+hif_wr_buf_va(uint64_t pa)
+{
+	uint64_t base = g_htt_buf_pa;
+
+	if (!g_dma || !base ||
+	    pa < base ||
+	    pa >= base + (uint64_t)HTT_RX_RING_ENTRIES * HTT_RX_BUF_SIZE ||
+	    (pa - base) % HTT_RX_BUF_SIZE)
+		return NULL;
+	return g_dma->htt_buf[0] + (pa - base);
+}
+
+/* wlan-wip wr_post(): clear the buffer's attention word, put its address
+ * back on the ring at the alloc index and publish the new index.  The
+ * target only keeps handing out buffers while the host keeps refilling. */
+static void
+hif_wr_post(uint64_t pa)
+{
+	uint8_t *buf = hif_wr_buf_va(pa);
+	uint32_t i = g_htt_alloc & (HTT_RX_RING_ENTRIES - 1);
+	const uint32_t zero = 0;
+
+	if (buf) memset(buf + 4, 0, 4);            /* rx_attention */
+	g_dma->htt_ring[i] = pa;
+	g_htt_alloc = (g_htt_alloc + 1u) & (HTT_RX_RING_ENTRIES - 1u);
+	hif_mb();
+	g_dma->htt_alloc_idx = g_htt_alloc;
+}
+
+/* wlan-wip wr_msdu(): validate the descriptor, convert native Wi-Fi to
+ * Ethernet and hand EAPOL over.  Diagnostic scope: count and log; the stack
+ * delivery comes with the WPA2 phase. */
+static void
+hif_wr_msdu(uint8_t *buf, uint32_t len)
+{
+	uint32_t attention, start, decap, bytes;
+	uint8_t *eth;
+
+	memcpy(&attention, buf + 4, 4);
+	memcpy(&start, buf + 36, 4);
+	decap = (start >> 8) & 3u;
+	if (!(attention & (1u << 31))) { g_wr_rx_undone++; return; }
+	if (attention & (1u << 28 | 1u << 29 | 1u << 30 | 1u << 16 |
+	    1u << 17 | 1u << 27)) { g_wr_rx_bad++; return; }
+	if (len < 14u || len > HTT_RX_BUF_SIZE - 360u) { g_wr_rx_bad++; return; }
+
+	eth = buf + 360;
+	bytes = len;
+	if (decap == 1) {
+		if (len < 32u || eth[24] != 0xaa || eth[25] != 0xaa ||
+		    eth[26] != 3) { g_wr_rx_bad++; return; }
+		/* 802.11 data + LLC/SNAP: rewrite the header in place as
+		 * Ethernet DA/SA/type (wlan-wip uses a scratch frame; our
+		 * buffer is exactly big enough to fold in place). */
+		memmove(eth, eth + 4, 6);                /* DA  (addr1) */
+		memcpy(eth + 6, eth + 16, 6);            /* SA  (addr2) */
+		memcpy(eth + 12, eth + 30, 2);           /* type */
+		bytes = len - 32u + 14u;
+	} else if (decap != 2) {
+		g_wr_rx_bad++;
+		return;
+	}
+
+	g_wr_rx_frames++;
+	if (eth[12] == 0x88 && eth[13] == 0x8e) {
+		g_wr_rx_eapol++;
+		HIF_LOG("JOIN: EAPOL frame %u bytes ver=%u type=%u code=%u",
+		    bytes, eth[14], eth[15], eth[16]);
+		return;
+	}
+	if ((g_wr_rx_frames & 63u) == 1u)
+		HIF_LOG("HTT: msdu #%u bytes=%u decap=%u type=%02x%02x",
+		    g_wr_rx_frames, bytes, decap, eth[12], eth[13]);
+}
+
+/* wlan-wip wr_in_ord(): HTT_T2H_MSG_TYPE_RX_IN_ORD_PADDR_IND (0x12) with
+ * 64-bit addresses: an 8-byte header, then {pa, len, fw_desc, reserved}
+ * 12-byte records.  Offloaded/fragment entries (info bits 5-6) go straight
+ * back to the ring. */
+static void
+hif_wr_in_ord(const uint8_t *p, uint32_t n)
+{
+	uint32_t i, count;
+	int skip;
+
+	g_wr_rx_in_ord++;
+	if (n < 8) return;
+	count = (uint32_t)(p[6] | (uint32_t)p[7] << 8);
+	skip = (p[1] & 0x60u) != 0;
+	for (i = 0; i < count && 8u + 12u * (i + 1u) <= n; i++) {
+		uint64_t pa;
+		uint16_t len;
+		uint8_t *buf;
+
+		memcpy(&pa, p + 8 + 12 * i, 8);
+		memcpy(&len, p + 16 + 12 * i, 2);
+		buf = hif_wr_buf_va(pa);
+		if (!buf) { g_wr_rx_bad++; continue; }
+		if (!skip) hif_wr_msdu(buf, len);
+		hif_wr_post(pa);
+	}
+}
+
+/* wlan-wip wr_rx_ind(): HTT_T2H_MSG_TYPE_RX_IND (1) - the ring's buffers in
+ * order, MSDUs up to each MPDU's last one (ath10k_htt_rx_amsdu_pop). */
+static void
+hif_wr_rx_ind(const uint8_t *p, uint32_t n)
+{
+	uint32_t info1, ranges, fw, i;
+	const uint8_t *r;
+
+	g_wr_rx_ind++;
+	if (n < 48) return;
+	memcpy(&info1, p + 4, 4);
+	ranges = info1 >> 24;
+	fw = (((uint32_t)(p[44] | (uint32_t)p[45] << 8)) + 3u) & ~3u;
+	r = p + 48 + fw;
+	if (48u + fw + 4u * ranges > n) return;
+	for (i = 0; i < ranges; i++, r += 4) {
+		uint32_t m;
+
+		for (m = 0; m < r[0]; m++) {
+			unsigned guard;
+
+			for (guard = 0; guard < 64; guard++) {
+				uint64_t pa;
+				uint8_t *buf;
+				uint32_t start, end;
+
+				memcpy(&pa, &g_dma->htt_ring[g_htt_read], 8);
+				g_htt_read = (g_htt_read + 1u) &
+				    (HTT_RX_RING_ENTRIES - 1u);
+				buf = hif_wr_buf_va(pa);
+				if (!buf) return;
+				memcpy(&start, buf + 28, 4);
+				memcpy(&end, buf + 64, 4);
+				if (r[1] == 1) hif_wr_msdu(buf, start & 0x3fffu);
+				hif_wr_post(pa);
+				if (end & (1u << 15)) break;
+			}
+		}
+	}
+}
+
 /* CE1 is the target->host HTT pipe.  Until 491 it was only *posted* (31
  * buffers) and never serviced, so every HTT response the firmware sent -
  * including the VERSION_CONF that ath10k_htt_setup() waits for - was dropped
@@ -722,17 +880,29 @@ hif_service_ce1(void)
 			    nbytes > HTC_HDR_BYTES + 2 ? b[HTC_HDR_BYTES + 2] : 0xff);
 			g_htt_rx++;
 		}
-		/* wlan-wip wj_htt_message(): peer map / unmap are HTT T2H types
-		 * 3 and 4.  The map event is the only way the host learns that
-		 * PEER_CREATE took effect, so the join state machine gates auth
-		 * on it.  The 8-byte HTC header precedes the message type. */
+		/* wlan-wip wj_htt_message(): the whole HTT T2H dispatch.  The
+		 * 8-byte HTC header precedes the message type byte.  RX_IND(1)
+		 * and RX_IN_ORD(0x12) are the data path the firmware starts
+		 * using right after vdev up; never draining it is what killed
+		 * the target in chain-535/536. */
 		if (g_join >= 2 && nbytes > HTC_HDR_BYTES) {
 			const uint8_t *msg = b + HTC_HDR_BYTES;
+			uint32_t msglen = nbytes - HTC_HDR_BYTES;
 
-			if (msg[0] == HTT_T2H_MSG_TYPE_PEER_MAP ||
-			    msg[0] == HTT_T2H_MSG_TYPE_PEER_UNMAP)
-				hif_join_peer_event(msg,
-				    nbytes - HTC_HDR_BYTES);
+			switch (msg[0]) {
+			case HTT_T2H_MSG_TYPE_PEER_MAP:
+			case HTT_T2H_MSG_TYPE_PEER_UNMAP:
+				hif_join_peer_event(msg, msglen);
+				break;
+			case 1:
+				hif_wr_rx_ind(msg, msglen);
+				break;
+			case 0x12:
+				hif_wr_in_ord(msg, msglen);
+				break;
+			default:
+				break;
+			}
 		}
 		/* htt.c ath10k_htt_setup() waits for VERSION_CONF before it
 		 * sends the RX ring and the aggregation limits.  For the very
@@ -1082,6 +1252,8 @@ hif_htt_rx_ring_cfg(void)
 	for (i = 0; i < HTT_RX_RING_ENTRIES - 1; i++) {
 		g_dma->htt_ring[i] = hif_pa_of(g_dma->htt_buf[i]);
 	}
+	g_htt_buf_pa = hif_pa_of(g_dma->htt_buf[0]);
+	g_htt_alloc = fill;
 	g_dma->htt_alloc_idx = fill;
 	hif_mb();
 
@@ -3175,12 +3347,14 @@ wcn3990_hif_poll(void)
 	if ((g_polls % 1000) == 0) {
 		HIF_LOG("heartbeat polls=%u stage=%d state=%d rx=%u beacons=%u "
 		    "desc0.nbytes=%u drri=%x htt=%u httidx=%u mgmt=%u mgmtev=%u "
-		    "join=%d",
+		    "join=%d ind=%u ord=%u msdu=%u eapol=%u bad=%u/%u",
 		    g_polls, g_stage, (int)g_state, g_rx_packets, g_beacons,
 		    (unsigned)s_dst2[0].nbytes,
 		    g_bases_programmed ? hif_reg_read(2, CE_CURRENT_DRRI) : 0,
 		    g_htt_rx, g_dma ? g_dma->htt_alloc_idx : 0, g_mgmt_seen,
-		    g_mgmt_events, g_join_state);
+		    g_mgmt_events, g_join_state,
+		    g_wr_rx_ind, g_wr_rx_in_ord, g_wr_rx_frames, g_wr_rx_eapol,
+		    g_wr_rx_bad, g_wr_rx_undone);
 		/* join=<n>: a compact status line while a join is running. */
 		if (g_join && g_join_state != HIF_JOIN_IDLE) {
 			HIF_LOG("JOIN: state=%d tries=%u bss=%u mgmt "
