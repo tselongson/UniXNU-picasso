@@ -319,6 +319,7 @@ typedef char wcn_ce_desc_size_check[(sizeof(struct wcn_ce_desc_64) == 16) ? 1 : 
 #define HTT_H2T_MSG_TYPE_VERSION_REQ  0
 #define HTT_H2T_MSG_TYPE_RX_RING_CFG  2
 #define HTT_H2T_MSG_TYPE_AGGR_CFG     5
+#define HTT_H2T_MSG_TYPE_FRAG_DESC_BANK_CFG 6
 #define HTT_T2H_MSG_TYPE_VERSION_CONF 0
 /* wmi-tlv.h/hw.c: WCN3990 advertises rx_ring_fill_level =
  * HTT_RX_RING_FILL_LEVEL_DUAL_MAC = HTT_RX_RING_SIZE - 1, and
@@ -399,6 +400,13 @@ struct hif_dma_block {
 	uint64_t htt_ring[HTT_RX_RING_ENTRIES];
 	uint32_t htt_alloc_idx;
 	uint8_t htt_buf[HTT_RX_RING_ENTRIES][HTT_RX_BUF_SIZE];
+	/* HTT TX frag descriptor bank (FRAG_DESC_BANK_CFG): 1056 x 72 B, the
+	 * same geometry trogdor registers (WS_FRAG_DESCS / WS_FRAG_DESC).
+	 * chain-543 proved VDEV_UP is the only command that kills the target
+	 * (assoc without it survives 170 s).  VDEV_UP enables the TX data
+	 * path; ath10k/trogdor always register this bank during htt_setup,
+	 * ours never did. */
+	uint8_t htt_frag[1056 * 72];
 };
 
 #define HIF_DMA_SIZE   0x600000u         /* 6 MiB: rings + CE bufs + 4 MiB HTT RX ring */
@@ -1299,6 +1307,38 @@ hif_htt_aggr_cfg(void)
 	return hif_htt_send(HTT_H2T_MSG_TYPE_AGGR_CFG, p, (uint32_t)sizeof(p));
 }
 
+/* wlan-wip ws_htt_next() step 0 / htt_tx.c frag desc bank cfg, 64-bit
+ * addresses.  The message is one htt header byte plus the packed 63-byte
+ * struct htt_frag_desc_bank_cfg64:
+ *   info(1) num_banks(1) desc_size(1) bank_base_addrs[4](32)
+ *   bank_id[4](16, {le16 min, le16 max}) q_state(12, record_size @+8)
+ * trogdor sends exactly these 64 bytes with info=0 (no Q-state validity),
+ * one bank, 72-byte descriptors and bank_max_id = 1055. */
+#define HTT_FRAG_DESC_COUNT 1056
+#define HTT_FRAG_DESC_SIZE  72
+static int
+hif_htt_frag_bank_cfg(void)
+{
+	uint8_t p[63];
+	uint64_t bank_pa;
+
+	if (!g_dma) return -1;
+	bank_pa = hif_pa_of(g_dma->htt_frag);
+	if (!bank_pa) return -1;
+	memset(p, 0, sizeof(p));
+	p[0] = 0;                        /* info: pdev 0, q_state not valid */
+	p[1] = 1;                        /* num_banks */
+	p[2] = HTT_FRAG_DESC_SIZE;       /* desc_size */
+	hif_put64(p + 3, bank_pa);       /* bank_base_addrs[0] */
+	hif_put16(p + 35, 0);            /* bank_id[0].bank_min_id */
+	hif_put16(p + 37, HTT_FRAG_DESC_COUNT - 1); /* bank_max_id */
+	p[59] = 1;                       /* q_state.record_size */
+	HIF_LOG("HTT: send FRAG_DESC_BANK_CFG bank=%llx n=%u desc=%u",
+	    (unsigned long long)bank_pa, HTT_FRAG_DESC_COUNT, HTT_FRAG_DESC_SIZE);
+	return hif_htt_send(HTT_H2T_MSG_TYPE_FRAG_DESC_BANK_CFG, p,
+	    (uint32_t)sizeof(p));
+}
+
 /* htt.c ath10k_htt_setup() after VERSION_CONF: frag-desc bank (TX only, not
  * needed for a scan), RX ring, aggregation limits. */
 static void
@@ -1332,9 +1372,11 @@ hif_htt_setup_finish(void)
 		(void)hif_htt_send(99, NULL, 0);
 		return;
 	}
-	/* bit0 = RX_RING_CFG, bit1 = AGGR_CFG.  They are split because the
-	 * pair sent together killed the target with a platform error; one
-	 * boot per bit tells which command the firmware refuses. */
+	/* bit0 = RX_RING_CFG, bit1 = AGGR_CFG, bit2 = FRAG_DESC_BANK_CFG.
+	 * trogdor's order is frag bank -> rx ring -> aggr, so honour it here.
+	 * bit2 exists because VDEV_UP (which enables the TX data path) kills
+	 * the target when no frag bank was ever registered (chain-543). */
+	if (g_htt_ring & 4) (void)hif_htt_frag_bank_cfg();
 	if (g_htt_ring & 1) (void)hif_htt_rx_ring_cfg();
 	if (g_htt_ring & 2) (void)hif_htt_aggr_cfg();
 }
