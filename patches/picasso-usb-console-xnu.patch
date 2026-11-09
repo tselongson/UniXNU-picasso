@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3433 @@
+@@ -0,0 +1,3464 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -960,6 +960,37 @@ new file mode 100644
 +			    slot, usb_rd(smmu, 0x800u + 4u * slot),
 +			    usb_rd(smmu, 0xc00u + 4u * slot), bank, domain,
 +			    usb_rd(smmu, 0x1000u + 4u * bank));
++		}
++	}
++	/* The WLAN VM's own DMA master is stream 0x20, mask 1 (icnss
++	 * iommus <&apps_smmu 0x20 0x1>): the copy engines at 0xc0/0xc1 only
++	 * carry host-target HTC/HTT traffic, while every frame the firmware
++	 * itself DMAs - the first scan RX, ~15 ms in - goes out on 0x20/0x21.
++	 * No SMR entry has ever covered it (the WLAN driver's late claim is
++	 * dropped) and sCR0.USFCFG=1 denies unmatched streams, so the first
++	 * scan frame faults the VM: smp2p bit1, no events, SError - every
++	 * scan boot since 509.  Bind it to the same bypass bank here, in this
++	 * early window, S2CR first then SMR, exactly like the 0xc0 route. */
++	{
++		uint32_t domain20 = 0;
++		uint32_t wsmr20 = 0x80000000u | (1u << 16) | 0x0020u;
++		uint32_t slot20 = plan->slot + 1;
++
++		(void)PE_parse_boot_argn("wlansmmu", &domain20, sizeof(domain20));
++		while (slot20 < 128 &&
++		    (usb_rd(smmu, 0x800u + 4u * slot20) & 0x80000000u)) {
++			slot20++;
++		}
++		if (domain20 == 2) {
++			printf("PICASSO USB: wlan stream 20 DELIBERATELY UNBOUND (wlansmmu=2)\n");
++		} else if (slot20 >= 128) {
++			printf("PICASSO USB: wlan stream 20 skipped (no free slot)\n");
++		} else {
++			picasso_usb_smmu_write(smmu, 0xc00u + 4u * slot20, plan->bank);
++			picasso_usb_smmu_write(smmu, 0x800u + 4u * slot20, wsmr20);
++			printf("PICASSO USB: wlan stream 20 slot=%u smr=%08x s2cr=%08x bank=%u\n",
++			    slot20, usb_rd(smmu, 0x800u + 4u * slot20),
++			    usb_rd(smmu, 0xc00u + 4u * slot20), plan->bank);
 +		}
 +	}
 +	return true;
