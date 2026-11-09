@@ -532,6 +532,7 @@ static void hif_join_peer_event(const uint8_t *, uint32_t);
  * before the join state block further down the file. */
 static int g_join;               /* join=<n>: 0 = off, 1 = legacy, >=2 = full pre-req path */
 static int g_join_once;          /* the wj_begin() once-block (vdev/pdev params) */
+static int g_join_once_mask = 0x1ff; /* joinonce=<n>: per-command gates, 0x1ff = all */
 #define HTT_T2H_MSG_TYPE_PEER_MAP    3
 #define HTT_T2H_MSG_TYPE_PEER_UNMAP  4
 static int g_vdev_pending;
@@ -2643,16 +2644,29 @@ hif_join_once(void)
 	/* wlan-wip wj_begin(): ath10k_add_interface's settings, for the one
 	 * vdev.  Half-dB power units, native Wi-Fi encapsulation, and the
 	 * station kept awake (RX wake policy, TX wake threshold, no PSPOLL
-	 * maximum, power save off) because the bring-up polls, no IRQs. */
-	(void)hif_join_pdev_param(0x3, 40);   /* TXPOWER_LIMIT2G */
-	(void)hif_join_pdev_param(0x4, 40);   /* TXPOWER_LIMIT5G */
-	(void)hif_join_vdev_param(34, 2);     /* NSS */
-	(void)hif_join_vdev_param(48, 1);     /* TX_ENCAP_TYPE: native Wi-Fi */
-	(void)hif_join_vdev_param(1, 2347);   /* RTS_THRESHOLD */
-	(void)hif_join_sta_ps(0, 0);          /* RX_WAKE_POLICY: wake */
-	(void)hif_join_sta_ps(1, 1);          /* TX_WAKE_THRESHOLD: always */
-	(void)hif_join_sta_ps(2, 0);          /* PSPOLL_COUNT: no maximum */
-	(void)hif_join_sta_powersave_mode(0); /* off */
+	 * maximum, power save off) because the bring-up polls, no IRQs.
+	 * joinonce=<n> gates each command: chain-538 sent all nine and auth
+	 * regressed to status=3 (534/535/537 sent none and auth worked), so
+	 * the bisect runs per command.  bit1/2 power, bit4 NSS, bit8
+	 * TX_ENCAP_TYPE, bit16 RTS, bit32/64/128 sta_ps, bit256 ps_mode. */
+	if (g_join_once_mask & 0x01u)
+		(void)hif_join_pdev_param(0x3, 40);   /* TXPOWER_LIMIT2G */
+	if (g_join_once_mask & 0x02u)
+		(void)hif_join_pdev_param(0x4, 40);   /* TXPOWER_LIMIT5G */
+	if (g_join_once_mask & 0x04u)
+		(void)hif_join_vdev_param(34, 2);     /* NSS */
+	if (g_join_once_mask & 0x08u)
+		(void)hif_join_vdev_param(48, 1);     /* TX_ENCAP_TYPE */
+	if (g_join_once_mask & 0x10u)
+		(void)hif_join_vdev_param(1, 2347);   /* RTS_THRESHOLD */
+	if (g_join_once_mask & 0x20u)
+		(void)hif_join_sta_ps(0, 0);          /* RX_WAKE_POLICY: wake */
+	if (g_join_once_mask & 0x40u)
+		(void)hif_join_sta_ps(1, 1);          /* TX_WAKE_THRESHOLD */
+	if (g_join_once_mask & 0x80u)
+		(void)hif_join_sta_ps(2, 0);          /* PSPOLL_COUNT */
+	if (g_join_once_mask & 0x100u)
+		(void)hif_join_sta_powersave_mode(0); /* off */
 }
 
 /* ---- join prerequisites (chain-532c) ------------------------------------
@@ -4005,6 +4019,13 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("join", &v, sizeof(v)) &&
 	    v <= (uint32_t)HIF_JOIN_BSS_MAX) {
 		g_join = (int)v;
+	}
+	/* joinonce=<n>: per-command gates for the wj_begin() once-block
+	 * (bit1/2 power, bit4 NSS, bit8 TX_ENCAP_TYPE, bit16 RTS,
+	 * bit32/64/128 sta_ps, bit256 ps_mode).  0x1ff = all, 0 = none. */
+	v = 0x1ffu;
+	if (PE_parse_boot_argn("joinonce", &v, sizeof(v)) && v <= 0x1ffu) {
+		g_join_once_mask = (int)v;
 	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
 	    "wmiinit=%d; scanchans=%d; tlvpad=%d; chanlist=%d; vdevup=%d; "
