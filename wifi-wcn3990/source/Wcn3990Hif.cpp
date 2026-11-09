@@ -2797,6 +2797,10 @@ hif_wpa_handle_eapol(const uint8_t *e, uint32_t n)
 			hif_wpa_send_key(0, g_wpa_st.gtk_idx, g_wpa_st.gtk,
 			    g_wpa_st.gtk_len, g_wpa_st.gtk_len == 32 ? 2 : 4);
 		hif_join_peer_param(3, 1);            /* PEER_AUTHORIZE */
+		if (g_join_skip & 8) {
+			HIF_LOG("WPA: keys in, sending the deferred VDEV_UP");
+			hif_join_send_vdev_up();
+		}
 		g_wpa_st.keyed = 1;
 		HIF_LOG("WPA: msg3 seen, msg4 sent, keys installed, peer authorized");
 		return;
@@ -3717,7 +3721,12 @@ hif_join_resp(const uint8_t *f, uint32_t n)
 		 * bit2 = do not send VDEV_UP.  Both runs still associate, so
 		 * the A/B answers "which command kills the firmware". */
 		if (!(g_join_skip & 1)) hif_join_send_peer_assoc();
-		if (!(g_join_skip & 2)) hif_join_send_vdev_up();
+		/* bit8 defers VDEV_UP until the four-way handshake installed the
+		 * keys: the target is known to die when VDEV_UP runs with an
+		 * unauthorized peer, and wlan-wip's own order was never verified
+		 * on hardware. */
+		if (!(g_join_skip & 2) && !(g_join_skip & 8))
+			hif_join_send_vdev_up();
 		if (g_join_skip)
 			HIF_LOG("JOIN: joinskip=%d in effect", g_join_skip);
 		/* wlan-wip has no PEER_SET_PARAM after vdev up: its only
@@ -4729,7 +4738,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	/* joinskip=<n>: bit1 skip PEER_ASSOC, bit2 skip VDEV_UP.  Diagnostic
 	 * only: isolates which post-assoc command makes the firmware assert. */
 	v = 0;
-	if (PE_parse_boot_argn("joinskip", &v, sizeof(v)) && v <= 3) {
+	if (PE_parse_boot_argn("joinskip", &v, sizeof(v)) && v <= 15) {
 		g_join_skip = (int)v;
 	}
 	/* joinsel=1 selects the first BSS whose SSID starts with "ChinaUnicom",
