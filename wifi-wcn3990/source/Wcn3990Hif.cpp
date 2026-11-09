@@ -2619,7 +2619,7 @@ hif_join_bss_note(const uint8_t *f, uint32_t n, uint32_t channel,
     int32_t rssi)
 {
 	const uint8_t *bssid, *ies;
-	uint32_t ie_len, kept = 0, at, freq;
+	uint32_t ie_len, kept = 0, at, freq, has_rsn = 0;
 	struct hif_join_bss *b;
 
 	if (n < 36 || channel == 0) return;
@@ -2656,12 +2656,19 @@ hif_join_bss_note(const uint8_t *f, uint32_t n, uint32_t channel,
 		memcpy(b->ssid, ies + 2, ies[1]);
 	}
 	if (at == g_join_bss_count - 1) {      /* first time heard */
+		uint32_t s;
+
+		for (s = 0; s + 2u <= b->ie_len &&
+		    s + 2u + b->ie[s + 1] <= b->ie_len;
+		    s += 2u + b->ie[s + 1])
+			if (b->ie[s] == 48) has_rsn = 1;
 		HIF_LOG("JOIN: bss[%u] %02x:%02x:%02x:%02x:%02x:%02x "
-		    "ssid '%.*s' freq %u rssi %d beacons=%u",
+		    "ssid '%.*s' freq %u rssi %d beacons=%u %s",
 		    at + 1, (unsigned)bssid[0], (unsigned)bssid[1],
 		    (unsigned)bssid[2], (unsigned)bssid[3],
 		    (unsigned)bssid[4], (unsigned)bssid[5], b->ssid_len,
-		    b->ssid, freq, (int)rssi, g_beacons);
+		    (const char *)b->ssid, freq, (int)rssi, g_beacons,
+		    has_rsn ? "rsn" : "open");
 		/* The target entry may be heard after the scan-completed
 		 * event of the boot's only autoscan round; joining then
 		 * would wait forever.  Second trigger path: the moment the
@@ -2718,11 +2725,17 @@ hif_join_resp(const uint8_t *f, uint32_t n)
 		/* ath10k_bss_assoc: peer assoc, vdev up, the ps workaround. */
 		hif_join_send_peer_assoc();
 		hif_join_send_vdev_up();
-		hif_join_peer_param(0xff, 1);
-		/* No key handshake in this phase: an open AP is usable, a
-		 * WPA2 AP stops here (peer assoc'd, vdev up, unauthorized
-		 * for data) - the 0xb0 checkpoint above already proved the
-		 * mgmt TX path. */
+		/* wlan-wip has no PEER_SET_PARAM after vdev up: its only
+		 * authorize is peer_param(3,1) in wj_step's WJ_M4, *after* the
+		 * EAPOL keys are installed, and an open network never sends
+		 * one.  chain-535 sent peer param id 255 right after vdev up;
+		 * 255 is WMI_TLV_PEER_DUMMY_VAR, and the firmware answered the
+		 * 0x401 early-crash message, then the kernel panicked. */
+		if (g_join_ap.secure)
+			HIF_LOG("JOIN: secure AP, key handshake not in this "
+			    "phase, stopping after vdev up");
+		else
+			hif_join_peer_param(3, 1);  /* PEER_AUTHORIZE */
 		if (g_join_ap.secure)
 			HIF_LOG("JOIN: secure AP, key handshake not in this "
 			    "phase, stopping after vdev up");
