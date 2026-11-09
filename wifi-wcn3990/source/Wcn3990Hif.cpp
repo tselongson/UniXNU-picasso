@@ -383,6 +383,13 @@ struct hif_dma_block {
 	 * htt_cmd (4-byte header + payload) must fit in 256 bytes.  Four
 	 * rotating buffers for the same reason as tx3. */
 	uint8_t tx4[4][256];
+	/* join=<n>: WMI_MGMT_TX_SEND is by-reference - the 802.11 frame body
+	 * lives in a slot the firmware DMAs itself.  The wlan-wip reference
+	 * (drivers/NativeWlan/WlanRadio.c wj_send_mgmt) uses 8 x 1024-byte
+	 * slots and only reuses a slot when it comes round again, so a frame
+	 * stays intact until the target has fetched it.  8 KiB, far inside
+	 * the HIF_DMA_SIZE slack (block is ~4.5 MiB of 6 MiB). */
+	uint8_t mgmt_tx[8][1024];
 	/* wcn3990 keeps the per-CE read indices in DDR (hw_params.rri_on_ddr);
 	 * ce.c: ath10k_ce_alloc_rri() points the wrapper at this array. */
 	uint32_t rri[16];
@@ -782,6 +789,26 @@ hif_dump_regs(const char *why)
 #define WMI_SCAN_EVENTID              0x3001
 #define WMI_MGMT_RX_EVENTID           0x7001   /* WMI_GRP_MGMT  = 7 */
 #define WMI_CHAN_INFO_EVENTID         0x4002   /* WMI_GRP_PDEV  = 4 */
+/* join sequence (grafted from wlan-wip drivers/NativeWlan/WlanRadio.c).
+ * Command/event ids per wmi-master.h: WMI_CMD_GRP(grp) = (grp << 12) | 1.
+ * PEER group base 0x6001 (PEER_CREATE), MGMT group base 0x7001 (BCN_TX):
+ *   PEER_SET_PARAM  = 0x6001 + 3, PEER_ASSOC = 0x6001 + 4,
+ *   MGMT_TX_SEND    = 0x7001 + 7 (wmi-tlv.c .mgmt_tx_send_cmdid, the
+ *                    by-reference variant ath10k_wmi_tlv_op_gen_mgmt_tx_send
+ *                    builds; plain MGMT_TX would be 0x7006),
+ *   MGMT_TX_COMPL   = 0x7001 + 5 (wmi-tlv.h event enum: MGMT_RX 0x7001,
+ *                    HOST_SWBA 0x7002, TBTTOFFSET 0x7003, two offload
+ *                    statuses, then MGMT_TX_COMPLETION 0x7006). */
+#define WMI_PEER_SET_PARAM_CMDID      0x6004
+#define WMI_PEER_ASSOC_CMDID          0x6005
+#define WMI_MGMT_TX_SEND_CMDID        0x7008
+#define WMI_MGMT_TX_COMPL_EVENTID     0x7006
+/* wmi-tlv.h enum wmi_tlv_tag (verified against the Linux enum): */
+#define WMI_TLV_PEER_SET_PARAM_CMD    100   /* WMI_TLV_TAG_STRUCT_PEER_SET_PARAM_CMD */
+#define WMI_TLV_PEER_ASSOC_COMPLETE_CMD        101   /* WMI_TLV_TAG_STRUCT_PEER_ASSOC_COMPLETE_CMD */
+#define WMI_TLV_VHT_RATE_SET          102   /* WMI_TLV_TAG_STRUCT_VHT_RATE_SET */
+#define WMI_TLV_MGMT_TX_CMD           422   /* WMI_TLV_TAG_STRUCT_MGMT_TX_CMD */
+#define WMI_TLV_MGMT_TX_COMPL_EVENT   423   /* WMI_TLV_TAG_STRUCT_MGMT_TX_COMPL_EVENT */
 
 /* wmi-tlv.h: enum wmi_tlv_tag (values computed from the enum order) */
 /* wmi-tlv.h enum wmi_tlv_tag:
@@ -1722,6 +1749,806 @@ wcn3990_hif_start_scan(uint32_t dwell_ms)
 
 /* --------------------------------------------------------------- RX handling */
 
+/* =========================== join ===========================
+ * Grafted from the wlan-wip reference implementation
+ * (drivers/NativeWlan/WlanRadio.c, branch wlan-wip): authentication and
+ * association as management frames over WMI by reference, then
+ * ath10k_bss_assoc's peer assoc and vdev up.  The reference's per-function
+ * comment "wmi_tlv_op_gen_mgmt_tx_send: by reference, the first bytes also
+ * inline" matches ath10k_wmi_tlv_op_gen_mgmt_tx_send() (wmi-tlv.c:3087).
+ *
+ * Every path here is gated on the join=<n> boot-arg (n = 1-based BSS table
+ * entry, picked when a scan round completes).  join=0 or absent leaves the
+ * scan/HTT baseline untouched.
+ *
+ * Field-by-field ABI notes, checked against wlan-wip AND the local Linux
+ * refs (work/refs/ath10k/wmi-tlv.h):
+ *  - MGMT_TX_SEND (0x7008): TLV tag 422 (WMI_TLV_TAG_STRUCT_MGMT_TX_CMD),
+ *    struct wmi_tlv_mgmt_tx_cmd (wmi-tlv.h:2675) = vdev_id, desc_id,
+ *    chanfreq, paddr(8B), frame_len, buf_len = 28 bytes; then one
+ *    WMI_TLV_TAG_ARRAY_BYTE (17) TLV of min(frame,64) rounded to 4.
+ *  - MGMT_TX_COMPL (0x7006): TLV tag 423, wmi_tlv_mgmt_tx_compl_ev
+ *    {desc_id, status, pdev_id, ppdu_id, ack_rssi}; status != 0 is a fail.
+ *  - PEER_ASSOC (0x6005): TLV tag 101, 76 bytes, field-for-field the same
+ *    as struct wmi_tlv_peer_assoc_cmd (wmi-tlv.h:1899) = mac_addr(8),
+ *    vdev_id, new_assoc, assoc_id, flags, caps, listen_intval, ht_caps,
+ *    max_mpdu, mpdu_density, rate_caps, nss, vht_caps, phy_mode, ht_info[2],
+ *    num_legacy_rates, num_ht_rates; then ARRAY_BYTE legacy rates,
+ *    ARRAY_BYTE HT rates and tag 102 (WMI_TLV_TAG_STRUCT_VHT_RATE_SET, 16B
+ *    wmi_vht_rate_set: rx_max_rate, rx_mcs_set, tx_max_rate, tx_mcs_set).
+ *  - VDEV_UP (0x5005): TLV tag 92, struct wmi_vdev_up_cmd 16 bytes.
+ *  - PEER_SET_PARAM (0x6004): TLV tag 100, 20 bytes: vdev_id, mac(8B),
+ *    param_id, value. ==================================================== */
+
+#define HIF_JOIN_BSS_MAX   96u        /* wlan-wip: #define WS_BSS 96u */
+#define HIF_JOIN_IE_MAX    384u       /* wlan-wip: nw_bss_info.ie[384] */
+#define HIF_JOIN_SLOTS     8u         /* wlan-wip: WJ_MGMT_SLOTS */
+#define HIF_JOIN_SLOT      1024u      /* wlan-wip: WJ_MGMT_SLOT */
+
+enum hif_join_state {
+	HIF_JOIN_IDLE = 0,
+	HIF_JOIN_AUTH_SENT,           /* auth frame sent, waiting for 0xb0 */
+	HIF_JOIN_ASSOC_SENT,          /* assoc sent, waiting for 0x10/0x30 */
+	HIF_JOIN_ASSOC_OK             /* peer_assoc + VDEV_UP are out */
+};
+
+struct hif_join_bss {
+	uint8_t bssid[6];
+	uint8_t ssid_len;
+	uint8_t ssid[32];
+	uint32_t freq_mhz;
+	int8_t signal_dbm;
+	uint16_t caps, beacon_int;
+	uint16_t ie_len;
+	uint8_t ie[HIF_JOIN_IE_MAX];
+};
+
+/* Our HT and VHT capability, as the wlan-wip reference pins it (iw phy for
+ * this radio): A-MPDU exponent 3 with 8 us spacing, two streams. */
+#define HIF_JOIN_HT_CAP  0x19efu
+#define HIF_JOIN_VHT_CAP (0x739139b2u & ~(1u << 11 | 1u << 12 | 7u << 13 | \
+					   7u << 16 | 1u << 19 | 1u << 20))
+
+static int g_join;         /* join=<n>: 1-based BSS table entry; 0 = off */
+static struct hif_join_bss g_join_bss[HIF_JOIN_BSS_MAX];
+static uint32_t g_join_bss_count;
+static int g_join_state;
+static uint32_t g_join_seq;                 /* 802.11 sequence counter */
+static uint32_t g_join_tries;               /* auth/assoc retransmits */
+static uint32_t g_join_tx_at;               /* poll of the last frame sent */
+static uint32_t g_join_wait_at;             /* poll the current state began */
+static uint32_t g_join_mgmt_next;           /* rotating slot index */
+static uint32_t g_join_mgmt_tx, g_join_mgmt_ok, g_join_mgmt_fail;
+static const uint8_t g_join_mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+/* The access point being joined (copied out of the BSS table). */
+static struct {
+	struct hif_join_bss b;
+	uint8_t secure, wmm, ht, vht, width;
+	uint32_t center_mhz, mode;
+	uint16_t aid;
+	uint8_t rsn[22];           /* the RSN element we answer with */
+} g_join_ap;
+
+/* wlan-wip wj_ie(): find one information element in the AP's beacon. */
+static const uint8_t *
+hif_join_ie(uint8_t id)
+{
+	const uint8_t *e = g_join_ap.b.ie;
+	uint32_t at;
+
+	for (at = 0; at + 2u <= g_join_ap.b.ie_len &&
+	    at + 2u + e[at + 1] <= g_join_ap.b.ie_len;
+	    at += 2u + e[at + 1])
+		if (e[at] == id) return e + at;
+	return NULL;
+}
+
+/* wlan-wip wj_has_wmm(): the WMM element, vendor 00:50:f2 type 2. */
+static int
+hif_join_has_wmm(void)
+{
+	const uint8_t *e = g_join_ap.b.ie;
+	uint32_t at;
+
+	for (at = 0; at + 2u <= g_join_ap.b.ie_len &&
+	    at + 2u + e[at + 1] <= g_join_ap.b.ie_len;
+	    at += 2u + e[at + 1])
+		if (e[at] == 221 && e[at + 1] >= 5 && e[at + 2] == 0 &&
+		    e[at + 3] == 0x50 && e[at + 4] == 0xf2 && e[at + 5] == 2)
+			return 1;
+	return 0;
+}
+
+/* wlan-wip wj_channel_plan(): what the access point's beacon says about the
+ * link - 20, 40 or 80 MHz, the centre, and the phy mode number. */
+static void
+hif_join_channel_plan(void)
+{
+	const uint8_t *htop = hif_join_ie(61), *vhtop = hif_join_ie(192);
+	const uint32_t f = g_join_ap.b.freq_mhz;
+	const int five = f >= 4900;
+
+	g_join_ap.ht = hif_join_ie(45) != NULL;
+	g_join_ap.vht = five && g_join_ap.ht && hif_join_ie(191) != NULL;
+	g_join_ap.width = 20;
+	g_join_ap.center_mhz = f;
+	{
+		uint32_t chan = five ? (f - 5000u) / 5u : 0;
+
+		if (g_join_ap.ht && htop && htop[1] >= 2 && (htop[3] & 4) &&
+		    (htop[3] & 3)) {
+			g_join_ap.width = 40;
+			g_join_ap.center_mhz = (htop[3] & 3) == 1 ?
+			    f + 10u : f - 10u;
+		}
+		if (g_join_ap.vht && vhtop && vhtop[1] >= 3 && vhtop[2] >= 1 &&
+		    g_join_ap.width == 40) {
+			static const uint8_t centres[] =
+			    { 42, 58, 106, 122, 138, 155 };
+			uint32_t i;
+
+			for (i = 0; i < sizeof(centres); i++) {
+				if (chan + 6u >= centres[i] &&
+				    chan <= centres[i] + 6u) {
+					g_join_ap.width = 80;
+					g_join_ap.center_mhz =
+					    5000u + 5u * centres[i];
+				}
+			}
+		}
+	}
+	if (!five)
+		g_join_ap.mode = !g_join_ap.ht ? 1u :
+		    g_join_ap.width == 40 ? 7u : 5u;
+	else
+		g_join_ap.mode = !g_join_ap.ht ? 0u :
+		    g_join_ap.width == 80 ? 10u :
+		    g_join_ap.width == 40 ?
+		    (g_join_ap.vht ? 9u : 6u) : (g_join_ap.vht ? 8u : 4u);
+}
+
+/* wlan-wip wj_rsn_prepare(): only WPA2-Personal with CCMP pairwise and CCMP
+ * group, management protection not required.  Writes the 22-byte RSN element
+ * we answer with. */
+static int
+hif_join_rsn_prepare(const uint8_t *e)
+{
+	static const uint8_t oui[3] = { 0x00, 0x0f, 0xac };
+	static const uint8_t rsn[22] = {
+		48, 20, 1, 0,
+		0x00, 0x0f, 0xac, 4,          /* pairwise CCMP */
+		1, 0,
+		0x00, 0x0f, 0xac, 4,          /* group CCMP */
+		1, 0,
+		0x00, 0x0f, 0xac, 2,          /* PSK key management */
+		0, 0                          /* no RSN capabilities */
+	};
+	const uint8_t *p, *end;
+	unsigned n, found, i;
+
+	if (!e || e[1] < 18) return -1;
+	p = e + 2;
+	end = e + 2 + e[1];
+	p += 2;                                /* version */
+	if (memcmp(p, oui, 3) || p[3] != 4) return -1;
+	p += 4;
+	n = (unsigned)(p[0] | p[1] << 8);      /* pairwise cipher count */
+	found = 0;
+	p += 2;
+	if (end - p < (long)(4u * n + 2u)) return -1;
+	for (i = 0; i < n; i++, p += 4)
+		if (!memcmp(p, oui, 3) && p[3] == 4) found = 1;
+	if (!found) return -1;
+	n = (unsigned)(p[0] | p[1] << 8);      /* AKM count */
+	found = 0;
+	p += 2;
+	if (end - p < (long)(4u * n)) return -1;
+	for (i = 0; i < n; i++, p += 4)
+		if (!memcmp(p, oui, 3) && p[3] == 2) found = 1;
+	if (!found) return -1;
+	if (end - p >= 2 && (p[0] & 0x40)) return -1;  /* PMF required */
+	memcpy(g_join_ap.rsn, rsn, sizeof(rsn));
+	return 0;
+}
+
+/* wlan-wip wj_mgmt_header(): a 24-byte management header to the AP. */
+static void
+hif_join_mgmt_header(uint8_t *f, uint8_t type)
+{
+	uint16_t seq;
+
+	memset(f, 0, 24);
+	f[0] = type;
+	memcpy(f + 4, g_join_ap.b.bssid, 6);
+	memcpy(f + 10, g_join_mac, 6);
+	memcpy(f + 16, g_join_ap.b.bssid, 6);
+	seq = (uint16_t)(g_join_seq++ << 4);
+	f[22] = (uint8_t)seq;
+	f[23] = (uint8_t)(seq >> 8);
+}
+
+/* wlan-wip wj_send_mgmt(): WMI_MGMT_TX_SEND, by reference.  The frame body
+ * goes into one of eight rotating DMA slots; the WMI command carries the
+ * slot's physical address plus the first <= 64 bytes inline. */
+static void
+hif_join_send_mgmt(const uint8_t *f, uint32_t n)
+{
+	struct {
+		uint32_t vdev_id;
+		uint32_t desc_id;
+		uint32_t chanfreq;
+		uint64_t paddr;
+		uint32_t frame_len;
+		uint32_t buf_len;
+	} __attribute__((packed)) cmd;         /* wmi_tlv_mgmt_tx_cmd, 28 B */
+	uint8_t tlv[128], inline_buf[64];
+	uint8_t *p = tlv;
+	uint32_t slot, inline_bytes;
+	uint64_t pa;
+
+	if (g_dma == NULL || n == 0 || n > HIF_JOIN_SLOT) return;
+	slot = g_join_mgmt_next++ % HIF_JOIN_SLOTS;
+	memcpy(g_dma->mgmt_tx[slot], f, n);
+	hif_mb();      /* the CE fetches the slot by DMA, not through our map */
+	pa = hif_pa_of(g_dma->mgmt_tx[slot]);
+	inline_bytes = (n < 64u ? n : 64u);
+	inline_bytes = (inline_bytes + 3u) & ~3u;
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.vdev_id = 0;
+	cmd.desc_id = slot;
+	cmd.chanfreq = 0;
+	cmd.paddr = pa;
+	cmd.frame_len = n;
+	cmd.buf_len = inline_bytes;
+	memset(inline_buf, 0, sizeof(inline_buf));
+	memcpy(inline_buf, f, n < inline_bytes ? n : inline_bytes);
+	p = hif_put_tlv(p, WMI_TLV_MGMT_TX_CMD, (uint16_t)sizeof(cmd), &cmd);
+	p = hif_put_tlv(p, WMI_TLV_ARRAY_BYTE, (uint16_t)inline_bytes,
+	    inline_buf);
+	g_join_mgmt_tx++;
+	HIF_LOG("JOIN: MGMT_TX slot=%u pa=%llx frame=%u inline=%u (%u TLV bytes)",
+	    slot, (unsigned long long)pa, n, inline_bytes,
+	    (unsigned)(p - tlv));
+	(void)hif_wmi_command(WMI_MGMT_TX_SEND_CMDID, tlv,
+	    (uint32_t)(p - tlv));
+}
+
+/* wlan-wip wj_send_auth(): 30-byte open-system authentication, transaction 1. */
+static void
+hif_join_send_auth(void)
+{
+	uint8_t f[30];
+
+	hif_join_mgmt_header(f, 0xb0);
+	memset(f + 24, 0, 6);
+	f[26] = 1;             /* open system, transaction 1 */
+	hif_join_send_mgmt(f, sizeof(f));
+}
+
+/* wlan-wip wj_send_assoc(): capability, listen interval, SSID, rates, power
+ * and channels if the AP manages spectrum, RSN, HT, VHT and WMM. */
+static void
+hif_join_send_assoc(void)
+{
+	static uint8_t f[600];
+	uint8_t rates[16], nr = 0, pass;
+	uint16_t apcap = g_join_ap.b.caps;
+	int five = g_join_ap.b.freq_mhz >= 4900;
+	uint16_t cap = (uint16_t)(1u | (g_join_ap.secure ? 0x10u : 0) |
+	    (apcap & 0x20u) |
+	    (!five ? (apcap & 0x400u) : 0) |
+	    (five ? (apcap & 0x100u) : 0));
+	uint32_t at = 28;
+
+	hif_join_mgmt_header(f, 0x00);
+	f[24] = (uint8_t)cap;
+	f[25] = (uint8_t)(cap >> 8);
+	f[26] = 10;            /* listen interval */
+	f[27] = 0;
+	f[at++] = 0;           /* SSID element */
+	f[at++] = g_join_ap.b.ssid_len;
+	memcpy(f + at, g_join_ap.b.ssid, g_join_ap.b.ssid_len);
+	at += g_join_ap.b.ssid_len;
+	/* The access point's rates that this radio has, plain (no basic bit). */
+	for (pass = 0; pass < 2; pass++) {
+		const uint8_t *e = hif_join_ie(pass ? 50 : 1);
+		uint32_t i;
+
+		for (i = 0; e && i < e[1] && nr < sizeof(rates); i++) {
+			const uint8_t r = e[2 + i] & 0x7f;
+
+			if (r == 2 || r == 4 || r == 11 || r == 22) {
+				if (!five) rates[nr++] = r;
+			} else if (r == 12 || r == 18 || r == 24 ||
+			    r == 36 || r == 48 || r == 72 || r == 96 ||
+			    r == 108)
+				rates[nr++] = r;
+		}
+	}
+	{
+		const uint8_t first = nr < 8 ? nr : 8;
+
+		f[at++] = 1;
+		f[at++] = first;
+		memcpy(f + at, rates, first);
+		at += first;
+		if (nr > 8) {
+			f[at++] = 50;
+			f[at++] = (uint8_t)(nr - 8u);
+			memcpy(f + at, rates + 8, nr - 8u);
+			at += nr - 8u;
+		}
+	}
+	if (cap & 0x100u) {    /* spectrum managed: power + channels elements */
+		static const uint8_t power[4] = { 33, 2, 0, 20 };
+		static const uint8_t channels[10] =
+		    { 36, 8, 36, 4, 52, 4, 100, 12, 149, 5 };
+
+		memcpy(f + at, power, sizeof(power));
+		at += sizeof(power);
+		memcpy(f + at, channels, sizeof(channels));
+		at += sizeof(channels);
+	}
+	if (g_join_ap.secure) {
+		memcpy(f + at, g_join_ap.rsn, sizeof(g_join_ap.rsn));
+		at += sizeof(g_join_ap.rsn);
+	}
+	if (g_join_ap.ht) {
+		const uint16_t ht = g_join_ap.width >= 40 ? HIF_JOIN_HT_CAP :
+		    HIF_JOIN_HT_CAP & ~0x42u;   /* no 40 MHz claim on 20 MHz */
+
+		f[at++] = 45;
+		f[at++] = 26;
+		memset(f + at, 0, 26);
+		f[at] = (uint8_t)ht;
+		f[at + 1] = (uint8_t)(ht >> 8);
+		f[at + 2] = 0x1b;
+		f[at + 3] = f[at + 4] = 0xff;
+		f[at + 15] = 1;    /* transmit MCS set defined */
+		at += 26;
+	}
+	if (g_join_ap.vht) {
+		const uint32_t vht = HIF_JOIN_VHT_CAP;
+
+		f[at++] = 191;
+		f[at++] = 12;
+		f[at] = (uint8_t)vht;
+		f[at + 1] = (uint8_t)(vht >> 8);
+		f[at + 2] = (uint8_t)(vht >> 16);
+		f[at + 3] = (uint8_t)(vht >> 24);
+		f[at + 4] = 0xfa;
+		f[at + 5] = 0xff;
+		f[at + 6] = f[at + 7] = 0;
+		f[at + 8] = 0xfa;
+		f[at + 9] = 0xff;
+		f[at + 10] = f[at + 11] = 0;
+		at += 12;
+	}
+	if (g_join_ap.wmm) {
+		static const uint8_t wmm[9] =
+		    { 221, 7, 0x00, 0x50, 0xf2, 2, 0, 1, 0 };
+
+		memcpy(f + at, wmm, sizeof(wmm));
+		at += sizeof(wmm);
+	}
+	HIF_LOG("JOIN: assoc sent (%u bytes, cap=%04x)", at, cap);
+	hif_join_send_mgmt(f, at);
+}
+
+/* wlan-wip wj_peer_param(): WMI_PEER_SET_PARAM. */
+static void
+hif_join_peer_param(uint32_t id, uint32_t value)
+{
+	struct {
+		uint32_t vdev_id;
+		uint8_t mac[8];        /* wmi_mac_addr is 8 bytes */
+		uint32_t param_id;
+		uint32_t value;
+	} __attribute__((packed)) cmd;         /* 20 bytes */
+	uint8_t tlv[32];
+	uint8_t *p = tlv;
+
+	memset(tlv, 0, sizeof(tlv));
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.vdev_id = 0;
+	memcpy(cmd.mac, g_join_ap.b.bssid, 6);
+	cmd.param_id = id;
+	cmd.value = value;
+	p = hif_put_tlv(p, WMI_TLV_PEER_SET_PARAM_CMD, 20, &cmd);
+	HIF_LOG("JOIN: peer param %u=%u", id, value);
+	(void)hif_wmi_command(WMI_PEER_SET_PARAM_CMDID, tlv,
+	    (uint32_t)(p - tlv));
+}
+
+/* wlan-wip wj_send_peer_assoc(): ath10k_peer_assoc_prepare - the AP's
+ * beacon capabilities narrowed to this radio's, as peer_assoc_h_* fields. */
+static void
+hif_join_send_peer_assoc(void)
+{
+	uint32_t flags = 1u, rate_caps = 0, max_mpdu = 0, density = 0, nss = 1;
+	uint32_t ht_caps = 0, vht_caps = 0, vht_rx = 0, vht_tx = 0;
+	uint32_t vht_rx_max = 0, vht_tx_max = 0;
+	uint8_t legacy[16], ht_rates[16], nl = 0, nh = 0;
+	int five = g_join_ap.b.freq_mhz >= 4900;
+	uint32_t phy;
+	uint8_t tlv[256], *p = tlv, pass;
+	uint32_t lr, hr;
+	uint8_t *at;
+	const uint8_t *ht = hif_join_ie(45);
+
+	if (g_join_ap.secure) flags |= 4u;
+	if (g_join_ap.wmm) flags |= 2u;
+	for (pass = 0; pass < 2; pass++) {
+		const uint8_t *e = hif_join_ie(pass ? 50 : 1);
+		uint32_t i;
+
+		for (i = 0; e && i < e[1] && nl < 12; i++) {
+			const uint8_t r = e[2 + i] & 0x7f;
+			const int cck = r == 2 || r == 4 || r == 11 || r == 22;
+
+			if (cck && five) continue;
+			if (cck || r == 12 || r == 18 || r == 24 ||
+			    r == 36 || r == 48 || r == 72 || r == 96 ||
+			    r == 108)
+				legacy[nl++] = cck ? (r | 0x80) : r;
+		}
+	}
+	if (g_join_ap.ht && ht && ht[1] >= 26) {
+		uint32_t cap = (uint32_t)(ht[2] | ht[3] << 8);
+		const uint8_t ampdu = ht[4];
+		const uint8_t m0 = ht[5], m1 = ht[6];
+		uint8_t d;
+		uint32_t i;
+
+		if (g_join_ap.width < 40) cap &= ~0x42u;
+		flags |= 0x1000u;
+		rate_caps |= 8u;
+		max_mpdu = (1u << (13u + (ampdu & 3u))) - 1u;
+		d = (ampdu >> 2) & 7u;
+		density = d == 0 ? 0u : d <= 3 ? 1u :
+		    d == 4 ? 2u : d == 5 ? 4u : d == 6 ? 8u : 16u;
+		if (cap & 1u) flags |= 0x10000u;
+		if (g_join_ap.width >= 40) {
+			flags |= 0x2000u;
+			rate_caps |= 2u;
+		}
+		if ((cap & 0x20u) || (cap & 0x40u)) rate_caps |= 4u;
+		if (cap & 0x80u) {
+			rate_caps |= 0x20u;
+			flags |= 0x8000u;
+		}
+		if (cap & 0x300u) {
+			rate_caps |= ((cap >> 8) & 3u) << 6;
+			flags |= 0x8000u;
+		}
+		if (m1) rate_caps |= 1u;
+		for (i = 0; i < 16; i++) {
+			if (((i < 8 ? m0 : m1) >> (i % 8)) & 1u) {
+				ht_rates[nh++] = (uint8_t)i;
+				nss = i / 8u + 1u;
+			}
+		}
+		if (!nh) for (nh = 0; nh < 8; nh++) ht_rates[nh] = nh;
+		ht_caps = cap;
+	}
+	{
+		const uint8_t *vht = hif_join_ie(191);
+
+		if (g_join_ap.vht && vht && vht[1] >= 12) {
+			uint32_t factor, mpdu;
+			unsigned streams = 0, i;
+
+			vht_caps = (uint32_t)(vht[2] | vht[3] << 8 |
+			    vht[4] << 16 | vht[5] << 24);
+			vht_caps &= ~(1u << 11 | 1u << 12 | 7u << 13 |
+			    7u << 16 | 1u << 19 | 1u << 20);
+			flags |= 0x2000000u;
+			factor = (vht_caps >> 23) & 7u;
+			mpdu = (1u << (13u + factor)) - 1u;
+			if (mpdu > max_mpdu) max_mpdu = mpdu;
+			if (g_join_ap.width == 80) flags |= 0x4000000u;
+			vht_rx = (uint32_t)(vht[6] | vht[7] << 8);
+			vht_rx_max = (uint32_t)(vht[8] | vht[9] << 8);
+			vht_tx = (uint32_t)(vht[10] | vht[11] << 8);
+			vht_tx_max = (uint32_t)(vht[12] | vht[13] << 8);
+			/* Beyond two streams this radio has nothing. */
+			vht_rx |= 0xfff0u;
+			vht_tx |= 0xfff0u;
+			for (i = 0; i < 2; i++)
+				if (((vht_rx >> (2 * i)) & 3u) != 3u)
+					streams = i + 1u;
+			if (streams) nss = streams;
+		}
+	}
+	if (nss > 2) nss = 2;
+	phy = g_join_ap.mode;
+	/* struct wmi_tlv_peer_assoc_cmd, 76 bytes, in wlan-wip's order:
+	 * mac(8) vdev new_assoc assoc_id flags caps listen ht_caps max_mpdu
+	 * density rate_caps nss vht_caps phy ht_info[2](zero) num_legacy
+	 * num_ht. */
+	memset(tlv, 0, sizeof(tlv));
+	hif_put_tlv(p, WMI_TLV_PEER_ASSOC_COMPLETE_CMD, 76, NULL);
+	memcpy(tlv + 4, g_join_ap.b.bssid, 6);          /* mac_addr */
+	hif_put32(tlv + 4 + 8, 0);                      /* vdev_id */
+	hif_put32(tlv + 16, 1);                         /* new_assoc */
+	hif_put32(tlv + 20, g_join_ap.aid);             /* assoc_id */
+	hif_put32(tlv + 24, flags);
+	hif_put32(tlv + 28, g_join_ap.b.caps);
+	hif_put32(tlv + 32, 10);                        /* listen_intval */
+	hif_put32(tlv + 36, ht_caps);
+	hif_put32(tlv + 40, max_mpdu);
+	hif_put32(tlv + 44, density);
+	hif_put32(tlv + 48, rate_caps);
+	hif_put32(tlv + 52, nss);
+	hif_put32(tlv + 56, vht_caps);
+	hif_put32(tlv + 60, phy);
+	/* +64..71 ht_info[2] stay zero */
+	hif_put32(tlv + 72, nl);                        /* num_legacy_rates */
+	hif_put32(tlv + 76, nh);                        /* num_ht_rates */
+	lr = (nl + 3u) & ~3u;
+	hr = (nh + 3u) & ~3u;
+	at = hif_put_tlv(tlv + 80, WMI_TLV_ARRAY_BYTE, (uint16_t)lr, legacy);
+	at = hif_put_tlv(at, WMI_TLV_ARRAY_BYTE, (uint16_t)hr, ht_rates);
+	{
+		uint32_t v[4];
+
+		v[0] = vht_rx_max;
+		v[1] = vht_rx;
+		v[2] = vht_tx_max;
+		v[3] = vht_tx;
+		at = hif_put_tlv(at, WMI_TLV_VHT_RATE_SET, 16, v);
+	}
+	HIF_LOG("JOIN: peer_assoc flags=%08x caps=%08x mode=%u nss=%u "
+	    "legacy=%u ht=%u ht_caps=%08x vht_caps=%08x mpdu=%u density=%u",
+	    flags, rate_caps, phy, nss, nl, nh, ht_caps, vht_caps, max_mpdu,
+	    density);
+	(void)hif_wmi_command(WMI_PEER_ASSOC_CMDID, tlv, (uint32_t)(at - tlv));
+	if (g_join_ap.ht && ht) {
+		/* ath10k_smps_map */
+		static const uint8_t smps[4] = { 1, 2, 0, 0 };
+
+		hif_join_peer_param(1, smps[(ht_caps >> 2) & 3u]);
+	}
+}
+
+/* wlan-wip wj_send_vdev_up(): VDEV_UP with the associated AID and BSSID. */
+static void
+hif_join_send_vdev_up(void)
+{
+	struct {
+		uint32_t vdev_id;
+		uint32_t assoc_id;
+		uint8_t bssid[8];      /* wmi_mac_addr is 8 bytes */
+	} __attribute__((packed)) cmd;
+	uint8_t tlv[32];
+	uint8_t *p = tlv;
+
+	memset(tlv, 0, sizeof(tlv));
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.vdev_id = 0;
+	cmd.assoc_id = g_join_ap.aid;
+	memcpy(cmd.bssid, g_join_ap.b.bssid, 6);
+	p = hif_put_tlv(p, WMI_TLV_VDEV_UP_CMD, 16, &cmd);
+	HIF_LOG("JOIN: vdev up sent (aid=%u bssid=%02x:%02x:%02x:%02x:%02x:%02x)",
+	    g_join_ap.aid, (unsigned)g_join_ap.b.bssid[0],
+	    (unsigned)g_join_ap.b.bssid[1], (unsigned)g_join_ap.b.bssid[2],
+	    (unsigned)g_join_ap.b.bssid[3], (unsigned)g_join_ap.b.bssid[4],
+	    (unsigned)g_join_ap.b.bssid[5]);
+	(void)hif_wmi_command(WMI_VDEV_UP_CMDID, tlv, (uint32_t)(p - tlv));
+}
+
+static void
+hif_join_reset(const char *why)
+{
+	HIF_LOG("JOIN: stopped in state %d (%s)", g_join_state, why);
+	memset(&g_join_ap, 0, sizeof(g_join_ap));
+	g_join_state = HIF_JOIN_IDLE;
+	g_join_tries = 0;
+}
+
+/* wlan-wip wj_begin() narrowed to this phase: pick the BSS table entry,
+ * derive the link plan from its beacon and send the authentication frame. */
+static void
+hif_join_begin(void)
+{
+	const struct hif_join_bss *b = &g_join_bss[g_join - 1];
+	const uint8_t *rsn;
+
+	memset(&g_join_ap, 0, sizeof(g_join_ap));
+	memcpy(&g_join_ap.b, b, sizeof(*b));
+	g_join_ap.wmm = (uint8_t)hif_join_has_wmm();
+	hif_join_channel_plan();
+	rsn = hif_join_ie(48);
+	g_join_ap.secure = rsn != NULL;
+	if (g_join_ap.secure && hif_join_rsn_prepare(rsn)) {
+		HIF_LOG("JOIN: only WPA2-Personal with CCMP is handled here");
+		g_join_state = HIF_JOIN_IDLE;
+		memset(&g_join_ap, 0, sizeof(g_join_ap));
+		return;
+	}
+	g_join_seq = 0;
+	g_join_tries = 0;
+	g_join_tx_at = g_join_wait_at = g_polls;
+	g_join_state = HIF_JOIN_AUTH_SENT;
+	HIF_LOG("JOIN: entry %d bssid %02x:%02x:%02x:%02x:%02x:%02x "
+	    "ssid '%.*s' freq %u rssi %d, %u MHz wide at %u mode %u ht %u "
+	    "vht %u wmm %u, %s",
+	    g_join, (unsigned)b->bssid[0], (unsigned)b->bssid[1],
+	    (unsigned)b->bssid[2], (unsigned)b->bssid[3],
+	    (unsigned)b->bssid[4], (unsigned)b->bssid[5],
+	    b->ssid_len, b->ssid, b->freq_mhz, (int)b->signal_dbm,
+	    g_join_ap.width, g_join_ap.center_mhz, g_join_ap.mode,
+	    g_join_ap.ht, g_join_ap.vht, g_join_ap.wmm,
+	    g_join_ap.secure ? "WPA2" : "open");
+	HIF_LOG("JOIN: auth sent");
+	hif_join_send_auth();
+}
+
+/* wlan-wip wj_step()'s WJ_AUTH/WJ_ASSOC timing: retransmit every 300 ms,
+ * give up after 8 tries or 3 s in one state.  Driven by the 1 ms poll. */
+static void
+hif_join_poll(void)
+{
+	if (g_state != HIF_READY || g_join_state == HIF_JOIN_IDLE ||
+	    g_join_state == HIF_JOIN_ASSOC_OK)
+		return;
+	if (g_polls - g_join_tx_at >= 300) {
+		if (++g_join_tries >= 8) {
+			hif_join_reset("no answer after 8 tries");
+			return;
+		}
+		if (g_join_state == HIF_JOIN_AUTH_SENT) {
+			HIF_LOG("JOIN: auth retransmit %u", g_join_tries);
+			hif_join_send_auth();
+		} else {
+			HIF_LOG("JOIN: assoc retransmit %u", g_join_tries);
+			hif_join_send_assoc();
+		}
+		g_join_tx_at = g_polls;
+	}
+	if (g_polls - g_join_wait_at >= 3000)
+		hif_join_reset("timeout in state");
+}
+
+/* The event's channel: this firmware's MGMT_RX_HDR reports MHz (existing
+ * hif_handle_mgmt_rx logs it as freq).  The wlan-wip reference received a
+ * channel NUMBER and converted ch14=2484 / <14 -> 2407+5ch / 5G -> 5000+5ch;
+ * keep that path in case a value below 1000 arrives. */
+static uint32_t
+hif_join_freq(uint32_t channel)
+{
+	if (channel >= 1000) return channel;
+	if (channel == 14) return 2484;
+	if (channel < 14) return 2407 + 5u * channel;
+	return 5000 + 5u * channel;
+}
+
+/* wlan-wip ws_bss_note(): cfg80211_inform_bss from a beacon or probe
+ * response - the fixed fields and the whole elements after the 24-byte
+ * header and 12 fixed bytes.  Linear scan for the BSSID. */
+static void
+hif_join_bss_note(const uint8_t *f, uint32_t n, uint32_t channel,
+    int32_t rssi)
+{
+	const uint8_t *bssid, *ies;
+	uint32_t ie_len, kept = 0, at, freq;
+	struct hif_join_bss *b;
+
+	if (n < 36 || channel == 0) return;
+	bssid = f + 16;
+	ies = f + 36;
+	ie_len = n - 36;
+	/* Whole elements only: a truncated last one would read as malformed. */
+	while (kept + 2u <= ie_len &&
+	    kept + 2u + ies[kept + 1] <= ie_len &&
+	    kept + 2u + ies[kept + 1] <= HIF_JOIN_IE_MAX)
+		kept += 2u + ies[kept + 1];
+	freq = hif_join_freq(channel);
+	at = 0;
+	while (at < g_join_bss_count &&
+	    memcmp(g_join_bss[at].bssid, bssid, 6)) at++;
+	if (at == HIF_JOIN_BSS_MAX) return;    /* table full */
+	if (at == g_join_bss_count) g_join_bss_count++;
+	b = &g_join_bss[at];
+	memset(b, 0, sizeof(*b));
+	memcpy(b->bssid, bssid, 6);
+	b->freq_mhz = freq;
+	b->signal_dbm = (int8_t)rssi;
+	b->beacon_int = (uint16_t)(f[32] | (uint16_t)f[33] << 8);
+	b->caps = (uint16_t)(f[34] | (uint16_t)f[35] << 8);
+	b->ie_len = (uint16_t)kept;
+	memcpy(b->ie, ies, kept);
+	if (kept >= 2 && ies[0] == 0 && ies[1] <= 32) {
+		b->ssid_len = ies[1];
+		memcpy(b->ssid, ies + 2, ies[1]);
+	}
+	if (at == g_join_bss_count - 1) {      /* first time heard */
+		HIF_LOG("JOIN: bss[%u] %02x:%02x:%02x:%02x:%02x:%02x "
+		    "ssid '%.*s' freq %u rssi %d beacons=%u",
+		    at + 1, (unsigned)bssid[0], (unsigned)bssid[1],
+		    (unsigned)bssid[2], (unsigned)bssid[3],
+		    (unsigned)bssid[4], (unsigned)bssid[5], b->ssid_len,
+		    b->ssid, freq, (int)rssi, g_beacons);
+		/* The target entry may be heard after the scan-completed
+		 * event of the boot's only autoscan round; joining then
+		 * would wait forever.  Second trigger path: the moment the
+		 * named entry exists. */
+		if (g_join && at + 1 == (uint32_t)g_join &&
+		    g_state == HIF_READY && g_join_state == HIF_JOIN_IDLE)
+			hif_join_begin();
+	}
+}
+
+/* wlan-wip wj_mgmt(): the access point's answers to our join frames. */
+static void
+hif_join_resp(const uint8_t *f, uint32_t n)
+{
+	uint8_t type;
+
+	if (n < 24 || g_join_state < HIF_JOIN_AUTH_SENT ||
+	    g_join_state > HIF_JOIN_ASSOC_OK ||
+	    memcmp(f + 10, g_join_ap.b.bssid, 6))
+		return;
+	type = f[0] & 0xfc;
+	if (type == 0xb0 && g_join_state == HIF_JOIN_AUTH_SENT && n >= 30) {
+		uint16_t transaction, status;
+
+		transaction = (uint16_t)(f[26] | (uint16_t)f[27] << 8);
+		if (transaction != 2) return;
+		status = (uint16_t)(f[28] | (uint16_t)f[29] << 8);
+		HIF_LOG("JOIN: auth resp status=%d after %u tries",
+		    (int)status, g_join_tries + 1u);
+		if (status) {
+			hif_join_reset("authentication refused");
+			return;
+		}
+		g_join_tries = 0;
+		g_join_tx_at = g_join_wait_at = g_polls;
+		g_join_state = HIF_JOIN_ASSOC_SENT;
+		hif_join_send_assoc();
+		return;
+	}
+	if ((type == 0x10 || type == 0x30) &&
+	    g_join_state == HIF_JOIN_ASSOC_SENT && n >= 30) {
+		uint16_t status = (uint16_t)(f[26] | (uint16_t)f[27] << 8);
+
+		HIF_LOG("JOIN: assoc resp status=%d aid=%d", (int)status,
+		    (int)((f[28] | (uint16_t)f[29] << 8) & 0x3fffu));
+		if (status) {
+			hif_join_reset("association refused");
+			return;
+		}
+		g_join_ap.aid =
+		    (uint16_t)((f[28] | (uint16_t)f[29] << 8) & 0x3fffu);
+		/* ath10k_bss_assoc: peer assoc, vdev up, the ps workaround. */
+		hif_join_send_peer_assoc();
+		hif_join_send_vdev_up();
+		hif_join_peer_param(0xff, 1);
+		/* No key handshake in this phase: an open AP is usable, a
+		 * WPA2 AP stops here (peer assoc'd, vdev up, unauthorized
+		 * for data) - the 0xb0 checkpoint above already proved the
+		 * mgmt TX path. */
+		if (g_join_ap.secure)
+			HIF_LOG("JOIN: secure AP, key handshake not in this "
+			    "phase, stopping after vdev up");
+		else
+			hif_join_peer_param(3, 1);  /* PEER_AUTHORIZE */
+		g_join_tx_at = g_join_wait_at = g_polls;
+		g_join_state = HIF_JOIN_ASSOC_OK;
+		return;
+	}
+	if (type == 0xc0 || type == 0xa0) {
+		uint16_t reason = n >= 26 ?
+		    (uint16_t)(f[24] | (uint16_t)f[25] << 8) : 0;
+
+		HIF_LOG("JOIN: access point ended it, frame 0x%x reason %u",
+		    type, reason);
+		hif_join_reset("deauth/disassoc");
+	}
+}
+
+/* ========================= join (end) ======================= */
+
 static void
 hif_handle_mgmt_rx(const uint8_t *tlvs, uint32_t len)
 {
@@ -1783,6 +2610,17 @@ hif_handle_mgmt_rx(const uint8_t *tlvs, uint32_t len)
 		uint16_t freq = (channel > 1000 && channel < 6000) ? (uint16_t)channel : 2412;
 		g_frame_sink(frame, (size_t)buf_len, (int16_t)rssi, freq);
 		g_beacons++;
+	}
+	/* join=<n>: fill the BSS table from beacons/probe responses and watch
+	 * for the access point's answers to the join sequence.  Nothing here
+	 * runs unless the boot-arg enabled the join. */
+	if (g_join && buf_len >= 24) {
+		uint8_t type = frame[0] & 0xfc;
+
+		if (type == 0x80 || type == 0x50)
+			hif_join_bss_note(frame, buf_len, channel, (int32_t)rssi);
+		else
+			hif_join_resp(frame, buf_len);
 	}
 }
 
@@ -1905,6 +2743,33 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 	case WMI_MGMT_RX_EVENTID:
 		hif_handle_mgmt_rx(payload + 4, len - 4);
 		break;
+	case WMI_MGMT_TX_COMPL_EVENTID: {
+		/* wlan-wip wj_wmi_event(): TLV tag 423,
+		 * wmi_tlv_mgmt_tx_compl_ev {desc_id, status, ...}; status != 0
+		 * means the target did not send the frame.  Only reachable
+		 * after a join sent MGMT_TX_SEND. */
+		uint32_t off = 4;
+
+		if (!g_join) break;
+		while (off + 4 <= len) {
+			uint32_t tlv_len = hif_le16(payload + off);
+			uint16_t tag = hif_le16(payload + off + 2);
+
+			if (off + 4 + tlv_len > len) break;
+			if (tag == WMI_TLV_MGMT_TX_COMPL_EVENT && tlv_len >= 8) {
+				uint32_t status = hif_le32(payload + off + 8);
+
+				if (status) g_join_mgmt_fail++;
+				else g_join_mgmt_ok++;
+				HIF_LOG("JOIN: mgmt tx compl desc=%u status=%u "
+				    "(ok=%u fail=%u)",
+				    hif_le32(payload + off + 4), status,
+				    g_join_mgmt_ok, g_join_mgmt_fail);
+			}
+			off += 4 + tlv_len;
+		}
+		break;
+	}
 	case WMI_SCAN_EVENTID:
 		/* TLV, not a flat struct: payload is the 4-byte WMI header, then
 		 * a 4-byte TLV header, then struct wmi_scan_event
@@ -1925,6 +2790,21 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 		 * offsets can be checked against the firmware's own bytes. */
 		hif_dump_hex("WMI scan ev", payload, len < 40 ? len : 40);
 		g_scan_active = false;
+		/* join=<n>: a completed scan round is the trigger.  Join the
+		 * 1-based BSS table entry the boot-arg named, if it exists. */
+		if (g_join && len >= 16 && hif_le32(payload + 8) == 0 &&
+		    g_state == HIF_READY &&
+		    g_join_state == HIF_JOIN_IDLE &&
+		    g_join_bss_count >= (uint32_t)g_join) {
+			hif_join_begin();
+		} else if (g_join && len >= 16 &&
+		    hif_le32(payload + 8) == 0 &&
+		    g_join_state == HIF_JOIN_IDLE &&
+		    g_join_bss_count < (uint32_t)g_join) {
+			HIF_LOG("JOIN: entry %d not in the BSS table yet "
+			    "(%u heard), waiting for the next scan",
+			    g_join, g_join_bss_count);
+		}
 		break;
 	default:
 		HIF_LOG("WMI: event 0x%x (%u bytes)", event_id, len);
@@ -2066,12 +2946,20 @@ wcn3990_hif_poll(void)
 	 * the corresponding stage is entered. */
 	if ((g_polls % 1000) == 0) {
 		HIF_LOG("heartbeat polls=%u stage=%d state=%d rx=%u beacons=%u "
-		    "desc0.nbytes=%u drri=%x htt=%u httidx=%u mgmt=%u mgmtev=%u",
+		    "desc0.nbytes=%u drri=%x htt=%u httidx=%u mgmt=%u mgmtev=%u "
+		    "join=%d",
 		    g_polls, g_stage, (int)g_state, g_rx_packets, g_beacons,
 		    (unsigned)s_dst2[0].nbytes,
 		    g_bases_programmed ? hif_reg_read(2, CE_CURRENT_DRRI) : 0,
 		    g_htt_rx, g_dma ? g_dma->htt_alloc_idx : 0, g_mgmt_seen,
-		    g_mgmt_events);
+		    g_mgmt_events, g_join_state);
+		/* join=<n>: a compact status line while a join is running. */
+		if (g_join && g_join_state != HIF_JOIN_IDLE) {
+			HIF_LOG("JOIN: state=%d tries=%u bss=%u mgmt "
+			    "tx=%u ok=%u fail=%u",
+			    g_join_state, g_join_tries, g_join_bss_count,
+			    g_join_mgmt_tx, g_join_mgmt_ok, g_join_mgmt_fail);
+		}
 		/* The other dst pipes' DDR read indices: a moving index means the
 		 * target consumed a buffer there, which the bring-up wants to
 		 * know about even though nothing drains those rings yet. */
@@ -2123,6 +3011,9 @@ wcn3990_hif_poll(void)
 			(void)wcn3990_hif_start_scan(40);
 		}
 	}
+	/* join=<n>: drive the auth/assoc state machine on the 1 ms tick
+	 * (wlan-wip wj_step()'s retransmit/timeout timing). */
+	if (g_join) hif_join_poll();
 	if (g_scan_active) {
 		g_scan_polls++;
 		/* Record what the target does with the scan command before the
@@ -2598,14 +3489,22 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("scanfix", &v, sizeof(v)) && v <= 63) {
 		g_scan_fix = (int)v;
 	}
+	/* join=N: after a scan round completes, authenticate and associate
+	 * with BSS table entry N (1-based, order of first hearing).  0 or
+	 * absent = off, baseline behaviour unchanged. */
+	v = 0;
+	if (PE_parse_boot_argn("join", &v, sizeof(v)) &&
+	    v <= (uint32_t)HIF_JOIN_BSS_MAX) {
+		g_join = (int)v;
+	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
 	    "wmiinit=%d; scanchans=%d; tlvpad=%d; chanlist=%d; vdevup=%d; "
 	    "scanlinux=%d; httconn=%d; httsetup=%d; httring=%d; scanwait=%d; "
-	    "scanfix=%d",
+	    "scanfix=%d; join=%d",
 	    g_tx3_rotate ? "8 rotating" : "single (legacy)", g_autoscan,
 	    g_ready_stop, g_vdev_pre, g_wmi_init_full, g_scan_chans,
 	    g_tlv_pad, g_chan_list, g_vdev_up, g_scan_linux, g_htt_connect,
-	    g_htt_setup, g_htt_ring, g_scan_wait, g_scan_fix);
+	    g_htt_setup, g_htt_ring, g_scan_wait, g_scan_fix, g_join);
 	{
 		uint64_t dma_pa = 0;
 		g_dma = (struct hif_dma_block *)picasso_wlan_ce_dma_alloc(
