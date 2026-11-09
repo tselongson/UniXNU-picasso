@@ -482,6 +482,13 @@ static int g_scan_chans = -1; /* scanchans=N: cap the START_SCAN channel list */
  * with a 2-byte tail that cannot even hold a TLV header.  tlvpad=1 restores
  * the old behaviour as an in-chain negative control. */
 static int g_tlv_pad;         /* 0 = Linux-exact TLV lengths */
+/* 526+: byte-for-byte alignment with the other WCN3990 port
+ * (work/trogdor/coachz_wifi.c, SC7180) and Linux ath10k.  Each switch is
+ * independent so a build can add one difference at a time. */
+static int g_scan_cmd;        /* scancmd=1: 100B start_scan + 8B MAC/BSSID + Linux values */
+static int g_regdom;          /* regdom=1: 24B regdomain, world SKU 0x6c */
+static int g_chan_v2;         /* chanv2=1: trogdor 6x32-bit channel entries */
+static int g_pdev_param;      /* pdevparam=1: four PDEV_SET_PARAM before regdomain */
 static int g_chan_list;       /* chanlist=1: WMI_SCAN_CHAN_LIST before regdomain */
 static int g_vdev_up;         /* vdevup=1: WMI_VDEV_UP after VDEV_CREATE */
 static int g_scan_linux;      /* scanlinux=1: Linux-exact START_SCAN arguments */
@@ -789,6 +796,8 @@ hif_dump_regs(const char *why)
 #define WMI_TLV_RESOURCE_CONFIG       75
 #define WMI_TLV_START_SCAN_CMD        77
 #define WMI_TLV_PDEV_SET_REGDOMAIN_CMD 81
+#define WMI_TLV_PDEV_SET_PARAM_CMD     82   /* 0x52, 12-byte body */
+#define WMI_PDEV_SET_PARAM_CMDID       0x4003
 #define WMI_TLV_SCAN_CHAN_LIST_CMD    79
 #define WMI_TLV_CHANNEL               80
 #define WMI_TLV_VDEV_CREATE_CMD       86      /* wmi-tlv.h enum wmi_tlv_tag */
@@ -1259,21 +1268,56 @@ static const uint32_t g_scan_freqs[] = {
 static int
 hif_send_pdev_regdomain(void)
 {
-	uint8_t tlv[32];
+	uint8_t tlv[40];
 	uint8_t *p = tlv;
-	struct {
-		uint32_t reg_domain;
-		uint32_t reg_domain_2g;
-		uint32_t reg_domain_5g;
-		uint32_t limit_2g;
-		uint32_t limit_5g;
-	} __attribute__((packed)) cmd;
+	/* Linux struct wmi_tlv_pdev_set_regdomain_cmd has SIX u32 words
+	 * (regdmn, 2g, 5g, ctl2g, ctl5g, ...); trogdor emits a 24-byte TLV
+	 * with the world SKU 0x6c from SERVICE_READY.  The old 5-word/20-byte
+	 * all-zero command is kept as the A/B control. */
+	uint32_t cmd[6];
+	uint16_t cmdlen;
 
 	memset(tlv, 0, sizeof(tlv));
-	memset(&cmd, 0, sizeof(cmd));
-	p = hif_put_tlv(p, WMI_TLV_PDEV_SET_REGDOMAIN_CMD, (uint16_t)sizeof(cmd), &cmd);
-	HIF_LOG("WMI: send PDEV_SET_REGDOMAIN (world)");
+	memset(cmd, 0, sizeof(cmd));
+	if (g_regdom) {
+		cmd[1] = 0x6c;
+		cmd[2] = 0x6c;
+		cmd[3] = 0x6c;
+		cmd[4] = 0xff;
+		cmd[5] = 0xff;
+		cmdlen = 24;
+	} else {
+		cmdlen = 20;
+	}
+	p = hif_put_tlv(p, WMI_TLV_PDEV_SET_REGDOMAIN_CMD, cmdlen, cmd);
+	HIF_LOG("WMI: send PDEV_SET_REGDOMAIN (%u bytes, %s)",
+	    cmdlen, g_regdom ? "world 0x6c" : "zero legacy");
 	return hif_wmi_command(WMI_PDEV_SET_REGDOMAIN_CMDID, tlv, (uint32_t)(p - tlv));
+}
+
+/* coachz_wifi.c ws_next(): before regdomain Linux sends four PDEV_SET_PARAM
+ * commands (tx/rx chain mask from SERVICE_READY, ARP AC override, ANI). */
+static int
+hif_send_pdev_params(void)
+{
+	static const uint32_t param[4][2] = {
+	    {0x01, 3}, {0x02, 3}, {0x23, 0}, {0x25, 1},
+	};
+	uint8_t tlv[32];
+	uint32_t body[3];
+	unsigned i;
+
+	for (i = 0; i < 4; i++) {
+		uint8_t *p = tlv;
+		body[0] = 0;
+		body[1] = param[i][0];
+		body[2] = param[i][1];
+		p = hif_put_tlv(p, WMI_TLV_PDEV_SET_PARAM_CMD, 12, body);
+		(void)hif_wmi_command(WMI_PDEV_SET_PARAM_CMDID, tlv,
+		    (uint32_t)(p - tlv));
+	}
+	HIF_LOG("WMI: send 4 PDEV_SET_PARAM (tx/rx chain, arp ac, ani)");
+	return 0;
 }
 
 /* wmi-tlv.c ath10k_wmi_tlv_op_gen_scan_chan_list() + mac.c
@@ -1301,13 +1345,27 @@ hif_send_scan_chan_list(void)
 		hif_put32(ch + 0, f);                  /* mhz */
 		hif_put32(ch + 4, f);                  /* band_center_freq1 */
 		hif_put32(ch + 8, 0);                  /* band_center_freq2 */
-		hif_put32(ch + 12, f < 3000 ? 1u : 0u); /* mode: 11G(1) / 11A(0) */
-		ch[16] = 0;                            /* min_power */
-		ch[17] = 40;                           /* max_power, 0.5 dBm */
-		ch[18] = 40;                           /* reg_power, 0.5 dBm */
-		ch[19] = 0;                            /* reg_classid */
-		ch[20] = 0;                            /* antenna_max */
-		ch[21] = 40;                           /* max_tx_power */
+		if (g_chan_v2) {
+			/* coachz_wifi.c ws_next(): six u32 per channel.  The
+			 * flags word carries 11G/11A, PASSIVE, DFS, ALLOW_HT
+			 * and ALLOW_VHT; 5 GHz is passive (WCN3990 WLAN.HL.3.2
+			 * active-scan firmware bug, linux-wireless 2026-03). */
+			uint32_t flags = (f < 3000 ? 1u : 0u) |
+			    (f > 2462 ? 1u << 7 : 0u) |
+			    ((f >= 5260 && f <= 5720) ? 1u << 10 : 0u) |
+			    (1u << 11) | (1u << 12);
+			hif_put32(ch + 12, flags);
+			hif_put32(ch + 16, (40u << 8) | (40u << 16));
+			hif_put32(ch + 20, 6u | (40u << 8));
+		} else {
+			hif_put32(ch + 12, f < 3000 ? 1u : 0u); /* mode: 11G(1) / 11A(0) */
+			ch[16] = 0;                        /* min_power */
+			ch[17] = 40;                       /* max_power, 0.5 dBm */
+			ch[18] = 40;                       /* reg_power, 0.5 dBm */
+			ch[19] = 0;                        /* reg_classid */
+			ch[20] = 0;                        /* antenna_max */
+			ch[21] = 40;                       /* max_tx_power */
+		}
 		q = hif_put_tlv(q, WMI_TLV_CHANNEL, (uint16_t)sizeof(ch), ch);
 	}
 	hif_put32(nbuf, n);
@@ -1444,16 +1502,26 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 		uint32_t num_ssids;
 		uint32_t ie_len;
 		uint32_t num_probes;
-		uint8_t mac_addr[6];
-		uint8_t mac_mask[6];
+		/* Linux struct wmi_mac_addr is "2 word representation of MAC
+		 * addr": union { u8 addr[6]; struct { u32 word0, word1; } },
+		 * sizeof == 8.  Both mac_addr and mac_mask are 8 bytes, making
+		 * wmi_tlv_start_scan_cmd exactly 100 bytes.  Our old 6+6 sent
+		 * 96, so the firmware read four bytes of the following array
+		 * TLV as the tail of the command struct. */
+		uint8_t mac_addr[8];
+		uint8_t mac_mask[8];
 	} __attribute__((packed));
 	struct hif_start_scan_cmd cmd;
-	/* wmi_tlv_start_scan_cmd is 96 bytes. */
+	/* 100 bytes is the ABI; 96 is the legacy control (the last 12 bytes
+	 * are all zero in both layouts, so truncating reproduces the old
+	 * wire image byte-for-byte). */
 	typedef char hif_start_scan_size_check[
-	    sizeof(struct hif_start_scan_cmd) == 96 ? 1 : -1];
+	    sizeof(struct hif_start_scan_cmd) == 100 ? 1 : -1];
+	uint16_t cmdlen = g_scan_cmd ? 100u : 96u;
 	uint32_t i, nch = (uint32_t)(sizeof(g_scan_freqs) / sizeof(g_scan_freqs[0]));
 	uint8_t chans[256];
-	uint8_t bssid[6];
+	uint8_t bssid[8];
+	uint16_t bssid_len = g_scan_cmd ? 8u : 6u;
 
 	if (nch * 4 > sizeof(chans)) nch = sizeof(chans) / 4;
 	if (g_scan_chans >= 0) nch = (uint32_t)g_scan_chans;
@@ -1505,8 +1573,30 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 		cmd.burst_duration_ms = 0;
 	}
 
-	/* ath10k_wmi_start_scan_init() always asks for one broadcast BSSID;
-	 * without it the firmware does not send broadcast probe requests. */
+	/* scancmd=1 copies coachz_wifi.c ws_start_scan() /
+	 * ath10k_wmi_start_scan_init() values verbatim: the 0xA000 ID
+	 * prefixes, passive scan, 50/150 ms dwell, 50/500 ms rest, 20 s max,
+	 * three probes and the WMI-TLV inverted filter flag. */
+	if (g_scan_cmd) {
+		cmd.common[0] = 0xa000u;
+		cmd.common[1] = 0xa001u;
+		cmd.common[4] = 0x11f;
+		cmd.common[5] = 50;
+		cmd.common[6] = 150;
+		cmd.common[7] = 50;
+		cmd.common[8] = 500;
+		cmd.common[12] = 20000;
+		cmd.common[13] = 5;
+		cmd.common[14] = 0x01u | 0x10u | 0x20u;
+		cmd.burst_duration_ms = 0;
+		cmd.num_probes = 3;
+	}
+
+	/* ath10k_wmi_tlv_op_gen_start_scan() always asks for one broadcast
+	 * BSSID; without it the firmware does not send broadcast probe
+	 * requests.  wmi_mac_addr is 8 bytes (last two zero). */
+	/* wmi_mac_addr is 8 bytes: 6 broadcast bytes plus a zero tail. */
+	memset(bssid, 0, sizeof(bssid));
 	for (i = 0; i < 6; i++) bssid[i] = 0xff;
 
 	for (i = 0; i < nch; i++) hif_put32(chans + i * 4, g_scan_freqs[i]);
@@ -1546,7 +1636,7 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 		cmd.num_bssids = 1;
 		break;
 	}
-	p = hif_put_tlv(p, WMI_TLV_START_SCAN_CMD, (uint16_t)sizeof(cmd), &cmd);
+	p = hif_put_tlv(p, WMI_TLV_START_SCAN_CMD, cmdlen, &cmd);
 	switch (g_scan_shape) {
 	case 1:
 		break;
@@ -1561,24 +1651,26 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 		break;
 	case 5:
 		p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT,
-		    (uint16_t)sizeof(bssid), bssid);
+		    bssid_len, bssid);
 		break;
 	case 6:
 		p = hif_put_tlv(p, 16, (uint16_t)(nch * 4), chans);
 		p = hif_put_tlv(p, 19, 0, NULL);
-		p = hif_put_tlv(p, 19, (uint16_t)sizeof(bssid), bssid);
+		p = hif_put_tlv(p, 19, bssid_len, bssid);
 		p = hif_put_tlv(p, 17, 0, NULL);
 		break;
 	default:
 		p = hif_put_tlv(p, WMI_TLV_ARRAY_UINT32, (uint16_t)(nch * 4), chans);
 		p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT, 0, NULL);  /* ssids */
-		p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT, (uint16_t)sizeof(bssid), bssid);
+		p = hif_put_tlv(p, WMI_TLV_ARRAY_FIXED_STRUCT, bssid_len, bssid);
 		p = hif_put_tlv(p, WMI_TLV_ARRAY_BYTE, 0, NULL);          /* ie */
 		break;
 	}
 
-	HIF_LOG("WMI: send START_SCAN (scan_id 0x%x, linux=%d, %u channels, %u ms dwell, %u TLV bytes)",
-	    cmd.common[0], g_scan_linux, nch, dwell_ms, (unsigned)(p - tlv));
+	HIF_LOG("WMI: send START_SCAN (scan_id 0x%x, linux=%d, %u channels, "
+	    "%u ms dwell, %u TLV bytes, cmd=%uB bssid=%uB)",
+	    cmd.common[0], g_scan_linux, nch, dwell_ms, (unsigned)(p - tlv),
+	    cmdlen, bssid_len);
 	return hif_wmi_command(WMI_START_SCAN_CMDID, tlv, (uint32_t)(p - tlv));
 }
 
@@ -1730,6 +1822,7 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 		 * has a documented deterministic crash shortly after vdev_create;
 		 * bisecting which host command precedes it tells us whether the
 		 * firmware is dying on our input or on its own. */
+		if (g_pdev_param) (void)hif_send_pdev_params();
 		if (g_ready_stop == 1 || g_ready_stop == 3) {
 			HIF_LOG("WMI: READY stop=%u, skipping PDEV_SET_REGDOMAIN",
 			    g_ready_stop);
@@ -2438,13 +2531,31 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("scanwait", &v, sizeof(v)) && v <= 120) {
 		g_scan_wait = (int)v;
 	}
+	v = 0;
+	if (PE_parse_boot_argn("scancmd", &v, sizeof(v)) && v <= 1) {
+		g_scan_cmd = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("regdom", &v, sizeof(v)) && v <= 1) {
+		g_regdom = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("chanv2", &v, sizeof(v)) && v <= 1) {
+		g_chan_v2 = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("pdevparam", &v, sizeof(v)) && v <= 1) {
+		g_pdev_param = (int)v;
+	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
 	    "wmiinit=%d; scanchans=%d; tlvpad=%d; chanlist=%d; vdevup=%d; "
-	    "scanlinux=%d; httconn=%d; httsetup=%d; httring=%d; scanwait=%d",
+	    "scanlinux=%d; httconn=%d; httsetup=%d; httring=%d; scanwait=%d; "
+	    "scancmd=%d; regdom=%d; chanv2=%d; pdevparam=%d",
 	    g_tx3_rotate ? "8 rotating" : "single (legacy)", g_autoscan,
 	    g_ready_stop, g_vdev_pre, g_wmi_init_full, g_scan_chans,
 	    g_tlv_pad, g_chan_list, g_vdev_up, g_scan_linux, g_htt_connect,
-	    g_htt_setup, g_htt_ring, g_scan_wait);
+	    g_htt_setup, g_htt_ring, g_scan_wait, g_scan_cmd, g_regdom,
+	    g_chan_v2, g_pdev_param);
 	{
 		uint64_t dma_pa = 0;
 		g_dma = (struct hif_dma_block *)picasso_wlan_ce_dma_alloc(
