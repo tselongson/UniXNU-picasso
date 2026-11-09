@@ -492,6 +492,13 @@ static int g_tlv_pad;         /* 0 = Linux-exact TLV lengths */
 #define SCANFIX_REGDOM    0x2
 #define SCANFIX_CHANV2    0x4
 #define SCANFIX_PDEVPARAM 0x8
+/* 0x10: struct wmi_mac_addr is a 2-word (8-byte) union, not 6 bytes.
+ * abi-check.py found three more TLVs that still used a 6-byte MAC:
+ * VDEV_CREATE (18 vs 20), VDEV_UP (14 vs 16) and PDEV_SET_BASE_MACADDR
+ * (6 vs 8).  Linux wmi.h:851 and trogdor's WS_TLV(0x56, 20) agree.  The
+ * vdev MAC is what the firmware matches scan frames against, so this is a
+ * candidate for the "firmware scans but never emits WMI_MGMT_RX" symptom. */
+#define SCANFIX_MAC       0x10
 static int g_scan_fix;
 static int g_chan_list;       /* chanlist=1: WMI_SCAN_CHAN_LIST before regdomain */
 static int g_vdev_up;         /* vdevup=1: WMI_VDEV_UP after VDEV_CREATE */
@@ -1457,15 +1464,17 @@ hif_send_vdev_up(void)
 	struct {
 		uint32_t vdev_id;
 		uint32_t vdev_assoc_id;
-		uint8_t bssid[6];
+		uint8_t bssid[8];
 	} __attribute__((packed)) cmd;
+	uint16_t cmdlen = (g_scan_fix & SCANFIX_MAC) ? 16u : 14u;
 
 	memset(tlv, 0, sizeof(tlv));
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.bssid[0] = 0x02;
 	cmd.bssid[5] = 0x01;
-	p = hif_put_tlv(p, WMI_TLV_VDEV_UP_CMD, (uint16_t)sizeof(cmd), &cmd);
-	HIF_LOG("WMI: send VDEV_UP id=0 (%u TLV bytes)", (unsigned)(p - tlv));
+	p = hif_put_tlv(p, WMI_TLV_VDEV_UP_CMD, cmdlen, &cmd);
+	HIF_LOG("WMI: send VDEV_UP id=0 (%u TLV bytes, cmd=%uB)",
+	    (unsigned)(p - tlv), cmdlen);
 	return hif_wmi_command(WMI_VDEV_UP_CMDID, tlv, (uint32_t)(p - tlv));
 }
 
@@ -1478,8 +1487,9 @@ hif_send_vdev_create(void)
 		uint32_t vdev_id;
 		uint32_t vdev_type;
 		uint32_t vdev_subtype;
-		uint8_t mac[6];
+		uint8_t mac[8];
 	} __attribute__((packed)) cmd;
+	uint16_t cmdlen = (g_scan_fix & SCANFIX_MAC) ? 20u : 18u;
 
 	memset(tlv, 0, sizeof(tlv));
 	memset(&cmd, 0, sizeof(cmd));
@@ -1489,9 +1499,11 @@ hif_send_vdev_create(void)
 	cmd.mac[0] = 0x02;                     /* locally administered */
 	cmd.mac[1] = 0x00; cmd.mac[2] = 0x00;
 	cmd.mac[3] = 0x00; cmd.mac[4] = 0x00; cmd.mac[5] = 0x01;
+	/* The last two bytes of wmi_mac_addr stay zero in both layouts, so
+	 * truncating to 18 reproduces the legacy wire image byte-for-byte. */
 
-	p = hif_put_tlv(p, WMI_TLV_VDEV_CREATE_CMD, (uint16_t)sizeof(cmd), &cmd);
-	HIF_LOG("WMI: send VDEV_CREATE id=0 type=STA");
+	p = hif_put_tlv(p, WMI_TLV_VDEV_CREATE_CMD, cmdlen, &cmd);
+	HIF_LOG("WMI: send VDEV_CREATE id=0 type=STA (cmd=%uB)", cmdlen);
 	return hif_wmi_command(WMI_VDEV_CREATE_CMDID, tlv, (uint32_t)(p - tlv));
 }
 
@@ -1770,13 +1782,13 @@ hif_send_base_macaddr(void)
 {
 	uint8_t tlv[32];
 	uint8_t *p = tlv;
-	uint8_t mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+	uint8_t mac[8] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0, 0 };
+	uint16_t cmdlen = (g_scan_fix & SCANFIX_MAC) ? 8u : 6u;
 
 	memset(tlv, 0, sizeof(tlv));
-	p = hif_put_tlv(p, WMI_TLV_PDEV_SET_BASE_MACADDR_CMD,
-	    (uint16_t)sizeof(mac), mac);
-	HIF_LOG("WMI: send PDEV_SET_BASE_MACADDR %02x:%02x:%02x:%02x:%02x:%02x",
-	    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+	p = hif_put_tlv(p, WMI_TLV_PDEV_SET_BASE_MACADDR_CMD, cmdlen, mac);
+	HIF_LOG("WMI: send PDEV_SET_BASE_MACADDR %02x:%02x:%02x:%02x:%02x:%02x (%uB)",
+	    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], cmdlen);
 	return hif_wmi_command(WMI_PDEV_SET_BASE_MACADDR_CMDID, tlv,
 	    (uint32_t)(p - tlv));
 }
@@ -2560,7 +2572,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_scan_wait = (int)v;
 	}
 	v = 0;
-	if (PE_parse_boot_argn("scanfix", &v, sizeof(v)) && v <= 15) {
+	if (PE_parse_boot_argn("scanfix", &v, sizeof(v)) && v <= 31) {
 		g_scan_fix = (int)v;
 	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
