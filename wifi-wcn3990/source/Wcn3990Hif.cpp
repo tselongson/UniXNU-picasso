@@ -2285,6 +2285,7 @@ hif_join_rsn_prepare(const uint8_t *e)
  * wj_eapol L4316, wj_send_key L3965.  Credentials come from boot-args only
  * (wpa=1, wpass=<passphrase>) so no secret lives in this source file. */
 static void hif_join_peer_param(uint32_t id, uint32_t value);
+static void hif_join_send_vdev_up(void);
 
 #define WPA_EAPOL_FIXED 99u
 
