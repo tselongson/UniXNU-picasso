@@ -2266,7 +2266,7 @@ hif_join_rsn_prepare(const uint8_t *e)
 
 /* ===================== WPA2-PSK four-way handshake (wpa=1) ==============
  * Grafted from wlan-wip (drivers/NativeWlan/WlanRadio.c): wk_sha1/wk_hmac/
- * wk_prf/wk_pmk L3231-3383, wk_aes_*/wk_unwrap L3390-3450, wk_reply L4277,
+ * wk_prf/wk_pmk L3231-3383, wk_aes_* and wk_unwrap L3390-3450, wk_reply L4277,
  * wj_eapol L4316, wj_send_key L3965.  Credentials come from boot-args only
  * (wpa=1, wpass=<passphrase>) so no secret lives in this source file. */
 static void hif_join_peer_param(uint32_t id, uint32_t value);
