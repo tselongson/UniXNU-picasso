@@ -2483,10 +2483,17 @@ hif_join_begin(void)
 	rsn = hif_join_ie(48);
 	g_join_ap.secure = rsn != NULL;
 	if (g_join_ap.secure && hif_join_rsn_prepare(rsn)) {
-		HIF_LOG("JOIN: only WPA2-Personal with CCMP is handled here");
-		g_join_state = HIF_JOIN_IDLE;
-		memset(&g_join_ap, 0, sizeof(g_join_ap));
-		return;
+		if (g_join < 2) {
+			HIF_LOG("JOIN: only WPA2-Personal with CCMP is handled here");
+			g_join_state = HIF_JOIN_IDLE;
+			memset(&g_join_ap, 0, sizeof(g_join_ap));
+			return;
+		}
+		/* join>=2 is an auth-path probe.  Open System authentication does
+		 * not depend on the RSN element (that is EAPOL's concern), so a
+		 * non-CCMP RSN must not block the VDEV_START/PEER_CREATE test.
+		 * chain-533b z2 never reached VDEV_START because of this gate. */
+		HIF_LOG("JOIN: RSN is not plain CCMP; continuing auth-only probe");
 	}
 	g_join_seq = 0;
 	g_join_tries = 0;
@@ -2545,7 +2552,16 @@ hif_join_poll(void)
 			HIF_LOG("JOIN: auth sent (peer mapped)");
 			hif_join_send_auth();
 		} else if (g_polls - g_join_wait_at >= 3000) {
-			hif_join_reset("peer map timeout");
+			/* Diagnostic fallback: if this firmware never emits an HTT peer
+			 * map, still send auth once so a single boot answers whether
+			 * VDEV_START alone was enough.  The log line makes the two
+			 * cases distinguishable. */
+			HIF_LOG("JOIN: peer map timeout, sending auth anyway "
+			    "(diagnostic)");
+			g_join_state = HIF_JOIN_AUTH_SENT;
+			g_join_tries = 0;
+			g_join_tx_at = g_join_wait_at = g_polls;
+			hif_join_send_auth();
 		}
 		return;
 	}
