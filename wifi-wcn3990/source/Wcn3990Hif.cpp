@@ -3410,13 +3410,26 @@ hif_join_begin(void)
 					break;
 				}
 			}
-			if (pick == g_join_bss_count)
-				HIF_LOG("JOIN: joinsel=%d found no '%s' entry",
-				    g_join_sel, want);
-		}
-		if (pick == g_join_bss_count)
+			if (pick == g_join_bss_count) {
+				/* Do NOT fall back to another access point:
+				 * joinsel is meant to pin one SSID, and a
+				 * fallback silently joined TP-LINK in
+				 * chain-548 while the clock AP had not been
+				 * heard yet. */
+				static uint32_t last_log;
+
+				if (g_polls - last_log > 5000u) {
+					last_log = g_polls;
+					HIF_LOG("JOIN: joinsel=%d waiting for "
+					    "'%s' (%u entries heard)",
+					    g_join_sel, want, g_join_bss_count);
+				}
+				return;
+			}
+		} else {
 			for (pick = 0; pick < g_join_bss_count; pick++)
 				if (g_join_bss[pick].ssid_len) break;
+		}
 		if (pick == g_join_bss_count) return;
 		b = &g_join_bss[pick];
 	} else {
