@@ -531,6 +531,7 @@ static void hif_join_peer_event(const uint8_t *, uint32_t);
 /* Defined up here because hif_service_ce1() (the HTT pipe) needs them well
  * before the join state block further down the file. */
 static int g_join;               /* join=<n>: 0 = off, 1 = legacy, >=2 = full pre-req path */
+static int g_join_skip;          /* joinskip: bit1 skip PEER_ASSOC, bit2 skip VDEV_UP */
 static int g_join_once;          /* the wj_begin() once-block (vdev/pdev params) */
 static int g_join_once_mask = 0x1ff; /* joinonce=<n>: per-command gates, 0x1ff = all */
 #define HTT_T2H_MSG_TYPE_PEER_MAP    3
@@ -3015,20 +3016,20 @@ hif_join_resp(const uint8_t *f, uint32_t n)
 		}
 		g_join_ap.aid =
 		    (uint16_t)((f[28] | (uint16_t)f[29] << 8) & 0x3fffu);
-		/* ath10k_bss_assoc: peer assoc, vdev up, the ps workaround. */
-		hif_join_send_peer_assoc();
-		hif_join_send_vdev_up();
+		/* ath10k_bss_assoc: peer assoc, vdev up, the ps workaround.
+		 * joinskip isolates the crash: bit1 = do not send PEER_ASSOC,
+		 * bit2 = do not send VDEV_UP.  Both runs still associate, so
+		 * the A/B answers "which command kills the firmware". */
+		if (!(g_join_skip & 1)) hif_join_send_peer_assoc();
+		if (!(g_join_skip & 2)) hif_join_send_vdev_up();
+		if (g_join_skip)
+			HIF_LOG("JOIN: joinskip=%d in effect", g_join_skip);
 		/* wlan-wip has no PEER_SET_PARAM after vdev up: its only
 		 * authorize is peer_param(3,1) in wj_step's WJ_M4, *after* the
 		 * EAPOL keys are installed, and an open network never sends
 		 * one.  chain-535 sent peer param id 255 right after vdev up;
 		 * 255 is WMI_TLV_PEER_DUMMY_VAR, and the firmware answered the
 		 * 0x401 early-crash message, then the kernel panicked. */
-		if (g_join_ap.secure)
-			HIF_LOG("JOIN: secure AP, key handshake not in this "
-			    "phase, stopping after vdev up");
-		else
-			hif_join_peer_param(3, 1);  /* PEER_AUTHORIZE */
 		if (g_join_ap.secure)
 			HIF_LOG("JOIN: secure AP, key handshake not in this "
 			    "phase, stopping after vdev up");
@@ -4026,6 +4027,12 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	v = 0x1ffu;
 	if (PE_parse_boot_argn("joinonce", &v, sizeof(v)) && v <= 0x1ffu) {
 		g_join_once_mask = (int)v;
+	}
+	/* joinskip=<n>: bit1 skip PEER_ASSOC, bit2 skip VDEV_UP.  Diagnostic
+	 * only: isolates which post-assoc command makes the firmware assert. */
+	v = 0;
+	if (PE_parse_boot_argn("joinskip", &v, sizeof(v)) && v <= 3) {
+		g_join_skip = (int)v;
 	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
 	    "wmiinit=%d; scanchans=%d; tlvpad=%d; chanlist=%d; vdevup=%d; "
