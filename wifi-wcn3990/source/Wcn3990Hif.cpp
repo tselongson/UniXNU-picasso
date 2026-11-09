@@ -3428,13 +3428,27 @@ hif_join_begin(void)
 		if (want) {
 			size_t wl = strlen(want);
 
-			for (i = 0; i < g_join_bss_count; i++) {
-				const struct hif_join_bss *c = &g_join_bss[i];
+			/* Two passes: the SSID can exist on both bands, and the
+			 * 5 GHz BSS rejects MGMT_TX (status 3) on this firmware,
+			 * so prefer the 2.4 GHz entry when there is one. */
+			{
+				unsigned pass2;
 
-				if (c->ssid_len >= wl &&
-				    !memcmp(c->ssid, want, wl)) {
-					pick = i;
-					break;
+				for (pass2 = 0; pass2 < 2 && pick == g_join_bss_count;
+				    pass2++) {
+					for (i = 0; i < g_join_bss_count; i++) {
+						const struct hif_join_bss *c =
+						    &g_join_bss[i];
+
+						if (c->ssid_len < wl ||
+						    memcmp(c->ssid, want, wl))
+							continue;
+						if (pass2 == 0 &&
+						    c->freq_mhz >= 4900)
+							continue;
+						pick = i;
+						break;
+					}
 				}
 			}
 			if (pick == g_join_bss_count) {
