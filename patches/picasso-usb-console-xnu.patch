@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3594 @@
+@@ -0,0 +1,3602 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -630,8 +630,16 @@ new file mode 100644
 +	    :
 +	    : "x4", "x5", "x8", "x9", "x10", "x11", "x12", "x13", "x14",
 +	      "x15", "x16", "x17", "memory");
-+	return (struct picasso_usb_scm_reply){uint32_t(x0), uint32_t(x1),
-+	    uint32_t(x2), uint32_t(x3), x6};
++	{
++		struct picasso_usb_scm_reply r;
++
++		r.a0 = (uint32_t)x0;
++		r.a1 = (uint32_t)x1;
++		r.a2 = (uint32_t)x2;
++		r.a3 = (uint32_t)x3;
++		r.a6 = x6;
++		return r;
++	}
 +}
 +
 +static void
