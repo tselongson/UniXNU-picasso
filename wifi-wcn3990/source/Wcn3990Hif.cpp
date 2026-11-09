@@ -878,6 +878,11 @@ static uint32_t g_smp2p_last;
 static int g_smp2p_seen;
 static uint32_t g_beacons;
 static uint32_t g_mgmt_seen;
+/* Every WMI_MGMT_RX_EVENTID (0x7001) that reaches the dispatcher, counted
+ * BEFORE any parsing.  The 526-d boot scanned 39 channels and reported 32
+ * BSS_CHANNEL events but zero beacons; without this counter we cannot tell
+ * "firmware never sent mgmt frames" from "our parser dropped them". */
+static uint32_t g_mgmt_events;
 static void (*g_frame_sink)(const uint8_t *, size_t, int16_t, uint16_t);
 
 extern "C" int wcn3990_hif_state(void) { return (int)g_state; }
@@ -1702,6 +1707,17 @@ hif_handle_mgmt_rx(const uint8_t *tlvs, uint32_t len)
 	const uint8_t *frame = NULL;
 	uint32_t frame_len = 0;
 
+	g_mgmt_events++;
+	if (g_mgmt_events <= 8) {
+		HIF_LOG("MGMT ev #%u len=%u hdr=%02x%02x%02x%02x "
+		    "%02x%02x%02x%02x",
+		    g_mgmt_events, len,
+		    len > 0 ? tlvs[0] : 0, len > 1 ? tlvs[1] : 0,
+		    len > 2 ? tlvs[2] : 0, len > 3 ? tlvs[3] : 0,
+		    len > 4 ? tlvs[4] : 0, len > 5 ? tlvs[5] : 0,
+		    len > 6 ? tlvs[6] : 0, len > 7 ? tlvs[7] : 0);
+	}
+
 	/* wmi-tlv.c: ath10k_wmi_tlv_op_pull_mgmt_rx_ev() looks for
 	 * WMI_TLV_TAG_STRUCT_MGMT_RX_HDR (44) and WMI_TLV_TAG_ARRAY_BYTE (17). */
 	while (off + 4 <= len) {
@@ -1721,7 +1737,14 @@ hif_handle_mgmt_rx(const uint8_t *tlvs, uint32_t len)
 		off += 4 + (g_tlv_pad ? ((tlv_len + 3) & ~3u) : tlv_len);
 	}
 
-	if (!frame || !buf_len || buf_len > frame_len) return;
+	if (!frame || !buf_len || buf_len > frame_len) {
+		if (g_mgmt_events <= 8)
+			HIF_LOG("MGMT drop: frame=%s buf_len=%u frame_len=%u "
+			    "channel=%u rssi=%d",
+			    frame ? "yes" : "no", buf_len, frame_len,
+			    channel, (int)rssi);
+		return;
+	}
 	if (rssi > 0 || rssi < -120) rssi = -60;
 	if (g_mgmt_seen < 12) {
 		g_mgmt_seen++;
@@ -2008,11 +2031,12 @@ wcn3990_hif_poll(void)
 	 * the corresponding stage is entered. */
 	if ((g_polls % 1000) == 0) {
 		HIF_LOG("heartbeat polls=%u stage=%d state=%d rx=%u beacons=%u "
-		    "desc0.nbytes=%u drri=%x htt=%u httidx=%u mgmt=%u",
+		    "desc0.nbytes=%u drri=%x htt=%u httidx=%u mgmt=%u mgmtev=%u",
 		    g_polls, g_stage, (int)g_state, g_rx_packets, g_beacons,
 		    (unsigned)s_dst2[0].nbytes,
 		    g_bases_programmed ? hif_reg_read(2, CE_CURRENT_DRRI) : 0,
-		    g_htt_rx, g_dma ? g_dma->htt_alloc_idx : 0, g_mgmt_seen);
+		    g_htt_rx, g_dma ? g_dma->htt_alloc_idx : 0, g_mgmt_seen,
+		    g_mgmt_events);
 		/* The other dst pipes' DDR read indices: a moving index means the
 		 * target consumed a buffer there, which the bring-up wants to
 		 * know about even though nothing drains those rings yet. */
