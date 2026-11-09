@@ -6150,23 +6150,23 @@ static const char * const g_msa_keys[] = {
 };
 
 static void
-wlan_msa_crash_scan(void)
+wlan_msa_crash_scan(uint64_t pa, uint64_t size)
 {
 	IOMemoryMap *m;
 	volatile const uint32_t *w;
-	uint32_t off;
+	uint64_t off;
 	char line[96];
 	unsigned len = 0, printed = 0, words = 0, nonzero = 0;
 
 	LOG("msa: scanning %llx+%llx for the previous boot's firmware report",
-	    (unsigned long long)WLAN_MSA_DUMP_PA, (unsigned long long)WLAN_MSA_DUMP_SIZE);
-	m = map_phys(WLAN_MSA_DUMP_PA, WLAN_MSA_DUMP_SIZE, false);
+	    (unsigned long long)pa, (unsigned long long)size);
+	m = map_phys(pa, size, false);
 	if (m == NULL) {
 		LOG("msa: cannot map the region");
 		return;
 	}
 	w = (volatile const uint32_t *)m->getVirtualAddress();
-	for (off = 0; off + 4 <= WLAN_MSA_DUMP_SIZE; off += 4) {
+	for (off = 0; off + 4 <= size; off += 4) {
 		uint32_t v = w[off / 4];
 		unsigned k;
 
@@ -6201,6 +6201,12 @@ wlan_msa_crash_scan(void)
 	m->release();
 }
 
+/* The two regions WLFW's MSA_INFO reports for this firmware:
+ *   region[0] 0x8ba00000 +0x10000 secure=1
+ *   region[1] 0x8ba10000 +0x1f0000 secure=0
+ * chain-539 probed only the DTS wlan-fw_region@0x8b500000 and found it
+ * blank - this firmware does not write there.  Scan both pools. */
+
 extern "C" void
 picasso_modem_init(void)
 {
@@ -6225,8 +6231,10 @@ picasso_modem_init(void)
 		uint32_t msadump = 0;
 
 		/* Before the modem thread reloads the WLAN image over it. */
-		if (PE_parse_boot_argn("msadump", &msadump, sizeof(msadump)) && msadump)
-			wlan_msa_crash_scan();
+		if (PE_parse_boot_argn("msadump", &msadump, sizeof(msadump)) && msadump) {
+			wlan_msa_crash_scan(WLAN_MSA_DUMP_PA, WLAN_MSA_DUMP_SIZE);
+			wlan_msa_crash_scan(WLAN_MSA_PA, WLAN_MSA_SIZE);
+		}
 	}
 	picasso_wlan_net_attach();
 	if (kernel_thread_start(modem_thread, NULL, &thread) == KERN_SUCCESS) {
