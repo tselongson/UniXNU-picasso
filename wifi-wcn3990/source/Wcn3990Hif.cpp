@@ -2230,23 +2230,22 @@ static int
 hif_join_rsn_prepare(const uint8_t *e)
 {
 	static const uint8_t oui[3] = { 0x00, 0x0f, 0xac };
-	static const uint8_t rsn[22] = {
-		48, 20, 1, 0,
-		0x00, 0x0f, 0xac, 4,          /* pairwise CCMP */
-		1, 0,
-		0x00, 0x0f, 0xac, 4,          /* group CCMP */
-		1, 0,
-		0x00, 0x0f, 0xac, 2,          /* PSK key management */
-		0, 0                          /* no RSN capabilities */
-	};
+	uint8_t rsn[22];
 	const uint8_t *p, *end;
 	unsigned n, found, i;
+	uint8_t group;
 
 	if (!e || e[1] < 18) return -1;
 	p = e + 2;
 	end = e + 2 + e[1];
 	p += 2;                                /* version */
-	if (memcmp(p, oui, 3) || p[3] != 4) return -1;
+	if (memcmp(p, oui, 3)) return -1;
+	group = p[3];
+	/* The group cipher must be echoed exactly: ChinaUnicom's 2.4 GHz BSS
+	 * advertises a TKIP group with CCMP in the pairwise list, and a
+	 * CCMP-group request makes it answer assoc status 41 ("invalid group
+	 * cipher", 802.11-2020) - chain-554's RSN dump settled this. */
+	if (group != 2 && group != 4) return -1;
 	p += 4;
 	n = (unsigned)(p[0] | p[1] << 8);      /* pairwise cipher count */
 	found = 0;
@@ -2254,7 +2253,7 @@ hif_join_rsn_prepare(const uint8_t *e)
 	if (end - p < (long)(4u * n + 2u)) return -1;
 	for (i = 0; i < n; i++, p += 4)
 		if (!memcmp(p, oui, 3) && p[3] == 4) found = 1;
-	if (!found) return -1;
+	if (!found) return -1;                 /* the PTK should stay CCMP */
 	n = (unsigned)(p[0] | p[1] << 8);      /* AKM count */
 	found = 0;
 	p += 2;
@@ -2263,7 +2262,18 @@ hif_join_rsn_prepare(const uint8_t *e)
 		if (!memcmp(p, oui, 3) && p[3] == 2) found = 1;
 	if (!found) return -1;
 	if (end - p >= 2 && (p[0] & 0x40)) return -1;  /* PMF required */
+
+	memset(rsn, 0, sizeof(rsn));
+	rsn[0] = 48; rsn[1] = 20;                     /* RSN element, len 20 */
+	rsn[2] = 1; rsn[3] = 0;                       /* version 1 */
+	memcpy(rsn + 4, oui, 3); rsn[7] = group;      /* group = AP's choice */
+	rsn[8] = 1; rsn[9] = 0;                       /* pairwise count 1 */
+	memcpy(rsn + 10, oui, 3); rsn[13] = 4;        /* pairwise CCMP */
+	rsn[14] = 1; rsn[15] = 0;                     /* AKM count 1 */
+	memcpy(rsn + 16, oui, 3); rsn[19] = 2;        /* PSK */
 	memcpy(g_join_ap.rsn, rsn, sizeof(rsn));
+	HIF_LOG("JOIN: RSN built group=%s pairwise=CCMP akm=PSK",
+	    group == 2 ? "TKIP" : "CCMP");
 	return 0;
 }
 
@@ -2283,7 +2293,7 @@ static struct {
 	uint8_t stage;                 /* 0 idle, 1 msg1 processed */
 	uint8_t eapol_ver, have_replay, keyed;
 	uint8_t anonce[32], snonce[32], pmk[32], ptk[48], replay[8];
-	uint8_t gtk[16], gtk_idx, gtk_len;
+	uint8_t gtk[32], gtk_idx, gtk_len;   /* TKIP group keys are 32 B */
 	uint32_t tx_slot;
 } g_wpa_st;
 
@@ -2607,24 +2617,26 @@ hif_wpa_tx_frame(const uint8_t *frame, uint32_t len, int eapol)
 /* wlan-wip wj_send_key(): WMI_VDEV_INSTALL_KEY (0x5009), TLV 0x60 with the
  * 92-byte struct, then the key bytes in an ARRAY_BYTE TLV (tag 0x11). */
 static void
-hif_wpa_send_key(int pairwise, unsigned index, const uint8_t key[16])
+hif_wpa_send_key(int pairwise, unsigned index, const uint8_t *key,
+    unsigned key_len, unsigned cipher)
 {
 	uint8_t tlv[160], *p = tlv;
 	uint32_t body[23];
 
+	if (key_len > 32u) key_len = 32u;
 	memset(tlv, 0, sizeof(tlv));
 	memset(body, 0, sizeof(body));
 	body[0] = 0;                                   /* vdev id */
 	memcpy((uint8_t *)body + 4, g_join_ap.b.bssid, 6); /* peer mac (8 B) */
 	body[3] = index;
 	body[4] = pairwise ? 0u : 1u;                  /* key type */
-	body[5] = 4;                                   /* WMI_TLV_CIPHER_AES_CCM */
+	body[5] = cipher;                              /* 2 TKIP, 4 AES_CCM */
 	/* body[6..19]: rx/tx sequence counters, all zero */
-	body[20] = 16;                                 /* key length */
+	body[20] = key_len;
 	p = hif_put_tlv(p, 0x60, 92, body);
-	p = hif_put_tlv(p, 0x11, 16, key);
-	HIF_LOG("WPA: install %s key idx=%u", pairwise ? "pairwise" : "group",
-	    index);
+	p = hif_put_tlv(p, 0x11, (uint16_t)key_len, key);
+	HIF_LOG("WPA: install %s key idx=%u len=%u cipher=%u",
+	    pairwise ? "pairwise" : "group", index, key_len, cipher);
 	(void)hif_wmi_command(0x5009, tlv, (uint32_t)(p - tlv));
 }
 
@@ -2773,13 +2785,17 @@ hif_wpa_handle_eapol(const uint8_t *e, uint32_t n)
 	if (pairwise && ack) {
 		if (memcmp(e + 17, g_wpa_st.anonce, 32)) return;
 		hif_wpa_reply(0x030a, e + 9, NULL, NULL, 0);
-		g_wpa_st.gtk_len = gtk && gtk_bytes >= 16 ? 16 : 0;
+		/* A TKIP group key is 32 bytes, CCMP 16.  The pairwise key is
+		 * always CCMP because that is what our RSN element asks for. */
+		g_wpa_st.gtk_len = gtk && gtk_bytes >= 16 ?
+		    (uint8_t)(gtk_bytes >= 32 ? 32 : 16) : 0;
 		g_wpa_st.gtk_idx = (uint8_t)gtk_id;
 		if (g_wpa_st.gtk_len)
-			memcpy(g_wpa_st.gtk, gtk, 16);
-		hif_wpa_send_key(1, 0, g_wpa_st.ptk + 32);
+			memcpy(g_wpa_st.gtk, gtk, g_wpa_st.gtk_len);
+		hif_wpa_send_key(1, 0, g_wpa_st.ptk + 32, 16, 4);
 		if (g_wpa_st.gtk_len)
-			hif_wpa_send_key(0, g_wpa_st.gtk_idx, g_wpa_st.gtk);
+			hif_wpa_send_key(0, g_wpa_st.gtk_idx, g_wpa_st.gtk,
+			    g_wpa_st.gtk_len, g_wpa_st.gtk_len == 32 ? 2 : 4);
 		hif_join_peer_param(3, 1);            /* PEER_AUTHORIZE */
 		g_wpa_st.keyed = 1;
 		HIF_LOG("WPA: msg3 seen, msg4 sent, keys installed, peer authorized");
@@ -2787,7 +2803,8 @@ hif_wpa_handle_eapol(const uint8_t *e, uint32_t n)
 	}
 	if (!pairwise && ack) {
 		if (gtk && gtk_bytes >= 16)
-			hif_wpa_send_key(0, gtk_id, gtk);
+			hif_wpa_send_key(0, gtk_id, gtk,
+			    gtk_bytes >= 32 ? 32 : 16, gtk_bytes >= 32 ? 2 : 4);
 		hif_wpa_reply(0x0302, e + 9, NULL, NULL, 0);
 		HIF_LOG("WPA: group key updated");
 	}
@@ -3448,32 +3465,13 @@ hif_join_begin(void)
 	rsn = hif_join_ie(48);
 	g_join_ap.secure = rsn != NULL;
 	if (g_join_ap.secure && hif_join_rsn_prepare(rsn)) {
-		if (g_join < 2) {
-			HIF_LOG("JOIN: only WPA2-Personal with CCMP is handled here");
-			g_join_state = HIF_JOIN_IDLE;
-			memset(&g_join_ap, 0, sizeof(g_join_ap));
-			return;
-		}
-		/* join>=2 is an auth-path probe.  Open System authentication does
-		 * not depend on the RSN element (that is EAPOL's concern), so a
-		 * non-CCMP RSN must not block the VDEV_START/PEER_CREATE test.
-		 * chain-533b z2 never reached VDEV_START because of this gate.
-		 *
-		 * But secure stays set, and hif_join_send_assoc() appends all 22
-		 * bytes of g_join_ap.rsn.  Leaving them zero makes the AP parse a
-		 * string of malformed IEs and answer assoc status=10 (chain-534).
-		 * Install the same plain CCMP/PSK element the strict path uses. */
-		static const uint8_t plain_ccmp_rsn[22] = {
-			48, 20, 1, 0,
-			0x00, 0x0f, 0xac, 4,      /* pairwise CCMP */
-			1, 0,
-			0x00, 0x0f, 0xac, 4,      /* group CCMP */
-			1, 0,
-			0x00, 0x0f, 0xac, 2,      /* PSK key management */
-			0, 0
-		};
-		memcpy(g_join_ap.rsn, plain_ccmp_rsn, sizeof(g_join_ap.rsn));
-		HIF_LOG("JOIN: RSN is not plain CCMP; using standard CCMP/PSK IE");
+		/* No valid WPA2-PSK RSN (CCMP capable, PSK AKM, no PMF):
+		 * authenticating anyway only produced assoc status 41 - the
+		 * request has to carry the AP's own group cipher. */
+		HIF_LOG("JOIN: unusable RSN (need PSK + CCMP pairwise)");
+		g_join_state = HIF_JOIN_IDLE;
+		memset(&g_join_ap, 0, sizeof(g_join_ap));
+		return;
 	}
 	g_join_seq = 0;
 	g_join_tries = 0;
