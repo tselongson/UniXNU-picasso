@@ -2492,8 +2492,23 @@ hif_join_begin(void)
 		/* join>=2 is an auth-path probe.  Open System authentication does
 		 * not depend on the RSN element (that is EAPOL's concern), so a
 		 * non-CCMP RSN must not block the VDEV_START/PEER_CREATE test.
-		 * chain-533b z2 never reached VDEV_START because of this gate. */
-		HIF_LOG("JOIN: RSN is not plain CCMP; continuing auth-only probe");
+		 * chain-533b z2 never reached VDEV_START because of this gate.
+		 *
+		 * But secure stays set, and hif_join_send_assoc() appends all 22
+		 * bytes of g_join_ap.rsn.  Leaving them zero makes the AP parse a
+		 * string of malformed IEs and answer assoc status=10 (chain-534).
+		 * Install the same plain CCMP/PSK element the strict path uses. */
+		static const uint8_t plain_ccmp_rsn[22] = {
+			48, 20, 1, 0,
+			0x00, 0x0f, 0xac, 4,      /* pairwise CCMP */
+			1, 0,
+			0x00, 0x0f, 0xac, 4,      /* group CCMP */
+			1, 0,
+			0x00, 0x0f, 0xac, 2,      /* PSK key management */
+			0, 0
+		};
+		memcpy(g_join_ap.rsn, plain_ccmp_rsn, sizeof(g_join_ap.rsn));
+		HIF_LOG("JOIN: RSN is not plain CCMP; using standard CCMP/PSK IE");
 	}
 	g_join_seq = 0;
 	g_join_tries = 0;
