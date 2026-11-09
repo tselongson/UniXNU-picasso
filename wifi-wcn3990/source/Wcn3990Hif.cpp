@@ -3570,6 +3570,15 @@ hif_join_poll(void)
 			 * never answers with an HTT peer map either way). */
 			if (!(g_join_skip & 4))
 				(void)hif_join_send_peer_create();
+			/* wlan-wip sends these two in the WJ_PEER branch, i.e. only
+			 * after the target mapped the peer.  Our target never sends
+			 * a peer map, so send them here instead: they are the
+			 * "bss_info_changed before the first frame" values and the
+			 * only assoc-side vdev params missing from our sequence. */
+			hif_join_vdev_param(7,
+			    (g_join_ap.b.caps & 0x400u) ? 2u : 1u); /* SLOT_TIME */
+			hif_join_vdev_param(8,
+			    (g_join_ap.b.caps & 0x20u) ? 2u : 1u);  /* PREAMBLE */
 		} else if (g_join_started == 2 ||
 		    g_polls - g_join_wait_at >= 3000) {
 			hif_join_reset("vdev start refused or timed out");
