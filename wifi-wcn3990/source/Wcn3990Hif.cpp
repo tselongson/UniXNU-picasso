@@ -499,12 +499,11 @@ static int g_tlv_pad;         /* 0 = Linux-exact TLV lengths */
  * vdev MAC is what the firmware matches scan frames against, so this is a
  * candidate for the "firmware scans but never emits WMI_MGMT_RX" symptom. */
 #define SCANFIX_MAC       0x10
-/* 0x20: post HTT RX buffers the way Linux and trogdor do.  We filled the
- * ring with addresses but left fw_idx_shadow_reg / fw_idx_init_val at 0,
- * which tells the target the host has posted no buffers at all.  Linux
- * htt_rx.c:__ath10k_htt_rx_ring_fill_n() advances *alloc_idx.vaddr to the
- * number of posted buffers and htt_tx.c reads it back as fw_idx_init_val;
- * trogdor writes WS_RX_FILL=1023 into that word before RX_RING_CFG. */
+/* 0x20: (historical) post HTT RX buffers.  Chain-531 proved on device that
+ * fw_idx_init_val = 0 means "host posted no buffers" and the firmware then
+ * never delivers a frame; 1023 posted delivers beacons within seconds.
+ * This is now the unconditional default in hif_htt_rx_ring_cfg(), so the
+ * bit no longer changes anything and is kept only for boot-arg compat. */
 #define SCANFIX_HTTFILL   0x20
 #define HTT_RX_FILL_LEVEL 1023u   /* half of a 2048-entry ring, as trogdor */
 static int g_scan_fix;
@@ -1020,13 +1019,14 @@ hif_htt_rx_ring_cfg(void)
 	idx_pa = hif_pa_of(&g_dma->htt_alloc_idx);
 	if (!ring_pa || !idx_pa) return -1;
 
-	/* Only the two "how many buffers are posted" words change in this
-	 * experiment.  Linux htt_rx.c fills [0, fill_level) and leaves the
-	 * rest zero; we keep every slot addressable (the buffers are static,
-	 * so a target that walks past fill_level still finds valid memory).
-	 * Changing the ring contents or the host read index at the same time
-	 * would make the A/B uninterpretable. */
-	fill = (g_scan_fix & SCANFIX_HTTFILL) ? HTT_RX_FILL_LEVEL : 0;
+	/* Verified on device (chain-531): posting buffers is REQUIRED.  With
+	 * fw_idx_init_val = 0 the firmware never delivers a single frame
+	 * (mgmtev=0 / httidx=0); with 1023 posted it delivers WMI_MGMT_RX
+	 * beacons with real SSIDs within seconds.  Linux htt_rx.c fills
+	 * [0, fill_level) and leaves the rest zero; we keep every slot
+	 * addressable (the buffers are static, so a target that walks past
+	 * fill_level still finds valid memory). */
+	fill = HTT_RX_FILL_LEVEL;
 	for (i = 0; i < HTT_RX_RING_ENTRIES - 1; i++) {
 		g_dma->htt_ring[i] = hif_pa_of(g_dma->htt_buf[i]);
 	}
