@@ -531,6 +531,7 @@ static void hif_join_peer_event(const uint8_t *, uint32_t);
 /* Defined up here because hif_service_ce1() (the HTT pipe) needs them well
  * before the join state block further down the file. */
 static int g_join;               /* join=<n>: 0 = off, 1 = legacy, >=2 = full pre-req path */
+static int g_join_once;          /* the wj_begin() once-block (vdev/pdev params) */
 #define HTT_T2H_MSG_TYPE_PEER_MAP    3
 #define HTT_T2H_MSG_TYPE_PEER_UNMAP  4
 static int g_vdev_pending;
@@ -1004,6 +1005,15 @@ hif_dump_regs(const char *why)
 #define WMI_VDEV_START_RESP_EVENTID   0x5001
 #define WMI_TLV_PEER_CREATE_CMD        97   /* 0x61, struct wmi_tlv_peer_create_cmd */
 #define WMI_TLV_VDEV_START_RESP        40   /* 0x28, struct wmi_tlv_vdev_start_response_event */
+/* The wj_begin() once-block commands (wlan-wip hard-codes the same tags). */
+#define WMI_VDEV_SET_PARAM_CMDID       0x5008
+#define WMI_PDEV_SET_PARAM_CMDID       0x4003
+#define WMI_STA_POWERSAVE_PARAM_CMDID  0x9002
+#define WMI_STA_POWERSAVE_MODE_CMDID   0x9001
+#define WMI_TLV_VDEV_SET_PARAM         95   /* 0x5f */
+#define WMI_TLV_PDEV_SET_PARAM         82   /* 0x52 */
+#define WMI_TLV_STA_POWERSAVE_PARAM   109   /* 0x6d */
+#define WMI_TLV_STA_POWERSAVE_MODE    108   /* 0x6c */
 
 /* wmi-tlv.h: enum wmi_tlv_tag (values computed from the enum order) */
 /* wmi-tlv.h enum wmi_tlv_tag:
@@ -2549,6 +2559,102 @@ hif_join_reset(const char *why)
 	g_join_tries = 0;
 }
 
+/* ---- the wj_begin() once-block (chain-537 gap) ---------------------------
+ * The reference sends these eight parameters exactly once per radio before
+ * the first VDEV_START: TX power limits, the vdev's NSS / TX_ENCAP_TYPE /
+ * RTS threshold, the three STA power-save policies and STA_POWERSAVE_MODE
+ * off.  TX_ENCAP_TYPE decides how the firmware frames data-path MSDUs; our
+ * join path never sent any of them, and chain-537 showed the firmware dying
+ * ~20 s after vdev up with no HTT frame delivered. */
+static int
+hif_join_vdev_param(uint32_t id, uint32_t value)
+{
+	uint8_t tlv[32];
+	uint8_t *p = tlv;
+	struct { uint32_t vdev_id, param_id, value; } cmd;
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.vdev_id = 0;
+	cmd.param_id = id;
+	cmd.value = value;
+	p = hif_put_tlv(p, WMI_TLV_VDEV_SET_PARAM, (uint16_t)sizeof(cmd), &cmd);
+	HIF_LOG("JOIN: vdev param %u=%u", id, value);
+	return hif_wmi_command(WMI_VDEV_SET_PARAM_CMDID, tlv,
+	    (uint32_t)(p - tlv));
+}
+
+static int
+hif_join_pdev_param(uint32_t id, uint32_t value)
+{
+	uint8_t tlv[32];
+	uint8_t *p = tlv;
+	struct { uint32_t pdev_id, param_id, value; } cmd;
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.pdev_id = 0;
+	cmd.param_id = id;
+	cmd.value = value;
+	p = hif_put_tlv(p, WMI_TLV_PDEV_SET_PARAM, (uint16_t)sizeof(cmd), &cmd);
+	HIF_LOG("JOIN: pdev param %u=%u", id, value);
+	return hif_wmi_command(WMI_PDEV_SET_PARAM_CMDID, tlv,
+	    (uint32_t)(p - tlv));
+}
+
+static int
+hif_join_sta_ps(uint32_t id, uint32_t value)
+{
+	uint8_t tlv[32];
+	uint8_t *p = tlv;
+	struct { uint32_t vdev_id, param_id, value; } cmd;
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.vdev_id = 0;
+	cmd.param_id = id;
+	cmd.value = value;
+	p = hif_put_tlv(p, WMI_TLV_STA_POWERSAVE_PARAM, (uint16_t)sizeof(cmd),
+	    &cmd);
+	HIF_LOG("JOIN: sta ps %u=%u", id, value);
+	return hif_wmi_command(WMI_STA_POWERSAVE_PARAM_CMDID, tlv,
+	    (uint32_t)(p - tlv));
+}
+
+static int
+hif_join_sta_powersave_mode(uint32_t mode)
+{
+	uint8_t tlv[24];
+	uint8_t *p = tlv;
+	struct { uint32_t vdev_id, mode; } cmd;
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.vdev_id = 0;
+	cmd.mode = mode;
+	p = hif_put_tlv(p, WMI_TLV_STA_POWERSAVE_MODE, (uint16_t)sizeof(cmd),
+	    &cmd);
+	HIF_LOG("JOIN: STA_POWERSAVE_MODE %u", mode);
+	return hif_wmi_command(WMI_STA_POWERSAVE_MODE_CMDID, tlv,
+	    (uint32_t)(p - tlv));
+}
+
+static void
+hif_join_once(void)
+{
+	if (g_join_once) return;
+	g_join_once = 1;
+	/* wlan-wip wj_begin(): ath10k_add_interface's settings, for the one
+	 * vdev.  Half-dB power units, native Wi-Fi encapsulation, and the
+	 * station kept awake (RX wake policy, TX wake threshold, no PSPOLL
+	 * maximum, power save off) because the bring-up polls, no IRQs. */
+	(void)hif_join_pdev_param(0x3, 40);   /* TXPOWER_LIMIT2G */
+	(void)hif_join_pdev_param(0x4, 40);   /* TXPOWER_LIMIT5G */
+	(void)hif_join_vdev_param(34, 2);     /* NSS */
+	(void)hif_join_vdev_param(48, 1);     /* TX_ENCAP_TYPE: native Wi-Fi */
+	(void)hif_join_vdev_param(1, 2347);   /* RTS_THRESHOLD */
+	(void)hif_join_sta_ps(0, 0);          /* RX_WAKE_POLICY: wake */
+	(void)hif_join_sta_ps(1, 1);          /* TX_WAKE_THRESHOLD: always */
+	(void)hif_join_sta_ps(2, 0);          /* PSPOLL_COUNT: no maximum */
+	(void)hif_join_sta_powersave_mode(0); /* off */
+}
+
 /* ---- join prerequisites (chain-532c) ------------------------------------
  * With only VDEV_CREATE in place, every MGMT_TX_SEND came back status=3.
  * The same-chip reference (wlan-wip WlanRadio.c wj_step) does
@@ -2697,6 +2803,7 @@ hif_join_begin(void)
 	    g_join_ap.ht, g_join_ap.vht, g_join_ap.wmm,
 	    g_join_ap.secure ? "WPA2" : "open");
 	if (g_join >= 2) {
+		hif_join_once();
 		g_join_started = 0;
 		g_join_peer_mapped = 0;
 		g_join_state = HIF_JOIN_VDEV_START;
