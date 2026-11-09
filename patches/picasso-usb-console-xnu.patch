@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3530 @@
+@@ -0,0 +1,3594 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -603,6 +603,37 @@ new file mode 100644
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +}
 +
++/* Android programs this SMMU's SMRs through the TZ secure-IO proxy
++ * (QCOM_SCM_SVC_IO 0x5: QCOM_SCM_IO_WRITE 0x2 with two 32-bit args,
++ * physical address then value; QCOM_SCM_SVC_INFO 0x6/0x1 probes it).
++ * Raw MMIO turns out to be read-only for SMR/sCR0 (520: probe
++ * writable=0 dead=15, USFCFG write refused), so the proxy is the only
++ * remaining door.  Same SMC conduit the Adreno PAS calls use. */
++struct picasso_usb_scm_reply {
++	uint32_t a0, a1, a2, a3;
++	uint64_t a6;
++};
++
++static struct picasso_usb_scm_reply
++picasso_usb_scm_call(uint32_t function, uint32_t arginfo, uint64_t arg0,
++    uint64_t arg1)
++{
++	register uint64_t x0 __asm__("x0") = function;
++	register uint64_t x1 __asm__("x1") = arginfo;
++	register uint64_t x2 __asm__("x2") = arg0;
++	register uint64_t x3 __asm__("x3") = arg1;
++	register uint64_t x6 __asm__("x6") = 0;
++	register uint64_t x7 __asm__("x7") = 0;
++
++	__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3),
++	    "+r"(x6), "+r"(x7)
++	    :
++	    : "x4", "x5", "x8", "x9", "x10", "x11", "x12", "x13", "x14",
++	      "x15", "x16", "x17", "memory");
++	return (struct picasso_usb_scm_reply){uint32_t(x0), uint32_t(x1),
++	    uint32_t(x2), uint32_t(x3), x6};
++}
++
 +static void
 +picasso_usb_sync_mark(const char *text)
 +{
@@ -1044,6 +1075,39 @@ new file mode 100644
 +			bound20 = (usb_rd(smmu, 0x800u + 4u * 7) == wide);
 +			printf("PICASSO USB: wlan stream 20 mask7=%08x bound=%d\n",
 +			    usb_rd(smmu, 0x800u + 4u * 7), bound20);
++		}
++		/* S2CR array writes DO stick (S2CR[8] stuck in 519 while
++		 * SMR[8] refused).  If this SMMU honours stream indexing, a
++		 * transaction whose stream ID equals the array index uses
++		 * S2CR[id] directly without any SMR match - write the 0x20/
++		 * 0x21 entries and verify; no side effect if it doesn't. */
++		picasso_usb_smmu_write(smmu, 0xc00u + 4u * 0x20u, plan->bank);
++		picasso_usb_smmu_write(smmu, 0xc00u + 4u * 0x21u, plan->bank);
++		printf("PICASSO USB: s2cr direct 0x20=%08x 0x21=%08x bank=%u\n",
++		    usb_rd(smmu, 0xc00u + 4u * 0x20u),
++		    usb_rd(smmu, 0xc00u + 4u * 0x21u), plan->bank);
++		/* Then the TZ proxy: is SCM svc 0x5 (secure IO) even offered,
++		 * can it read SMR[8], and can it write the 0x20 route there? */
++		{
++			const uint32_t kFast = 1u << 31, kS64 = 1u << 30;
++			const uint32_t kSip = 2u << 24;
++			const uint32_t infoFn =
++			    kFast | kS64 | kSip | (0x6u << 8) | 0x1u;
++			const uint64_t ioSel =
++			    ((uint64_t)(2u << 24) | (0x5u << 8) | 0x2u);
++			const uint32_t ioFn = kFast | kS64 | kSip |
++			    (0x5u << 8) | 0x2u;
++			const uint32_t smr8off = 0x800u + 4u * 8u;
++			const uint64_t smr8pa = 0x15000000ull + smr8off;
++			struct picasso_usb_scm_reply r;
++
++			r = picasso_usb_scm_call(infoFn, 1, ioSel, 0);
++			printf("PICASSO USB: scm svc-io avail a0=%08x a1=%08x\n",
++			    r.a0, r.a1);
++			r = picasso_usb_scm_call(ioFn, 2,
++			    smr8pa, 0x80010020u);
++			printf("PICASSO USB: scm write smr8 a0=%08x mmio=%08x\n",
++			    r.a0, usb_rd(smmu, smr8off));
 +		}
 +		/* Fallback: USFCFG=0 makes unmatched streams bypass instead
 +		 * of faulting, so 0x20/0x21 pass through even with no SMR
