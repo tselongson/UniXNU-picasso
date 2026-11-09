@@ -709,7 +709,10 @@ hif_ce_send_gather(uint32_t ce, const uint8_t *head, uint32_t head_len,
 	head_pa = hif_pa_of(hbuf);
 	if (!head_pa) return -1;
 
-	ring[idx].addr = head_pa & CE_DESC_ADDR_MASK;
+	/* wlan-wip wc_send_gather writes the gather flag twice: bit 31 of the
+	 * address high word (bit 63 here, outside the 35-bit address mask) and
+	 * the descriptor flags field. */
+	ring[idx].addr = (head_pa & CE_DESC_ADDR_MASK) | (1ULL << 63);
 	ring[idx].nbytes = (uint16_t)head_len;
 	ring[idx].flags = 1;                     /* CE_DESC_FLAGS_GATHER */
 	ring[idx].toeplitz = 0;
