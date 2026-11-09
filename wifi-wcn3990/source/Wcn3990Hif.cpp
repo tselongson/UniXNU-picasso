@@ -540,6 +540,8 @@ static void hif_join_peer_event(const uint8_t *, uint32_t);
  * before the join state block further down the file. */
 static int g_join;               /* join=<n>: 0 = off, 1 = legacy, >=2 = full pre-req path */
 static int g_join_skip;          /* joinskip: bit1 skip PEER_ASSOC, bit2 skip VDEV_UP */
+static int g_join_sel;           /* joinsel=1: prefer SSID ChinaUnicom; =2: 1902_WIFI_CLOCK */
+static uint32_t g_join_backoff_at; /* do not rejoin before this poll count */
 static int g_join_once;          /* the wj_begin() once-block (vdev/pdev params) */
 static int g_join_once_mask = 0x1ff; /* joinonce=<n>: per-command gates, 0x1ff = all */
 #define HTT_T2H_MSG_TYPE_PEER_MAP    3
@@ -2601,6 +2603,10 @@ hif_join_reset(const char *why)
 	memset(&g_join_ap, 0, sizeof(g_join_ap));
 	g_join_state = HIF_JOIN_IDLE;
 	g_join_tries = 0;
+	/* Back off 10 s before the next attempt: an AP that answered
+	 * "temporarily rejected" (or went silent) needs its stale session
+	 * entry to expire; hammering it every scan round keeps it refusing. */
+	g_join_backoff_at = g_polls + 10000u;
 }
 
 /* ---- the wj_begin() once-block (chain-537 gap) ---------------------------
@@ -2801,9 +2807,36 @@ hif_join_begin(void)
 	if (g_join >= 2) {
 		/* Hidden / malformed entries (empty SSID) are not usable auth
 		 * targets.  chain-532c saw bss[1] with an empty SSID and a bogus
-		 * BSSID; the reference picks by SSID and signal strength. */
-		for (pick = 0; pick < g_join_bss_count; pick++)
-			if (g_join_bss[pick].ssid_len) break;
+		 * BSSID; the reference picks by SSID and signal strength.
+		 * joinsel pins the choice by SSID because join=<n> depends on
+		 * the order of first hearing, which changes every boot. */
+		static const char *const sel_ssid[3] = {
+			NULL, "ChinaUnicom", "1902_WIFI_CLOCK"
+		};
+		const char *want;
+		uint32_t i;
+
+		want = (g_join_sel >= 1 && g_join_sel <= 2) ? sel_ssid[g_join_sel] : NULL;
+		pick = g_join_bss_count;
+		if (want) {
+			size_t wl = strlen(want);
+
+			for (i = 0; i < g_join_bss_count; i++) {
+				const struct hif_join_bss *c = &g_join_bss[i];
+
+				if (c->ssid_len >= wl &&
+				    !memcmp(c->ssid, want, wl)) {
+					pick = i;
+					break;
+				}
+			}
+			if (pick == g_join_bss_count)
+				HIF_LOG("JOIN: joinsel=%d found no '%s' entry",
+				    g_join_sel, want);
+		}
+		if (pick == g_join_bss_count)
+			for (pick = 0; pick < g_join_bss_count; pick++)
+				if (g_join_bss[pick].ssid_len) break;
 		if (pick == g_join_bss_count) return;
 		b = &g_join_bss[pick];
 	} else {
@@ -3011,6 +3044,7 @@ hif_join_bss_note(const uint8_t *f, uint32_t n, uint32_t channel,
 		 * named entry exists. */
 		if (g_join && g_state == HIF_READY &&
 		    g_join_state == HIF_JOIN_IDLE &&
+		    g_polls >= g_join_backoff_at &&
 		    (g_join >= 2 ? b->ssid_len != 0 :
 		     at + 1 == (uint32_t)g_join))
 			hif_join_begin();
@@ -3034,6 +3068,7 @@ hif_join_resp(const uint8_t *f, uint32_t n)
 		transaction = (uint16_t)(f[26] | (uint16_t)f[27] << 8);
 		if (transaction != 2) return;
 		status = (uint16_t)(f[28] | (uint16_t)f[29] << 8);
+		hif_dump_hex("JOIN auth resp", f, n < 32 ? n : 32);
 		HIF_LOG("JOIN: auth resp status=%d after %u tries",
 		    (int)status, g_join_tries + 1u);
 		if (status) {
@@ -3050,6 +3085,7 @@ hif_join_resp(const uint8_t *f, uint32_t n)
 	    g_join_state == HIF_JOIN_ASSOC_SENT && n >= 30) {
 		uint16_t status = (uint16_t)(f[26] | (uint16_t)f[27] << 8);
 
+		hif_dump_hex("JOIN assoc resp", f, n < 40 ? n : 40);
 		HIF_LOG("JOIN: assoc resp status=%d aid=%d", (int)status,
 		    (int)((f[28] | (uint16_t)f[29] << 8) & 0x3fffu));
 		if (status) {
@@ -3359,6 +3395,7 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 		if (g_join && len >= 16 && hif_le32(payload + 8) == 0 &&
 		    g_state == HIF_READY &&
 		    g_join_state == HIF_JOIN_IDLE &&
+		    g_polls >= g_join_backoff_at &&
 		    g_join_bss_count >= (uint32_t)g_join) {
 			hif_join_begin();
 		} else if (g_join && len >= 16 &&
@@ -4075,6 +4112,13 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	v = 0;
 	if (PE_parse_boot_argn("joinskip", &v, sizeof(v)) && v <= 3) {
 		g_join_skip = (int)v;
+	}
+	/* joinsel=1 selects the first BSS whose SSID starts with "ChinaUnicom",
+	 * =2 "1902_WIFI_CLOCK".  join=<n> alone is order-of-hearing dependent
+	 * and picked a different access point on nearly every boot. */
+	v = 0;
+	if (PE_parse_boot_argn("joinsel", &v, sizeof(v)) && v <= 2) {
+		g_join_sel = (int)v;
 	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
 	    "wmiinit=%d; scanchans=%d; tlvpad=%d; chanlist=%d; vdevup=%d; "
