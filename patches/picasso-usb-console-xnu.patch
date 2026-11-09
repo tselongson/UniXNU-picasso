@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3602 @@
+@@ -0,0 +1,3632 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -1083,6 +1083,36 @@ new file mode 100644
 +			bound20 = (usb_rd(smmu, 0x800u + 4u * 7) == wide);
 +			printf("PICASSO USB: wlan stream 20 mask7=%08x bound=%d\n",
 +			    usb_rd(smmu, 0x800u + 4u * 7), bound20);
++		}
++		/* 521 (x5): new stream IDs are refused outright (id=0x20 in
++		 * either slot, mask widened or not), but slots 6/7 accept
++		 * their own existing IDs - Android runs the 0x20 and 0xc0
++		 * masters out of exactly these two free slots, and our USB
++		 * console took one.  Merge instead: mask 0x21 on id 0xe0
++		 * covers {0xc0,0xc1,0xe0,0xe1} (they differ only in bits 0
++		 * and 5), freeing slot 7 for 0x20/0x21.  Order matters:
++		 * widen slot 6 first so no master ever loses its route. */
++		if (!bound20) {
++			const uint32_t merged6 =
++			    0x80000000u | (0x21u << 16) | 0x00e0u;
++			const uint32_t new7 =
++			    0x80000000u | (0x1u << 16) | 0x0020u;
++
++			picasso_usb_smmu_write(smmu, 0x800u + 4u * 6,
++			    merged6);
++			if (usb_rd(smmu, 0x800u + 4u * 6) == merged6) {
++				printf("PICASSO USB: smr6 merged c0+e0 =%08x\n",
++				    usb_rd(smmu, 0x800u + 4u * 6));
++				picasso_usb_smmu_write(smmu,
++				    0x800u + 4u * 7, new7);
++				bound20 = (usb_rd(smmu,
++				    0x800u + 4u * 7) == new7);
++				printf("PICASSO USB: wlan stream 20 slot7=%08x bound=%d\n",
++				    usb_rd(smmu, 0x800u + 4u * 7), bound20);
++			} else {
++				printf("PICASSO USB: smr6 merge refused =%08x\n",
++				    usb_rd(smmu, 0x800u + 4u * 6));
++			}
 +		}
 +		/* S2CR array writes DO stick (S2CR[8] stuck in 519 while
 +		 * SMR[8] refused).  If this SMMU honours stream indexing, a
