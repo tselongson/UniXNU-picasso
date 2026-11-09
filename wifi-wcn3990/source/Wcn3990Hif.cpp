@@ -391,6 +391,14 @@ struct hif_dma_block {
 	 * stays intact until the target has fetched it.  8 KiB, far inside
 	 * the HIF_DMA_SIZE slack (block is ~4.5 MiB of 6 MiB). */
 	uint8_t mgmt_tx[8][1024];
+	/* WPA2 TX frames: EAPOL msg2/4 go out through HTT TX_FRM with a frag
+	 * descriptor, four rotating 2 KiB slots (same slot count as the frag
+	 * descriptors reserved in htt_frag[0..3]). */
+	uint8_t tx_frame[4][2048];
+	/* TX_FRM headers for the gather path: hif_htt_send() already rotates
+	 * tx4[], so sharing it would let an HTT H2T message overwrite a header
+	 * the copy engine has not fetched yet (the CVE-2022-50700 pattern). */
+	uint8_t tx_head[4][64];
 	/* wcn3990 keeps the per-CE read indices in DDR (hw_params.rri_on_ddr);
 	 * ce.c: ath10k_ce_alloc_rri() points the wrapper at this array. */
 	uint32_t rri[16];
@@ -675,6 +683,50 @@ hif_ce_send(uint32_t ce, uint8_t *buf, uint32_t len)
 	return 0;
 }
 
+/* Two-segment send for HTT data frames (wlan-wip wc_send_gather): the first
+ * descriptor carries the 28-byte HTT TX_FRM header and the CE_WCN3990 GATHER
+ * flag (bit 31 of the high address word), the second points at the frame
+ * body.  CE4 is the only OUT pipe whose src_sz_max (256) could not hold a
+ * full 802.11 frame, hence the gather. */
+static int
+hif_ce_send_gather(uint32_t ce, const uint8_t *head, uint32_t head_len,
+    uint64_t body_pa, uint32_t body_len)
+{
+	struct wcn_ce_desc_64 *ring;
+	uint32_t entries, *wr, idx, next;
+	uint8_t *shadow = NULL, *hbuf;
+	uint64_t head_pa;
+
+	if (!g_regs_live || g_stage < 3 || ce != 4) return -1;
+	if (body_len > (uint32_t)CE_BUF_BYTES || head_len > 256u) return -1;
+	ring = g_dma->src4;
+	entries = hif_shape[4].src_n;
+	wr = &g_wr4;
+	idx = *wr & (entries - 1);
+
+	hbuf = g_dma->tx_head[idx & 3];
+	memcpy(hbuf, head, head_len);
+	head_pa = hif_pa_of(hbuf);
+	if (!head_pa) return -1;
+
+	ring[idx].addr = head_pa & CE_DESC_ADDR_MASK;
+	ring[idx].nbytes = (uint16_t)head_len;
+	ring[idx].flags = 1;                     /* CE_DESC_FLAGS_GATHER */
+	ring[idx].toeplitz = 0;
+	next = (idx + 1) & (entries - 1);
+	ring[next].addr = body_pa & CE_DESC_ADDR_MASK;
+	ring[next].nbytes = (uint16_t)body_len;
+	ring[next].flags = 0;
+	ring[next].toeplitz = 0;
+	hif_mb();
+
+	*wr = (next + 1) & (entries - 1);
+	shadow = (uint8_t *)(uintptr_t)CE4_SHADOW_SR_WR;
+	*(volatile uint32_t *)(uintptr_t)(g_ce_va + (uintptr_t)shadow) = *wr;
+	hif_mb();
+	return 0;
+}
+
 /* Post one more receive buffer on CE2 and advance the dest write index.
  * ce.c: ath10k_ce_rx_update_write_idx() keeps one slot free; we start with
  * CE2_ENTRIES-1 posted buffers for the same reason.  The buffer must be filled
@@ -709,6 +761,7 @@ static uint32_t g_htt_read;       /* RX_IND consumption cursor */
 static uint64_t g_htt_buf_pa;     /* physical base of htt_buf[0] */
 static uint32_t g_wr_rx_ind, g_wr_rx_in_ord, g_wr_rx_frames, g_wr_rx_eapol,
     g_wr_rx_bad, g_wr_rx_undone;
+static void hif_wpa_handle_eapol(const uint8_t *e, uint32_t n);
 
 static uint8_t *
 hif_wr_buf_va(uint64_t pa)
@@ -779,6 +832,7 @@ hif_wr_msdu(uint8_t *buf, uint32_t len)
 		g_wr_rx_eapol++;
 		HIF_LOG("JOIN: EAPOL frame %u bytes ver=%u type=%u code=%u",
 		    bytes, eth[14], eth[15], eth[16]);
+		hif_wpa_handle_eapol(eth + 14, bytes - 14u);
 		return;
 	}
 	if ((g_wr_rx_frames & 63u) == 1u)
@@ -2210,6 +2264,532 @@ hif_join_rsn_prepare(const uint8_t *e)
 	return 0;
 }
 
+/* ===================== WPA2-PSK four-way handshake (wpa=1) ==============
+ * Grafted from wlan-wip (drivers/NativeWlan/WlanRadio.c): wk_sha1/wk_hmac/
+ * wk_prf/wk_pmk L3231-3383, wk_aes_*/wk_unwrap L3390-3450, wk_reply L4277,
+ * wj_eapol L4316, wj_send_key L3965.  Credentials come from boot-args only
+ * (wpa=1, wpass=<passphrase>) so no secret lives in this source file. */
+static void hif_join_peer_param(uint32_t id, uint32_t value);
+
+#define WPA_EAPOL_FIXED 99u
+
+static int g_wpa;
+static char g_wpa_pass[64];
+
+static struct {
+	uint8_t stage;                 /* 0 idle, 1 msg1 processed */
+	uint8_t eapol_ver, have_replay, keyed;
+	uint8_t anonce[32], snonce[32], pmk[32], ptk[48], replay[8];
+	uint8_t gtk[16], gtk_idx, gtk_len;
+	uint32_t tx_slot;
+} g_wpa_st;
+
+static inline uint32_t
+wpa_rol(uint32_t v, unsigned n)
+{
+	return v << n | v >> (32 - n);
+}
+
+static void
+wpa_sha1_block(uint32_t h[5], const uint8_t *p)
+{
+	uint32_t w[80], i, a, b, c, d, e;
+
+	for (i = 0; i < 16; i++)
+		w[i] = (uint32_t)p[4 * i] << 24 | (uint32_t)p[4 * i + 1] << 16 |
+		    (uint32_t)p[4 * i + 2] << 8 | p[4 * i + 3];
+	for (i = 16; i < 80; i++)
+		w[i] = wpa_rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+	a = h[0]; b = h[1]; c = h[2]; d = h[3]; e = h[4];
+	for (i = 0; i < 80; i++) {
+		uint32_t f, t;
+
+		if (i < 20) f = ((b & c) | (~b & d)) + 0x5a827999u;
+		else if (i < 40) f = (b ^ c ^ d) + 0x6ed9eba1u;
+		else if (i < 60) f = ((b & c) | (b & d) | (c & d)) + 0x8f1bbcdcu;
+		else f = (b ^ c ^ d) + 0xca62c1d6u;
+		t = wpa_rol(a, 5) + f + e + w[i];
+		e = d; d = c; c = wpa_rol(b, 30); b = a; a = t;
+	}
+	h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+}
+
+static void
+wpa_sha1(const uint8_t *a, uint32_t an, const uint8_t *b, uint32_t bn,
+    uint8_t out[20])
+{
+	uint32_t h[5] = { 0x67452301u, 0xefcdab89u, 0x98badcfeu,
+	    0x10325476u, 0xc3d2e1f0u };
+	uint8_t block[64];
+	uint32_t fill = 0, piece, i;
+	uint64_t bits = ((uint64_t)an + bn) * 8u;
+
+	for (piece = 0; piece < 2; piece++) {
+		const uint8_t *p = piece ? b : a;
+		uint32_t n = piece ? bn : an;
+
+		while (n) {
+			uint32_t take;
+
+			if (!fill && n >= 64) {
+				wpa_sha1_block(h, p);
+				p += 64; n -= 64; continue;
+			}
+			take = n < 64 - fill ? n : 64 - fill;
+			memcpy(block + fill, p, take);
+			fill += take; p += take; n -= take;
+			if (fill == 64) { wpa_sha1_block(h, block); fill = 0; }
+		}
+	}
+	block[fill++] = 0x80;
+	if (fill > 56) {
+		memset(block + fill, 0, 64 - fill);
+		wpa_sha1_block(h, block);
+		fill = 0;
+	}
+	memset(block + fill, 0, 56 - fill);
+	for (i = 0; i < 8; i++) block[56 + i] = (uint8_t)(bits >> (56 - 8 * i));
+	wpa_sha1_block(h, block);
+	for (i = 0; i < 5; i++) {
+		unsigned k;
+
+		for (k = 0; k < 4; k++)
+			out[4 * i + k] = (uint8_t)(h[i] >> (24 - 8 * k));
+	}
+}
+
+static void
+wpa_hmac(const uint8_t *key, uint32_t kn, const uint8_t *data, uint32_t n,
+    uint8_t out[20])
+{
+	uint8_t pad[64], inner[20];
+	uint32_t i;
+
+	memset(pad, 0x36, sizeof(pad));
+	if (kn > 64) kn = 64;
+	for (i = 0; i < kn; i++) pad[i] ^= key[i];
+	wpa_sha1(pad, 64, data, n, inner);
+	for (i = 0; i < 64; i++) pad[i] ^= 0x36 ^ 0x5c;
+	wpa_sha1(pad, 64, inner, 20, out);
+}
+
+static void
+wpa_prf(const uint8_t *key, uint32_t kn, const char *label,
+    const uint8_t *data, uint32_t n, uint8_t *out, uint32_t bytes)
+{
+	uint8_t m[128], digest[20];
+	uint32_t ln = (uint32_t)strlen(label), i;
+
+	if (ln + 2u + n > sizeof(m)) return;
+	memcpy(m, label, ln);
+	m[ln] = 0;
+	memcpy(m + ln + 1u, data, n);
+	for (i = 0; i * 20u < bytes; i++) {
+		uint32_t take = bytes - i * 20u;
+
+		m[ln + 1u + n] = (uint8_t)i;
+		wpa_hmac(key, kn, m, ln + 2u + n, digest);
+		if (take > 20u) take = 20u;
+		memcpy(out + i * 20u, digest, take);
+	}
+}
+
+static void
+wpa_pmk(const char *pass, uint32_t pn, const uint8_t *ssid, uint32_t sn,
+    uint8_t out[32])
+{
+	uint8_t salt[40];
+	uint32_t done = 0, block;
+
+	memcpy(salt, ssid, sn);
+	for (block = 1; done < 32; block++) {
+		uint8_t u[20], t[20];
+		unsigned round, i;
+		uint32_t take;
+
+		salt[sn] = salt[sn + 1] = salt[sn + 2] = 0;
+		salt[sn + 3] = (uint8_t)block;
+		wpa_hmac((const uint8_t *)pass, pn, salt, sn + 4u, u);
+		memcpy(t, u, 20);
+		for (round = 1; round < 4096; round++) {
+			wpa_hmac((const uint8_t *)pass, pn, u, 20, u);
+			for (i = 0; i < 20; i++) t[i] ^= u[i];
+		}
+		take = 32 - done < 20 ? 32 - done : 20;
+		memcpy(out + done, t, take);
+		done += take;
+	}
+}
+
+static uint8_t wpa_sbox[256], wpa_inv[256];
+static inline uint8_t wpa_xt(uint8_t v)
+{
+	return (uint8_t)(v << 1) ^ (v & 0x80 ? 0x1b : 0);
+}
+
+static uint8_t
+wpa_mul(uint8_t a, uint8_t b)
+{
+	uint8_t r = 0;
+
+	while (b) {
+		if (b & 1) r ^= a;
+		a = wpa_xt(a);
+		b >>= 1;
+	}
+	return r;
+}
+
+static void
+wpa_tables(void)
+{
+	uint8_t p = 1, q = 1;
+	unsigned i;
+
+	if (wpa_sbox[0]) return;
+	do {
+		uint8_t x;
+
+		p = p ^ wpa_xt(p);
+		q ^= (uint8_t)(q << 1);
+		q ^= (uint8_t)(q << 2);
+		q ^= (uint8_t)(q << 4);
+		if (q & 0x80) q ^= 0x09;
+		x = q ^ (uint8_t)(q << 1 | q >> 7) ^ (uint8_t)(q << 2 | q >> 6) ^
+		    (uint8_t)(q << 3 | q >> 5) ^ (uint8_t)(q << 4 | q >> 4);
+		wpa_sbox[p] = x ^ 0x63;
+	} while (p != 1);
+	wpa_sbox[0] = 0x63;
+	for (i = 0; i < 256; i++) wpa_inv[wpa_sbox[i]] = (uint8_t)i;
+}
+
+static void
+wpa_aes_expand(const uint8_t key[16], uint8_t rk[176])
+{
+	uint8_t rcon = 1;
+	unsigned i, k;
+
+	memcpy(rk, key, 16);
+	for (i = 16; i < 176; i += 4) {
+		uint8_t t[4];
+
+		memcpy(t, rk + i - 4, 4);
+		if (!(i % 16)) {
+			uint8_t first = t[0];
+
+			t[0] = wpa_sbox[t[1]] ^ rcon;
+			t[1] = wpa_sbox[t[2]];
+			t[2] = wpa_sbox[t[3]];
+			t[3] = wpa_sbox[first];
+			rcon = wpa_xt(rcon);
+		}
+		for (k = 0; k < 4; k++) rk[i + k] = rk[i - 16 + k] ^ t[k];
+	}
+}
+
+static void
+wpa_aes_decrypt(const uint8_t rk[176], uint8_t s[16])
+{
+	int round;
+	unsigned k, c, r;
+
+	for (k = 0; k < 16; k++) s[k] ^= rk[160 + k];
+	for (round = 9; round >= 0; round--) {
+		uint8_t t[16];
+
+		for (c = 0; c < 4; c++)
+			for (r = 0; r < 4; r++)
+				t[(4 * (c + r) + r) % 16] = wpa_inv[s[4 * c + r]];
+		for (k = 0; k < 16; k++) t[k] ^= rk[16 * (unsigned)round + k];
+		if (round) {
+			for (c = 0; c < 4; c++) {
+				const uint8_t *i = t + 4 * c;
+
+				s[4 * c] = wpa_mul(i[0], 14) ^ wpa_mul(i[1], 11) ^
+				    wpa_mul(i[2], 13) ^ wpa_mul(i[3], 9);
+				s[4 * c + 1] = wpa_mul(i[0], 9) ^ wpa_mul(i[1], 14) ^
+				    wpa_mul(i[2], 11) ^ wpa_mul(i[3], 13);
+				s[4 * c + 2] = wpa_mul(i[0], 13) ^ wpa_mul(i[1], 9) ^
+				    wpa_mul(i[2], 14) ^ wpa_mul(i[3], 11);
+				s[4 * c + 3] = wpa_mul(i[0], 11) ^ wpa_mul(i[1], 13) ^
+				    wpa_mul(i[2], 9) ^ wpa_mul(i[3], 14);
+			}
+		} else {
+			memcpy(s, t, 16);
+		}
+	}
+}
+
+static int
+wpa_unwrap(const uint8_t kek[16], const uint8_t *in, uint32_t n, uint8_t *out)
+{
+	uint8_t rk[176], a[8], b[16];
+	uint32_t blocks, i;
+	int j;
+	unsigned k;
+
+	if (n < 24 || n % 8) return -1;
+	wpa_tables();
+	wpa_aes_expand(kek, rk);
+	blocks = n / 8u - 1u;
+	memcpy(a, in, 8);
+	memcpy(out, in + 8, n - 8u);
+	for (j = 5; j >= 0; j--) {
+		for (i = blocks; i >= 1; i--) {
+			uint64_t t = (uint64_t)blocks * (unsigned)j + i;
+
+			memcpy(b, a, 8);
+			for (k = 0; k < 8; k++) b[7 - k] ^= (uint8_t)(t >> (8 * k));
+			memcpy(b + 8, out + 8u * (i - 1u), 8);
+			wpa_aes_decrypt(rk, b);
+			memcpy(a, b, 8);
+			memcpy(out + 8u * (i - 1u), b + 8, 8);
+		}
+	}
+	for (k = 0; k < 8; k++)
+		if (a[k] != 0xa6) return -1;
+	return 0;
+}
+
+/* ---- TX path: 28-byte HTT TX_FRM + frag desc, CE4 two-segment gather ---- */
+static int
+hif_wpa_tx_frame(const uint8_t *frame, uint32_t len, int eapol)
+{
+	uint32_t slot, prefetch, lo, fl;
+	uint64_t pa, fr_pa, desc_pa;
+	uint16_t hi, htc, flags1, id, peer = 0xffff, freq = 0;
+	uint8_t h[28], *ext;
+	int rc;
+
+	if (!g_dma || len > 2048u || len < 14u) return -1;
+	slot = g_wpa_st.tx_slot++ & 3u;
+	fr_pa = hif_pa_of(g_dma->tx_frame[slot]);
+	if (!fr_pa) return -1;
+	memcpy(g_dma->tx_frame[slot], frame, len);
+	prefetch = len < 50u ? len : 50u;
+	prefetch = (prefetch + 3u) & ~3u;
+
+	desc_pa = hif_pa_of(&g_dma->htt_frag[slot * HTT_FRAG_DESC_SIZE]);
+	if (!desc_pa) return -1;
+	ext = &g_dma->htt_frag[slot * HTT_FRAG_DESC_SIZE];
+	memset(ext, 0, HTT_FRAG_DESC_SIZE);
+	lo = (uint32_t)fr_pa;
+	hi = (uint16_t)(fr_pa >> 32);
+	fl = len;
+	memcpy(ext + 24, &lo, 4);
+	memcpy(ext + 28, &hi, 2);
+	memcpy(ext + 30, &fl, 2);
+
+	memset(h, 0, sizeof(h));
+	htc = (uint16_t)(20u + prefetch);
+	flags1 = (uint16_t)((!g_join_ap.wmm ? 16u : eapol ? 7u : 0u) << 6 | 1u << 11);
+	id = (uint16_t)slot;
+	h[0] = g_htt_eid;
+	hif_put16(h + 2, htc);
+	h[8] = 1;   /* HTT_H2T_MSG_TYPE_TX_FRM */
+	h[9] = (uint8_t)(1u | 1u << 5 | (eapol && !g_wpa_st.keyed ? 4u : 0u));
+	hif_put16(h + 10, flags1);
+	hif_put16(h + 12, (uint16_t)fl);
+	hif_put16(h + 14, id);
+	hif_put64(h + 16, desc_pa);
+	hif_put16(h + 24, peer);
+	hif_put16(h + 26, freq);
+
+	rc = hif_ce_send_gather(4, h, (uint32_t)sizeof(h), fr_pa, prefetch);
+	HIF_LOG("WPA: tx frame %u bytes slot=%u prefetch=%u rc=%d", len, slot,
+	    prefetch, rc);
+	return rc;
+}
+
+/* wlan-wip wj_send_key(): WMI_VDEV_INSTALL_KEY (0x5009), TLV 0x60 with the
+ * 92-byte struct, then the key bytes in an ARRAY_BYTE TLV (tag 0x11). */
+static void
+hif_wpa_send_key(int pairwise, unsigned index, const uint8_t key[16])
+{
+	uint8_t tlv[160], *p = tlv;
+	uint32_t body[23];
+
+	memset(tlv, 0, sizeof(tlv));
+	memset(body, 0, sizeof(body));
+	body[0] = 0;                                   /* vdev id */
+	memcpy((uint8_t *)body + 4, g_join_ap.b.bssid, 6); /* peer mac (8 B) */
+	body[3] = index;
+	body[4] = pairwise ? 0u : 1u;                  /* key type */
+	body[5] = 4;                                   /* WMI_TLV_CIPHER_AES_CCM */
+	/* body[6..19]: rx/tx sequence counters, all zero */
+	body[20] = 16;                                 /* key length */
+	p = hif_put_tlv(p, 0x60, 92, body);
+	p = hif_put_tlv(p, 0x11, 16, key);
+	HIF_LOG("WPA: install %s key idx=%u", pairwise ? "pairwise" : "group",
+	    index);
+	(void)hif_wmi_command(0x5009, tlv, (uint32_t)(p - tlv));
+}
+
+/* One EAPOL frame out: 32-byte 802.11 data header + LLC/SNAP 0x888e + body. */
+static void
+hif_wpa_reply(uint16_t info, const uint8_t *replay, const uint8_t *nonce,
+    const uint8_t *data, uint16_t data_len)
+{
+	static uint8_t f[WPA_EAPOL_FIXED + 64];
+	static uint8_t frame[32 + WPA_EAPOL_FIXED + 64];
+	uint8_t digest[20];
+	uint16_t body = (uint16_t)(WPA_EAPOL_FIXED - 4u + data_len);
+	uint32_t n;
+
+	memset(f, 0, sizeof(f));
+	f[0] = g_wpa_st.eapol_ver;
+	f[1] = 3;
+	f[2] = (uint8_t)(body >> 8);
+	f[3] = (uint8_t)body;
+	f[4] = 2;
+	f[5] = (uint8_t)(info >> 8);
+	f[6] = (uint8_t)info;
+	memcpy(f + 9, replay, 8);
+	if (nonce) memcpy(f + 17, nonce, 32);
+	f[97] = (uint8_t)(data_len >> 8);
+	f[98] = (uint8_t)data_len;
+	if (data_len) memcpy(f + 99, data, data_len);
+	wpa_hmac(g_wpa_st.ptk, 16, f, WPA_EAPOL_FIXED + data_len, digest);
+	memcpy(f + 81, digest, 16);
+
+	memset(frame, 0, sizeof(frame));
+	frame[0] = 0x08;
+	frame[1] = (uint8_t)(0x01u | (g_wpa_st.keyed ? 0x40u : 0));
+	memcpy(frame + 4, g_join_ap.b.bssid, 6);       /* addr1 */
+	frame[10] = 0x02;                              /* addr2: our base MAC */
+	frame[15] = 0x01;
+	memcpy(frame + 16, g_join_ap.b.bssid, 6);      /* addr3 */
+	frame[24] = frame[25] = 0xaa;
+	frame[26] = 3;
+	frame[30] = 0x88;
+	frame[31] = 0x8e;
+	n = (uint32_t)(WPA_EAPOL_FIXED + data_len);
+	memcpy(frame + 32, f, n);
+	(void)hif_wpa_tx_frame(frame, 32u + n, 1);
+}
+
+/* 802.11i PTK derivation; lower MAC first, then the lower nonce. */
+static void
+hif_wpa_derive(void)
+{
+	uint8_t d[76];
+	const uint8_t own[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+	int own_low = memcmp(own, g_join_ap.b.bssid, 6) < 0;
+	int nonce_low = memcmp(g_wpa_st.snonce, g_wpa_st.anonce, 32) < 0;
+
+	memcpy(d, own_low ? own : g_join_ap.b.bssid, 6);
+	memcpy(d + 6, own_low ? g_join_ap.b.bssid : own, 6);
+	memcpy(d + 12, nonce_low ? g_wpa_st.snonce : g_wpa_st.anonce, 32);
+	memcpy(d + 44, nonce_low ? g_wpa_st.anonce : g_wpa_st.snonce, 32);
+	wpa_prf(g_wpa_st.pmk, 32, "Pairwise key expansion", d, sizeof(d),
+	    g_wpa_st.ptk, sizeof(g_wpa_st.ptk));
+}
+
+/* wlan-wip wj_eapol(): message 1 -> 2, message 3 -> 4 + keys + authorize. */
+static void
+hif_wpa_handle_eapol(const uint8_t *e, uint32_t n)
+{
+	static uint8_t copy[512], plain[400];
+	uint32_t total, data_len, kn, gtk_bytes = 0, gtk_id = 0, at;
+	uint16_t info;
+	int pairwise, ack, mic;
+	uint8_t digest[20];
+	const uint8_t *kd, *gtk = NULL;
+
+	if (!g_wpa || !g_join_ap.secure || n < WPA_EAPOL_FIXED) return;
+	if (e[1] != 3 || (e[4] != 2 && e[4] != 254)) return;
+	total = 4u + ((uint32_t)e[2] << 8 | e[3]);
+	if (total < WPA_EAPOL_FIXED || total > n || total > sizeof(copy)) return;
+	info = (uint16_t)(e[5] << 8 | e[6]);
+	data_len = (uint16_t)(e[97] << 8 | e[98]);
+	if (WPA_EAPOL_FIXED + data_len > total) return;
+	if ((info & 7u) != 2u) {
+		HIF_LOG("WPA: key descriptor version %u not handled", info & 7u);
+		return;
+	}
+	pairwise = (info & 0x0008u) != 0;
+	ack = (info & 0x0080u) != 0;
+	mic = (info & 0x0100u) != 0;
+	g_wpa_st.eapol_ver = e[0];
+	if (pairwise && ack && !mic) {
+		uint32_t i, seed;
+
+		memcpy(g_wpa_st.anonce, e + 17, 32);
+		seed = g_polls * 2654435761u ^ 0x9e3779b9u;
+		for (i = 0; i < 32; i++) {
+			seed ^= seed << 13;
+			seed ^= seed >> 17;
+			seed ^= seed << 5;
+			g_wpa_st.snonce[i] = (uint8_t)seed;
+		}
+		wpa_pmk(g_wpa_pass, (uint32_t)strlen(g_wpa_pass),
+		    g_join_ap.b.ssid, g_join_ap.b.ssid_len, g_wpa_st.pmk);
+		hif_wpa_derive();
+		g_wpa_st.stage = 1;
+		hif_wpa_reply(0x010a, e + 9, g_wpa_st.snonce, g_join_ap.rsn,
+		    (uint16_t)sizeof(g_join_ap.rsn));
+		HIF_LOG("WPA: msg1 seen, msg2 sent (ANonce=%02x%02x%02x%02x...)",
+		    g_wpa_st.anonce[0], g_wpa_st.anonce[1], g_wpa_st.anonce[2],
+		    g_wpa_st.anonce[3]);
+		return;
+	}
+	if (!mic || !g_wpa_st.stage) return;
+	memcpy(copy, e, total);
+	memset(copy + 81, 0, 16);
+	wpa_hmac(g_wpa_st.ptk, 16, copy, total, digest);
+	if (memcmp(digest, e + 81, 16)) {
+		HIF_LOG("WPA: MIC mismatch - wrong passphrase?");
+		return;
+	}
+	if (g_wpa_st.have_replay && memcmp(e + 9, g_wpa_st.replay, 8) < 0)
+		return;
+	memcpy(g_wpa_st.replay, e + 9, 8);
+	g_wpa_st.have_replay = 1;
+	kd = e + WPA_EAPOL_FIXED;
+	kn = data_len;
+	if (info & 0x1000u) {
+		if (data_len > sizeof(plain) + 8u ||
+		    wpa_unwrap(g_wpa_st.ptk + 16, e + WPA_EAPOL_FIXED, data_len,
+		    plain)) {
+			HIF_LOG("WPA: key data does not unwrap");
+			return;
+		}
+		kd = plain;
+		kn = data_len - 8u;
+	}
+	for (at = 0; at + 2u <= kn && at + 2u + kd[at + 1] <= kn;
+	    at += 2u + kd[at + 1]) {
+		if (kd[at] == 0xdd && kd[at + 1] >= 6 && kd[at + 2] == 0x00 &&
+		    kd[at + 3] == 0x0f && kd[at + 4] == 0xac && kd[at + 5] == 1) {
+			gtk_id = kd[at + 6] & 3u;
+			gtk = kd + at + 8;
+			gtk_bytes = kd[at + 1] - 6u;
+		}
+		if (!kd[at] && !kd[at + 1]) break;
+	}
+	if (pairwise && ack) {
+		if (memcmp(e + 17, g_wpa_st.anonce, 32)) return;
+		hif_wpa_reply(0x030a, e + 9, NULL, NULL, 0);
+		g_wpa_st.gtk_len = gtk && gtk_bytes >= 16 ? 16 : 0;
+		g_wpa_st.gtk_idx = (uint8_t)gtk_id;
+		if (g_wpa_st.gtk_len)
+			memcpy(g_wpa_st.gtk, gtk, 16);
+		hif_wpa_send_key(1, 0, g_wpa_st.ptk + 32);
+		if (g_wpa_st.gtk_len)
+			hif_wpa_send_key(0, g_wpa_st.gtk_idx, g_wpa_st.gtk);
+		hif_join_peer_param(3, 1);            /* PEER_AUTHORIZE */
+		g_wpa_st.keyed = 1;
+		HIF_LOG("WPA: msg3 seen, msg4 sent, keys installed, peer authorized");
+		return;
+	}
+	if (!pairwise && ack) {
+		if (gtk && gtk_bytes >= 16)
+			hif_wpa_send_key(0, gtk_id, gtk);
+		hif_wpa_reply(0x0302, e + 9, NULL, NULL, 0);
+		HIF_LOG("WPA: group key updated");
+	}
+}
+
 /* wlan-wip wj_mgmt_header(): a 24-byte management header to the AP. */
 static void
 hif_join_mgmt_header(uint8_t *f, uint8_t type)
@@ -3109,8 +3689,9 @@ hif_join_resp(const uint8_t *f, uint32_t n)
 		 * 255 is WMI_TLV_PEER_DUMMY_VAR, and the firmware answered the
 		 * 0x401 early-crash message, then the kernel panicked. */
 		if (g_join_ap.secure)
-			HIF_LOG("JOIN: secure AP, key handshake not in this "
-			    "phase, stopping after vdev up");
+			HIF_LOG("JOIN: secure AP, %s", g_wpa ?
+			    "waiting for EAPOL message 1" :
+			    "key handshake not in this phase, stopping after vdev up");
 		else
 			hif_join_peer_param(3, 1);  /* PEER_AUTHORIZE */
 		g_join_tx_at = g_join_wait_at = g_polls;
@@ -4120,6 +4701,14 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("joinsel", &v, sizeof(v)) && v <= 2) {
 		g_join_sel = (int)v;
 	}
+	/* wpa=1 runs the WPA2-PSK four-way handshake after association;
+	 * wpass=<passphrase> is the only place the secret enters the driver
+	 * (boot-arg, never compiled in). */
+	v = 0;
+	if (PE_parse_boot_argn("wpa", &v, sizeof(v)) && v <= 1) {
+		g_wpa = (int)v;
+	}
+	(void)PE_parse_boot_argn("wpass", g_wpa_pass, sizeof(g_wpa_pass));
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
 	    "wmiinit=%d; scanchans=%d; tlvpad=%d; chanlist=%d; vdevup=%d; "
 	    "scanlinux=%d; httconn=%d; httsetup=%d; httring=%d; scanwait=%d; "
