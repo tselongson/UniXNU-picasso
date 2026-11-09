@@ -485,10 +485,14 @@ static int g_tlv_pad;         /* 0 = Linux-exact TLV lengths */
 /* 526+: byte-for-byte alignment with the other WCN3990 port
  * (work/trogdor/coachz_wifi.c, SC7180) and Linux ath10k.  Each switch is
  * independent so a build can add one difference at a time. */
-static int g_scan_cmd;        /* scancmd=1: 100B start_scan + 8B MAC/BSSID + Linux values */
-static int g_regdom;          /* regdom=1: 24B regdomain, world SKU 0x6c */
-static int g_chan_v2;         /* chanv2=1: trogdor 6x32-bit channel entries */
-static int g_pdev_param;      /* pdevparam=1: four PDEV_SET_PARAM before regdomain */
+/* One bitmask boot-arg (scanfix=N) carries all four independent switches:
+ * the 995-byte cmdline cannot fit four extra tokens, and a single token
+ * also lets one image express all 15 A/B combinations. */
+#define SCANFIX_CMD       0x1
+#define SCANFIX_REGDOM    0x2
+#define SCANFIX_CHANV2    0x4
+#define SCANFIX_PDEVPARAM 0x8
+static int g_scan_fix;
 static int g_chan_list;       /* chanlist=1: WMI_SCAN_CHAN_LIST before regdomain */
 static int g_vdev_up;         /* vdevup=1: WMI_VDEV_UP after VDEV_CREATE */
 static int g_scan_linux;      /* scanlinux=1: Linux-exact START_SCAN arguments */
@@ -1279,7 +1283,7 @@ hif_send_pdev_regdomain(void)
 
 	memset(tlv, 0, sizeof(tlv));
 	memset(cmd, 0, sizeof(cmd));
-	if (g_regdom) {
+	if (g_scan_fix & SCANFIX_REGDOM) {
 		cmd[1] = 0x6c;
 		cmd[2] = 0x6c;
 		cmd[3] = 0x6c;
@@ -1291,7 +1295,7 @@ hif_send_pdev_regdomain(void)
 	}
 	p = hif_put_tlv(p, WMI_TLV_PDEV_SET_REGDOMAIN_CMD, cmdlen, cmd);
 	HIF_LOG("WMI: send PDEV_SET_REGDOMAIN (%u bytes, %s)",
-	    cmdlen, g_regdom ? "world 0x6c" : "zero legacy");
+	    cmdlen, (g_scan_fix & SCANFIX_REGDOM) ? "world 0x6c" : "zero legacy");
 	return hif_wmi_command(WMI_PDEV_SET_REGDOMAIN_CMDID, tlv, (uint32_t)(p - tlv));
 }
 
@@ -1345,7 +1349,7 @@ hif_send_scan_chan_list(void)
 		hif_put32(ch + 0, f);                  /* mhz */
 		hif_put32(ch + 4, f);                  /* band_center_freq1 */
 		hif_put32(ch + 8, 0);                  /* band_center_freq2 */
-		if (g_chan_v2) {
+		if (g_scan_fix & SCANFIX_CHANV2) {
 			/* coachz_wifi.c ws_next(): six u32 per channel.  The
 			 * flags word carries 11G/11A, PASSIVE, DFS, ALLOW_HT
 			 * and ALLOW_VHT; 5 GHz is passive (WCN3990 WLAN.HL.3.2
@@ -1517,11 +1521,11 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 	 * wire image byte-for-byte). */
 	typedef char hif_start_scan_size_check[
 	    sizeof(struct hif_start_scan_cmd) == 100 ? 1 : -1];
-	uint16_t cmdlen = g_scan_cmd ? 100u : 96u;
+	uint16_t cmdlen = (g_scan_fix & SCANFIX_CMD) ? 100u : 96u;
 	uint32_t i, nch = (uint32_t)(sizeof(g_scan_freqs) / sizeof(g_scan_freqs[0]));
 	uint8_t chans[256];
 	uint8_t bssid[8];
-	uint16_t bssid_len = g_scan_cmd ? 8u : 6u;
+	uint16_t bssid_len = (g_scan_fix & SCANFIX_CMD) ? 8u : 6u;
 
 	if (nch * 4 > sizeof(chans)) nch = sizeof(chans) / 4;
 	if (g_scan_chans >= 0) nch = (uint32_t)g_scan_chans;
@@ -1573,11 +1577,11 @@ hif_send_wmi_start_scan(uint32_t dwell_ms)
 		cmd.burst_duration_ms = 0;
 	}
 
-	/* scancmd=1 copies coachz_wifi.c ws_start_scan() /
+	/* SCANFIX_CMD copies coachz_wifi.c ws_start_scan() /
 	 * ath10k_wmi_start_scan_init() values verbatim: the 0xA000 ID
 	 * prefixes, passive scan, 50/150 ms dwell, 50/500 ms rest, 20 s max,
 	 * three probes and the WMI-TLV inverted filter flag. */
-	if (g_scan_cmd) {
+	if (g_scan_fix & SCANFIX_CMD) {
 		cmd.common[0] = 0xa000u;
 		cmd.common[1] = 0xa001u;
 		cmd.common[4] = 0x11f;
@@ -1822,7 +1826,7 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 		 * has a documented deterministic crash shortly after vdev_create;
 		 * bisecting which host command precedes it tells us whether the
 		 * firmware is dying on our input or on its own. */
-		if (g_pdev_param) (void)hif_send_pdev_params();
+		if (g_scan_fix & SCANFIX_PDEVPARAM) (void)hif_send_pdev_params();
 		if (g_ready_stop == 1 || g_ready_stop == 3) {
 			HIF_LOG("WMI: READY stop=%u, skipping PDEV_SET_REGDOMAIN",
 			    g_ready_stop);
@@ -2532,30 +2536,17 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_scan_wait = (int)v;
 	}
 	v = 0;
-	if (PE_parse_boot_argn("scancmd", &v, sizeof(v)) && v <= 1) {
-		g_scan_cmd = (int)v;
-	}
-	v = 0;
-	if (PE_parse_boot_argn("regdom", &v, sizeof(v)) && v <= 1) {
-		g_regdom = (int)v;
-	}
-	v = 0;
-	if (PE_parse_boot_argn("chanv2", &v, sizeof(v)) && v <= 1) {
-		g_chan_v2 = (int)v;
-	}
-	v = 0;
-	if (PE_parse_boot_argn("pdevparam", &v, sizeof(v)) && v <= 1) {
-		g_pdev_param = (int)v;
+	if (PE_parse_boot_argn("scanfix", &v, sizeof(v)) && v <= 15) {
+		g_scan_fix = (int)v;
 	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
 	    "wmiinit=%d; scanchans=%d; tlvpad=%d; chanlist=%d; vdevup=%d; "
 	    "scanlinux=%d; httconn=%d; httsetup=%d; httring=%d; scanwait=%d; "
-	    "scancmd=%d; regdom=%d; chanv2=%d; pdevparam=%d",
+	    "scanfix=%d",
 	    g_tx3_rotate ? "8 rotating" : "single (legacy)", g_autoscan,
 	    g_ready_stop, g_vdev_pre, g_wmi_init_full, g_scan_chans,
 	    g_tlv_pad, g_chan_list, g_vdev_up, g_scan_linux, g_htt_connect,
-	    g_htt_setup, g_htt_ring, g_scan_wait, g_scan_cmd, g_regdom,
-	    g_chan_v2, g_pdev_param);
+	    g_htt_setup, g_htt_ring, g_scan_wait, g_scan_fix);
 	{
 		uint64_t dma_pa = 0;
 		g_dma = (struct hif_dma_block *)picasso_wlan_ce_dma_alloc(
