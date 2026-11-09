@@ -499,6 +499,14 @@ static int g_tlv_pad;         /* 0 = Linux-exact TLV lengths */
  * vdev MAC is what the firmware matches scan frames against, so this is a
  * candidate for the "firmware scans but never emits WMI_MGMT_RX" symptom. */
 #define SCANFIX_MAC       0x10
+/* 0x20: post HTT RX buffers the way Linux and trogdor do.  We filled the
+ * ring with addresses but left fw_idx_shadow_reg / fw_idx_init_val at 0,
+ * which tells the target the host has posted no buffers at all.  Linux
+ * htt_rx.c:__ath10k_htt_rx_ring_fill_n() advances *alloc_idx.vaddr to the
+ * number of posted buffers and htt_tx.c reads it back as fw_idx_init_val;
+ * trogdor writes WS_RX_FILL=1023 into that word before RX_RING_CFG. */
+#define SCANFIX_HTTFILL   0x20
+#define HTT_RX_FILL_LEVEL 1023u   /* half of a 2048-entry ring, as trogdor */
 static int g_scan_fix;
 static int g_chan_list;       /* chanlist=1: WMI_SCAN_CHAN_LIST before regdomain */
 static int g_vdev_up;         /* vdevup=1: WMI_VDEV_UP after VDEV_CREATE */
@@ -774,6 +782,7 @@ hif_dump_regs(const char *why)
 #define WMI_VDEV_START_CMDID          0x5003   /* WMI_TLV_VDEV_START_CMDID */
 #define WMI_SCAN_EVENTID              0x3001
 #define WMI_MGMT_RX_EVENTID           0x7001   /* WMI_GRP_MGMT  = 7 */
+#define WMI_CHAN_INFO_EVENTID         0x4002   /* WMI_GRP_PDEV  = 4 */
 
 /* wmi-tlv.h: enum wmi_tlv_tag (values computed from the enum order) */
 /* wmi-tlv.h enum wmi_tlv_tag:
@@ -1004,21 +1013,24 @@ hif_htt_rx_ring_cfg(void)
 {
 	uint8_t p[3 + 44];
 	uint64_t ring_pa, idx_pa;
-	uint32_t i;
+	uint32_t i, fill;
 
 	if (!g_dma) return -1;
 	ring_pa = hif_pa_of(g_dma->htt_ring);
 	idx_pa = hif_pa_of(&g_dma->htt_alloc_idx);
 	if (!ring_pa || !idx_pa) return -1;
 
-	/* Hand the target every buffer but the one slot that separates a full
-	 * ring from an empty one (htt.c ath10k_htt_rx_ring_fill_n() stops at
-	 * fill_level).  htt_rx.c ath10k_htt_set_paddrs_ring_64() stores the
-	 * plain 64-bit paddr, no descriptor mask. */
+	/* Only the two "how many buffers are posted" words change in this
+	 * experiment.  Linux htt_rx.c fills [0, fill_level) and leaves the
+	 * rest zero; we keep every slot addressable (the buffers are static,
+	 * so a target that walks past fill_level still finds valid memory).
+	 * Changing the ring contents or the host read index at the same time
+	 * would make the A/B uninterpretable. */
+	fill = (g_scan_fix & SCANFIX_HTTFILL) ? HTT_RX_FILL_LEVEL : 0;
 	for (i = 0; i < HTT_RX_RING_ENTRIES - 1; i++) {
 		g_dma->htt_ring[i] = hif_pa_of(g_dma->htt_buf[i]);
 	}
-	g_dma->htt_alloc_idx = 0;
+	g_dma->htt_alloc_idx = fill;
 	hif_mb();
 
 	memset(p, 0, sizeof(p));
@@ -1029,12 +1041,12 @@ hif_htt_rx_ring_cfg(void)
 	hif_put16(p + 19, HTT_RX_RING_ENTRIES);/* rx_ring_len (entries) */
 	hif_put16(p + 21, HTT_RX_BUF_SIZE);    /* rx_ring_bufsize */
 	hif_put16(p + 23, 0xffff);             /* every report type */
-	hif_put16(p + 25, 0);                  /* fw_idx_init_val */
+	hif_put16(p + 25, (uint16_t)fill);     /* fw_idx_init_val = posted count */
 	for (i = 0; i < 10; i++) hif_put16(p + 27 + i * 2, g_htt_rx_offsets[i]);
 
-	HIF_LOG("HTT: send RX_RING_CFG ring=%llx idx=%llx n=%u buf=%u",
+	HIF_LOG("HTT: send RX_RING_CFG ring=%llx idx=%llx n=%u buf=%u posted=%u",
 	    (unsigned long long)ring_pa, (unsigned long long)idx_pa,
-	    HTT_RX_RING_ENTRIES, HTT_RX_BUF_SIZE);
+	    HTT_RX_RING_ENTRIES, HTT_RX_BUF_SIZE, fill);
 	return hif_htt_send(HTT_H2T_MSG_TYPE_RX_RING_CFG, p, (uint32_t)sizeof(p));
 }
 
@@ -1916,6 +1928,17 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 		break;
 	default:
 		HIF_LOG("WMI: event 0x%x (%u bytes)", event_id, len);
+		/* wmi.h struct wmi_chan_info_event: err_code, freq, cmd_flags,
+		 * noise_floor, rx_clear_count, cycle_count.  rx_clear/cycle is
+		 * the only observable that says whether there was any RF energy
+		 * on the channel; without it "no beacons" cannot distinguish
+		 * "no AP nearby" from "firmware dropped the frames". */
+		if (event_id == WMI_CHAN_INFO_EVENTID && len >= 32) {
+			HIF_LOG("CHAN_INFO freq=%u err=%u noise=%d rx_clear=%u cycle=%u",
+			    hif_le32(payload + 12), hif_le32(payload + 8),
+			    (int32_t)hif_le32(payload + 20),
+			    hif_le32(payload + 24), hif_le32(payload + 28));
+		}
 		if (event_id != WMI_MGMT_RX_EVENTID)
 			hif_dump_hex("WMI ev", payload, len < 24 ? len : 24);
 		break;
@@ -2572,7 +2595,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_scan_wait = (int)v;
 	}
 	v = 0;
-	if (PE_parse_boot_argn("scanfix", &v, sizeof(v)) && v <= 31) {
+	if (PE_parse_boot_argn("scanfix", &v, sizeof(v)) && v <= 63) {
 		g_scan_fix = (int)v;
 	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
