@@ -3393,13 +3393,14 @@ hif_join_begin(void)
 		 * BSSID; the reference picks by SSID and signal strength.
 		 * joinsel pins the choice by SSID because join=<n> depends on
 		 * the order of first hearing, which changes every boot. */
-		static const char *const sel_ssid[3] = {
-			NULL, "ChinaUnicom", "1902_WIFI_CLOCK"
+		static const char *const sel_ssid[4] = {
+			NULL, "ChinaUnicom", "1902_WIFI_CLOCK",
+			"ChinaUnicom-33E6TD-5G"
 		};
 		const char *want;
 		uint32_t i;
 
-		want = (g_join_sel >= 1 && g_join_sel <= 2) ? sel_ssid[g_join_sel] : NULL;
+		want = (g_join_sel >= 1 && g_join_sel <= 3) ? sel_ssid[g_join_sel] : NULL;
 		pick = g_join_bss_count;
 		if (want) {
 			size_t wl = strlen(want);
@@ -3478,6 +3479,26 @@ hif_join_begin(void)
 	g_join_tries = 0;
 	g_join_tx_at = g_join_wait_at = g_polls;
 	g_join_state = HIF_JOIN_IDLE;   /* set below once the path is chosen */
+	{
+		const uint8_t *re = hif_join_ie(48);
+		uint32_t ri, rn = re ? re[1] : 0;
+
+		if (re && rn > 22) rn = 22;
+		if (re) {
+			char hx[3 * 22 + 1];
+			uint32_t k = 0;
+
+			for (ri = 0; ri < rn; ri++) {
+				static const char h[] = "0123456789abcdef";
+
+				hx[k++] = h[re[2 + ri] >> 4];
+				hx[k++] = h[re[2 + ri] & 15];
+				hx[k++] = ' ';
+			}
+			hx[k] = 0;
+			HIF_LOG("JOIN: ap rsn len=%u %s", re[1], hx);
+		}
+	}
 	HIF_LOG("JOIN: entry %d bssid %02x:%02x:%02x:%02x:%02x:%02x "
 	    "ssid '%.*s' freq %u rssi %d, %u MHz wide at %u mode %u ht %u "
 	    "vht %u wmm %u, %s",
@@ -4717,7 +4738,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	 * =2 "1902_WIFI_CLOCK".  join=<n> alone is order-of-hearing dependent
 	 * and picked a different access point on nearly every boot. */
 	v = 0;
-	if (PE_parse_boot_argn("joinsel", &v, sizeof(v)) && v <= 2) {
+	if (PE_parse_boot_argn("joinsel", &v, sizeof(v)) && v <= 3) {
 		g_join_sel = (int)v;
 	}
 	/* wpa=1 runs the WPA2-PSK four-way handshake after association;
