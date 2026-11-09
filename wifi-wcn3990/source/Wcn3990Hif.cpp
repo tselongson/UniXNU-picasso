@@ -549,6 +549,8 @@ static void hif_join_peer_event(const uint8_t *, uint32_t);
 static int g_join;               /* join=<n>: 0 = off, 1 = legacy, >=2 = full pre-req path */
 static int g_join_skip;          /* joinskip: bit1 skip PEER_ASSOC, bit2 skip VDEV_UP */
 static int g_join_sel;           /* joinsel=1: prefer SSID ChinaUnicom; =2: 1902_WIFI_CLOCK */
+static int g_vdev_wait_ms;       /* vdwait=N: delay VDEV_UP N ms after peer_assoc */
+static int g_vdev_up_pending;    /* a delayed VDEV_UP is armed */
 static uint32_t g_join_backoff_at; /* do not rejoin before this poll count */
 static int g_join_once;          /* the wj_begin() once-block (vdev/pdev params) */
 static int g_join_once_mask = 0x1ff; /* joinonce=<n>: per-command gates, 0x1ff = all */
@@ -3529,9 +3531,18 @@ hif_join_begin(void)
 static void
 hif_join_poll(void)
 {
-	if (g_state != HIF_READY || g_join_state == HIF_JOIN_IDLE ||
-	    g_join_state == HIF_JOIN_ASSOC_OK)
+	if (g_state != HIF_READY || g_join_state == HIF_JOIN_IDLE)
 		return;
+	if (g_join_state == HIF_JOIN_ASSOC_OK) {
+		if (g_vdev_up_pending &&
+		    g_polls - g_join_wait_at >= (uint32_t)g_vdev_wait_ms) {
+			g_vdev_up_pending = 0;
+			HIF_LOG("JOIN: deferred VDEV_UP now (%d ms after "
+			    "peer_assoc)", g_vdev_wait_ms);
+			hif_join_send_vdev_up();
+		}
+		return;
+	}
 
 	/* wlan-wip wj_step(): do not send auth until the target has accepted
 	 * VDEV_START and mapped the AP's peer.  These two states never reach
@@ -3725,8 +3736,16 @@ hif_join_resp(const uint8_t *f, uint32_t n)
 		 * keys: the target is known to die when VDEV_UP runs with an
 		 * unauthorized peer, and wlan-wip's own order was never verified
 		 * on hardware. */
-		if (!(g_join_skip & 2) && !(g_join_skip & 8))
-			hif_join_send_vdev_up();
+		if (!(g_join_skip & 2) && !(g_join_skip & 8)) {
+			if (g_vdev_wait_ms) {
+				g_vdev_up_pending = 1;
+				g_join_wait_at = g_polls;
+				HIF_LOG("JOIN: VDEV_UP armed with a %d ms delay",
+				    g_vdev_wait_ms);
+			} else {
+				hif_join_send_vdev_up();
+			}
+		}
 		if (g_join_skip)
 			HIF_LOG("JOIN: joinskip=%d in effect", g_join_skip);
 		/* wlan-wip has no PEER_SET_PARAM after vdev up: its only
@@ -4756,6 +4775,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_wpa = (int)v;
 	}
 	(void)PE_parse_boot_argn("wpass", g_wpa_pass, sizeof(g_wpa_pass));
+	v = 0;
+	if (PE_parse_boot_argn("vdwait", &v, sizeof(v)) && v <= 5000) {
+		g_vdev_wait_ms = (int)v;
+	}
 	HIF_LOG("CE3 tx buffers: %s; autoscan=%d; hifstop=%d; vdevpre=%d; "
 	    "wmiinit=%d; scanchans=%d; tlvpad=%d; chanlist=%d; vdevup=%d; "
 	    "scanlinux=%d; httconn=%d; httsetup=%d; httring=%d; scanwait=%d; "
