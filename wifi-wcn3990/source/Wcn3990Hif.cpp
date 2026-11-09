@@ -3514,7 +3514,10 @@ hif_join_poll(void)
 		if (g_join_started == 1) {
 			g_join_state = HIF_JOIN_PEER_CREATE;
 			g_join_wait_at = g_polls;
-			(void)hif_join_send_peer_create();
+			/* joinskip bit4 isolates PEER_CREATE itself (the target
+			 * never answers with an HTT peer map either way). */
+			if (!(g_join_skip & 4))
+				(void)hif_join_send_peer_create();
 		} else if (g_join_started == 2 ||
 		    g_polls - g_join_wait_at >= 3000) {
 			hif_join_reset("vdev start refused or timed out");
