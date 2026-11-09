@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3514 @@
+@@ -0,0 +1,3530 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -1029,6 +1029,22 @@ new file mode 100644
 +		}
 +		printf("PICASSO USB: smr probe writable=%u dead=%u\n",
 +		    smr_ok, smr_dead);
++		/* Slot 8+ are monitor-locked and sCR0 is read-only (518:
++		 * probe writable=0 dead=15, the USFCFG write refused), but
++		 * SMR[7] is ours.  Widen its mask from bit0 to {0,5,6,7} so
++		 * the same first-match entry also captures 0x20/0x21; match
++		 * order keeps slots 0-6 in charge of everything they hold
++		 * (0x40x/0x80x/0xa0x/0xe0x), and the only streams that
++		 * change behaviour besides 0x20/0x21 are the unowned 0x00/
++		 * 0x01 and 0x60/0x61, which fault today for no one. */
++		if (!bound20) {
++			uint32_t wide = 0x80000000u | (0xe1u << 16) | 0x0020u;
++
++			picasso_usb_smmu_write(smmu, 0x800u + 4u * 7, wide);
++			bound20 = (usb_rd(smmu, 0x800u + 4u * 7) == wide);
++			printf("PICASSO USB: wlan stream 20 mask7=%08x bound=%d\n",
++			    usb_rd(smmu, 0x800u + 4u * 7), bound20);
++		}
 +		/* Fallback: USFCFG=0 makes unmatched streams bypass instead
 +		 * of faulting, so 0x20/0x21 pass through even with no SMR
 +		 * slot the monitor will give us. */
