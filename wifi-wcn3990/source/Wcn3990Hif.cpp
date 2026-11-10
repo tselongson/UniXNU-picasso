@@ -520,6 +520,7 @@ static int g_tlv_pad;         /* 0 = Linux-exact TLV lengths */
 #define SCANFIX_REGDOM    0x2
 #define SCANFIX_CHANV2    0x4
 #define SCANFIX_PDEVPARAM 0x8
+#define SCANFIX_PDEV7     0x40  /* trogdor ws_next(): 7 PDEV_SET_PARAM */
 /* 0x10: struct wmi_mac_addr is a 2-word (8-byte) union, not 6 bytes.
  * abi-check.py found three more TLVs that still used a 6-byte MAC:
  * VDEV_CREATE (18 vs 20), VDEV_UP (14 vs 16) and PDEV_SET_BASE_MACADDR
@@ -1669,28 +1670,42 @@ hif_send_pdev_regdomain(void)
 	return hif_wmi_command(WMI_PDEV_SET_REGDOMAIN_CMDID, tlv, (uint32_t)(p - tlv));
 }
 
-/* coachz_wifi.c ws_next(): before regdomain Linux sends four PDEV_SET_PARAM
- * commands (tx/rx chain mask from SERVICE_READY, ARP AC override, ANI). */
+/* trogdor ws_next(): SEVEN PDEV_SET_PARAM commands before regdomain.
+ * The first three (PMF_QOS, DYNAMIC_BW, IDLE_PS_CONFIG) were missing.
+ * SCANFIX_PDEV7 gates them, so the old four-command sequence stays
+ * available as a single-variable control on the same image. */
 static int
 hif_send_pdev_params(void)
 {
-	static const uint32_t param[4][2] = {
+	static const uint32_t param[7][2] = {
+	    {0x22, 1},   /* PMF_QOS */
+	    {0x0a, 1},   /* DYNAMIC_BW */
+	    {0x2c, 1},   /* IDLE_PS_CONFIG: WCN3990 chip-level idle PS;
+	                  * only safe with shadow doorbells + DDR RRI (IMPS) */
 	    {0x01, 3}, {0x02, 3}, {0x23, 0}, {0x25, 1},
 	};
-	uint8_t tlv[32];
-	uint32_t body[3];
-	unsigned i;
+	const uint32_t (*sel)[2] = param;
+	unsigned i, n = 4;
 
-	for (i = 0; i < 4; i++) {
-		uint8_t *p = tlv;
-		body[0] = 0;
-		body[1] = param[i][0];
-		body[2] = param[i][1];
-		p = hif_put_tlv(p, WMI_TLV_PDEV_SET_PARAM_CMD, 12, body);
-		(void)hif_wmi_command(WMI_PDEV_SET_PARAM_CMDID, tlv,
-		    (uint32_t)(p - tlv));
+	if (g_scan_fix & SCANFIX_PDEV7) {
+		n = 7;
+	} else {
+		sel = param + 3;
 	}
-	HIF_LOG("WMI: send 4 PDEV_SET_PARAM (tx/rx chain, arp ac, ani)");
+	for (i = 0; i < n; i++) {
+		uint8_t tlv[32];
+		uint8_t *q = tlv;
+		uint32_t body[3];
+
+		body[0] = 0;
+		body[1] = sel[i][0];
+		body[2] = sel[i][1];
+		q = hif_put_tlv(q, WMI_TLV_PDEV_SET_PARAM_CMD, 12, body);
+		(void)hif_wmi_command(WMI_PDEV_SET_PARAM_CMDID, tlv,
+		    (uint32_t)(q - tlv));
+	}
+	HIF_LOG("WMI: send %u PDEV_SET_PARAM (trogdor %s)",
+	    n, n == 7 ? "7-command" : "4-command");
 	return 0;
 }
 
@@ -3433,7 +3448,21 @@ hif_join_begin(void)
 
 		want = (g_join_sel >= 1 && g_join_sel <= 3) ? sel_ssid[g_join_sel] : NULL;
 		pick = g_join_bss_count;
-		if (want) {
+		if (g_join_sel == 4) {
+			/* Any visible 2.4 GHz AP: the experiment must not depend on
+			 * one particular router being in the BSS table (chain-564/n2
+			 * lost 220 s to a 5 GHz fallback that always fails auth).
+			 * A wrong passphrase still receives EAPOL msg1, which is
+			 * exactly the data-plane checkpoint we need. */
+			for (i = 0; i < g_join_bss_count; i++) {
+				const struct hif_join_bss *c = &g_join_bss[i];
+
+				if (c->ssid_len == 0 || c->freq_mhz >= 4900)
+					continue;
+				pick = i;
+				break;
+			}
+		} else if (want) {
 			size_t wl = strlen(want);
 
 			/* Two passes: the SSID can exist on both bands, and the
@@ -3442,8 +3471,12 @@ hif_join_begin(void)
 			{
 				unsigned pass2;
 
-				for (pass2 = 0; pass2 < 2 && pick == g_join_bss_count;
-				    pass2++) {
+				/* joinsel=1 pins ChinaUnicom: never fall back to its
+				 * 5 GHz BSS, whose MGMT_TX this firmware rejects
+				 * (status=3, chain-564 n2). */
+				for (pass2 = 0;
+				    pass2 < (g_join_sel == 1 ? 1u : 2u) &&
+				    pick == g_join_bss_count; pass2++) {
 					for (i = 0; i < g_join_bss_count; i++) {
 						const struct hif_join_bss *c =
 						    &g_join_bss[i];
@@ -4766,7 +4799,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_scan_wait = (int)v;
 	}
 	v = 0;
-	if (PE_parse_boot_argn("scanfix", &v, sizeof(v)) && v <= 63) {
+	if (PE_parse_boot_argn("scanfix", &v, sizeof(v)) && v <= 127) {
 		g_scan_fix = (int)v;
 	}
 	/* join=N: after a scan round completes, authenticate and associate
@@ -4794,7 +4827,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	 * =2 "1902_WIFI_CLOCK".  join=<n> alone is order-of-hearing dependent
 	 * and picked a different access point on nearly every boot. */
 	v = 0;
-	if (PE_parse_boot_argn("joinsel", &v, sizeof(v)) && v <= 3) {
+	if (PE_parse_boot_argn("joinsel", &v, sizeof(v)) && v <= 4) {
 		g_join_sel = (int)v;
 	}
 	/* wpa=1 runs the WPA2-PSK four-way handshake after association;
