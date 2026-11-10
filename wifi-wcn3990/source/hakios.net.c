@@ -318,6 +318,14 @@ net_thread(void *parameter, __unused wait_result_t result)
 	struct net_if *n = parameter;
 	uint64_t said = 0, total;
 	unsigned quiet = 0;
+	/* netpoll=<ms>: how often the link is serviced.  The WCN3990 CE ring
+	 * needs prompt ACKs, so the default stays at 2 ms; raising it trades
+	 * Wi-Fi latency for CPU that backboardd needs to present frames
+	 * (chain-582: Wi-Fi on -> 33 FBUC calls, Wi-Fi off -> 120). */
+	unsigned poll_ms = 2;
+
+	PE_parse_boot_argn("netpoll", &poll_ms, sizeof(poll_ms));
+	if (poll_ms < 1 || poll_ms > 20) poll_ms = 2;
 
 	for (unsigned tick = 1;; tick++) {
 		quiet = n->link->poll != NULL && n->link->poll() ? 0 : quiet + 1;
@@ -329,7 +337,7 @@ net_thread(void *parameter, __unused wait_result_t result)
 			    n->unit, n->count.sent, n->count.sent_bytes, n->count.received, n->count.received_bytes,
 			    n->count.dropped_out, n->count.dropped_in);
 		}
-		delay_for_interval(quiet < 100 ? 2 : 10, NSEC_PER_MSEC);
+		delay_for_interval(quiet < 100 ? poll_ms : poll_ms * 5, NSEC_PER_MSEC);
 	}
 }
 
