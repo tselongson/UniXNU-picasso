@@ -946,7 +946,7 @@ hif_service_ce1(void)
 		/* Every CE buffer starts with the 8-byte HTC header; the
 		 * htt_resp (and therefore the message type) follows it.  Reading
 		 * b[0] here returns the endpoint id, not the message type. */
-		if (g_htt_rx < 8) {
+		if (g_htt_rx < 64) {
 			/* htt.h: struct htt_resp_hdr is one byte and
 			 * struct htt_ver_resp is {minor, major, rsvd0}, so
 			 * VERSION_CONF carries the target's HTT version at
@@ -1161,6 +1161,10 @@ static uint32_t g_htt_ring_seen;
  * frames without an RX_IND/RX_IN_ORD message on CE1); bit1: post only
  * fw_idx_init_val buffers, exactly like trogdor ws_htt_prepare(). */
 static int g_dp_fix;
+/* authz=1: send WMI PEER_AUTHORIZE(3,1) for a SECURE AP right after
+ * VDEV_UP.  Linux mac.c and the working WCN7860 port both expose a
+ * PEER_AUTHORIZE path; trogdor sends it only after the keys are in. */
+static int g_authz;
 
 static void
 hif_service_htt_ring(void)
@@ -3853,6 +3857,12 @@ hif_join_resp(const uint8_t *f, uint32_t n)
 			    "key handshake not in this phase, stopping after vdev up");
 		else
 			hif_join_peer_param(3, 1);  /* PEER_AUTHORIZE */
+		/* authz=1: open the secured port before the AP's first EAPOL.
+		 * Gated so the reference ordering is still the control. */
+		if (g_authz && g_join_ap.secure) {
+			HIF_LOG("JOIN: early PEER_AUTHORIZE (authz=1)");
+			hif_join_peer_param(3, 1);
+		}
 		g_join_tx_at = g_join_wait_at = g_polls;
 		g_join_state = HIF_JOIN_ASSOC_OK;
 		return;
@@ -4299,9 +4309,11 @@ wcn3990_hif_poll(void)
 		/* join=<n>: a compact status line while a join is running. */
 		if (g_join && g_join_state != HIF_JOIN_IDLE) {
 			HIF_LOG("JOIN: state=%d tries=%u bss=%u mgmt "
-			    "tx=%u ok=%u fail=%u",
+			    "tx=%u ok=%u fail=%u srri3=%u drri2=%u",
 			    g_join_state, g_join_tries, g_join_bss_count,
-			    g_join_mgmt_tx, g_join_mgmt_ok, g_join_mgmt_fail);
+			    g_join_mgmt_tx, g_join_mgmt_ok, g_join_mgmt_fail,
+			    g_dma ? (s_rri[3] & 0xffffu) : 0,
+			    g_dma ? ((s_rri[2] >> 16) & 0xffffu) : 0);
 		}
 		/* The other dst pipes' DDR read indices: a moving index means the
 		 * target consumed a buffer there, which the bring-up wants to
@@ -4834,6 +4846,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	v = 0;
 	if (PE_parse_boot_argn("dpfix", &v, sizeof(v)) && v <= 3) {
 		g_dp_fix = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("authz", &v, sizeof(v)) && v <= 1) {
+		g_authz = (int)v;
 	}
 	/* join=N: after a scan round completes, authenticate and associate
 	 * with BSS table entry N (1-based, order of first hearing).  0 or
