@@ -3167,18 +3167,23 @@ extern "C" int
 wcn3990_hif_connect(const uint8_t *ssid, size_t slen,
     const uint8_t *pass, size_t plen)
 {
-	size_t n;
+	char saved[64];
+	size_t n = 0;
 
 	if (!ssid || slen == 0 || slen > sizeof(g_join_req.ssid)) return -1;
+	/* wifiauto passes g_wpa_pass itself as the source.  Save it BEFORE
+	 * clearing the destination, or the memset wipes the passphrase too
+	 * (chain-576 z1 logged "connect requested ssid_len=18 passlen=0"). */
+	if (pass && plen) {
+		n = plen < sizeof(saved) - 1u ? plen : sizeof(saved) - 1u;
+		memcpy(saved, pass, n);
+		saved[n] = 0;
+	}
 	memset(&g_join_req, 0, sizeof(g_join_req));
 	memcpy(g_join_req.ssid, ssid, slen);
 	g_join_req.ssid_len = (uint8_t)slen;
 	memset(g_wpa_pass, 0, sizeof(g_wpa_pass));
-	if (pass && plen) {
-		n = plen < sizeof(g_wpa_pass) - 1u ?
-		    plen : sizeof(g_wpa_pass) - 1u;
-		memcpy(g_wpa_pass, pass, n);
-	}
+	if (n) memcpy(g_wpa_pass, saved, n);
 	g_join_req.pending = 1;
 	g_join = 2;
 	g_wpa = 1;
