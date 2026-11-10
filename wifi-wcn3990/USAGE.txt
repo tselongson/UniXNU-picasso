@@ -2,7 +2,7 @@ WCN3990 Wi-Fi package — integration against silenzio UniXNU-picasso 00ea4a0
 ===========================================================================
 
 This package is NOT an installer, a boot image, a firmware blob or an IPSW.
-It is source plus four small host-tree integration points.
+It is source plus five small host-tree integration points.
 
 Baseline
 --------
@@ -24,15 +24,18 @@ build/native-wlan/libNativeWlan.a (CONFIG_XNU_NATIVE_WLAN=y) and force-loads it.
 This package adds its sources to that same archive, so there is only ONE
 archive and ONE -force_load. Do not link a second library.
 
-Integration (apply the four patches in integration/, in order)
+Integration (apply the five patches in integration/, in order)
 -------------------------------------------------------------
   01-board-wifi-arg.patch        board.toml: add "wifi=1" (the only new boot arg)
   02-build-native-wlan.patch     scripts/build-arm-driver.py: compile source/
   03-bsd-init-hook.patch         scripts/build-xnu-4k-baseline.sh: one init hook
   04-native-ufs-raw-read.patch   drivers/NativeUfs/NativeUfs.cpp: read-only
                                  partition accessor used by the GPT/modem loader
+  05-rpmh-crypto-export.patch    Adreno620Cp.cpp: give rpmhVoteCryptoPath()
+                                 C linkage (the CE doorbell path calls it)
 
-Nothing else in the host tree changes. No defconfig edit is needed: the existing
+Nothing else in the host tree changes; patch 05 touches a GPU file only to
+export an existing function, with no GPU logic change. No defconfig edit is needed: the existing
 CONFIG_XNU_NATIVE_WLAN gate drives the build. No GPU firmware, no UFS transport
 changes, no display or cpufreq arguments, no CI workflow changes.
 

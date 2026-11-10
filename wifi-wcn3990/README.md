@@ -15,7 +15,7 @@ implementation of its own.**
 | `manifest.json` | entry point, boot argument, platform dependencies, link method, verified/unverified features |
 | `USAGE.txt` | the two supported integration methods |
 | `docs/wcn3990-protocol.md` | every CE/HTC/WMI constant with its Linux ath10k file:macro source |
-| `integration/` | the four patches a clean `00ea4a0` tree needs, one concern each |
+| `integration/` | the five patches a clean `00ea4a0` tree needs, one concern each |
 
 The archive itself (`build/native-wlan/libNativeWlan.a`) is produced by CI with
 the tree's recorded XNU kext flags. It is deliberately **not** committed: it is
@@ -25,10 +25,12 @@ built for one specific XNU/ABI pair, exactly as `libNezhaPeachWifi-0452.a` is.
 
 The host tree supplies the XNU kernel, `native_ufs_raw_read`, the boot-arg
 parser, `IOSleep`/thread primitives and the `-force_load` link line. Everything
-Wi-Fi specific lives in `source/`. Nothing in this package touches GPU, UFS
-transport internals, display, cpufreq or the payload's trust/addon chain.
+Wi-Fi specific lives in `source/`. Nothing in this package touches UFS transport internals, display, cpufreq or the
+payload's trust/addon chain. The one GPU-file edit (patch 05) only gives an
+existing `rpmhVoteCryptoPath()` C linkage so the CE doorbell path can vote the
+interconnect before the engines are used; no GPU logic changes.
 
-Only four host-tree integration points exist; see `integration/`. Applying them
+Only five host-tree integration points exist; see `integration/`. Applying them
 to a clean upstream tree is the whole install. The baseline is the current upstream
 tip of `stage12/picasso-ios16` (`00ea4a0`); see `integration/INTEGRATION.md` for
 the regeneration steps. Removing them (or setting

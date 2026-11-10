@@ -24,9 +24,10 @@
       "01-board-wifi-arg.patch",
       "02-build-native-wlan.patch",
       "03-bsd-init-hook.patch",
-      "04-native-ufs-raw-read.patch"
+      "04-native-ufs-raw-read.patch",
+      "05-rpmh-crypto-export.patch"
     ],
-    "host_files_touched": 4,
+    "host_files_touched": 5,
     "entrypoint": "picasso_wlan_deferred_start",
     "initialization_hook": {
       "source": "bsd/kern/bsd_init.c",

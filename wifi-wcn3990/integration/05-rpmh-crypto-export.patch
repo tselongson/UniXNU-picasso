@@ -1,0 +1,13 @@
+diff --git a/drivers/NativeAdrenoPicasso/Adreno620Cp.cpp b/drivers/NativeAdrenoPicasso/Adreno620Cp.cpp
+index 80da285..6c78407 100644
+--- a/drivers/NativeAdrenoPicasso/Adreno620Cp.cpp
++++ b/drivers/NativeAdrenoPicasso/Adreno620Cp.cpp
+@@ -847,7 +847,7 @@ CmdDbBcm cmdDbBcmLookup(const Mapping &db, const char *name)
+ /* Votes the crypto path's BCMs through the apps RSC's active TCSs. Returns the
+  * number of BCMs voted. Every wait is bounded: a stuck RSC must not stop the
+  * boot, and the PAS result is what the caller measures. */
+-unsigned rpmhVoteCryptoPath()
++extern "C" unsigned rpmhVoteCryptoPath(void)
+ {
+     Mapping rsc = {};
+     Mapping db = {};
