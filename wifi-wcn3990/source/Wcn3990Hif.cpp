@@ -892,6 +892,13 @@ hif_wr_bad(uint32_t reason, const uint8_t *buf, uint32_t attention,
 static void
 hif_wr_msdu(uint8_t *buf, uint32_t len)
 {
+	/* wlan-wip wr_msdu() copies the MSDU out of the DMA buffer BEFORE
+	 * folding the 802.11 header in place.  chain-575 y0 proved why: the
+	 * target can point several RX_IN_ORD records at the SAME buffer, and
+	 * folding in place corrupts it for the second pass (DP: bad r=3,
+	 * attn=82300043, the LLC/SNAP bytes aa aa 03 replaced by a BSSID).
+	 * With a private copy every pass sees the original frame. */
+	static uint8_t frame[HTT_RX_BUF_SIZE];
 	uint32_t attention, start, decap, bytes;
 	uint8_t *eth;
 	uint8_t da[6], sa[6];
@@ -910,7 +917,8 @@ hif_wr_msdu(uint8_t *buf, uint32_t len)
 		return;
 	}
 
-	eth = buf + 360;
+	memcpy(frame, buf + 360, len);
+	eth = frame;
 	bytes = len;
 	if (decap == 1) {
 		if (len < 32u || eth[24] != 0xaa || eth[25] != 0xaa ||
