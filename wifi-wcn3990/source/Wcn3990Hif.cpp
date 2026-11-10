@@ -5130,6 +5130,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_init_fix = 3;
 		g_rx_fix = 1;
 		g_dp_fix = 5;
+		/* CE3 copy-complete race (CVE-2022-50700 type): every successful
+		 * chain ran with wcn3990-hif-tx3=1.  A daily-use boot carries no
+		 * lab flags, so the rotating buffers must be the default too. */
+		g_tx3_rotate = 1;
 	}
 
 	/* Black box first: print whatever the previous boot managed to write
