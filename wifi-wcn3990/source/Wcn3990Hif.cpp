@@ -814,13 +814,23 @@ hif_wr_post(uint64_t pa)
 }
 
 /* wlan-wip wr_msdu(): validate the descriptor, convert native Wi-Fi to
- * Ethernet and hand EAPOL over.  Diagnostic scope: count and log; the stack
- * delivery comes with the WPA2 phase. */
+ * Ethernet and hand EAPOL over.
+ *
+ * chain-572 (initfix=3) delivered real EAPOL frames but with garbage headers
+ * (ver=247 type=28 code=96), and the AP deauthed with reason 6 after we
+ * dropped message 1.  wlan-wip wr_msdu() places the converted Ethernet frame
+ * at frame+32-14 = frame+18, i.e. the EAPOL payload starts at frame+32
+ * (24-byte 802.11 header + 8-byte LLC/SNAP).  Our old code left eth at
+ * frame+0, so eth+14 landed in the middle of the 802.11 header, 18 bytes
+ * early.  rxfix bit0 restores the reference layout. */
+static int g_rx_fix;
+
 static void
 hif_wr_msdu(uint8_t *buf, uint32_t len)
 {
 	uint32_t attention, start, decap, bytes;
 	uint8_t *eth;
+	uint8_t da[6], sa[6];
 
 	memcpy(&attention, buf + 4, 4);
 	memcpy(&start, buf + 36, 4);
@@ -835,12 +845,23 @@ hif_wr_msdu(uint8_t *buf, uint32_t len)
 	if (decap == 1) {
 		if (len < 32u || eth[24] != 0xaa || eth[25] != 0xaa ||
 		    eth[26] != 3) { g_wr_rx_bad++; return; }
-		/* 802.11 data + LLC/SNAP: rewrite the header in place as
-		 * Ethernet DA/SA/type (wlan-wip uses a scratch frame; our
-		 * buffer is exactly big enough to fold in place). */
-		memmove(eth, eth + 4, 6);                /* DA  (addr1) */
-		memcpy(eth + 6, eth + 16, 6);            /* SA  (addr2) */
-		memcpy(eth + 12, eth + 30, 2);           /* type */
+		if (g_rx_fix & 1) {
+			/* wlan-wip wr_msdu(): DA = addr1 at frame+4,
+			 * SA = addr2 at frame+16, EtherType stays at
+			 * frame+30, payload starts at frame+32.  Folding in
+			 * place is safe: frame+18..29 is addr3/seq/LLC, all
+			 * overwritten; frame+30..31 and frame+32+ survive. */
+			memcpy(da, eth + 4, 6);
+			memcpy(sa, eth + 16, 6);
+			eth += 32u - 14u;
+			memcpy(eth, da, 6);
+			memcpy(eth + 6, sa, 6);
+			/* EtherType at eth+12 == frame+30 is already there. */
+		} else {
+			memmove(eth, eth + 4, 6);
+			memcpy(eth + 6, eth + 16, 6);
+			memcpy(eth + 12, eth + 30, 2);
+		}
 		bytes = len - 32u + 14u;
 	} else if (decap != 2) {
 		g_wr_rx_bad++;
@@ -850,8 +871,10 @@ hif_wr_msdu(uint8_t *buf, uint32_t len)
 	g_wr_rx_frames++;
 	if (eth[12] == 0x88 && eth[13] == 0x8e) {
 		g_wr_rx_eapol++;
-		HIF_LOG("JOIN: EAPOL frame %u bytes ver=%u type=%u code=%u",
-		    bytes, eth[14], eth[15], eth[16]);
+		HIF_LOG("JOIN: EAPOL frame %u bytes ver=%u type=%u len=%02x%02x "
+		    "desc=%u info=%02x%02x rxfix=%u",
+		    bytes, eth[14], eth[15], eth[16], eth[17], eth[18],
+		    eth[19], eth[20], (unsigned)g_rx_fix);
 		hif_wpa_handle_eapol(eth + 14, bytes - 14u);
 		return;
 	}
@@ -4947,6 +4970,11 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	v = 0;
 	if (PE_parse_boot_argn("initfix", &v, sizeof(v)) && v <= 7) {
 		g_init_fix = (int)v;
+	}
+	v = 0;
+	/* rxfix bit0: use the wlan-wip Ethernet fold offset (frame+18). */
+	if (PE_parse_boot_argn("rxfix", &v, sizeof(v)) && v <= 1) {
+		g_rx_fix = (int)v;
 	}
 	v = 0;
 	if (PE_parse_boot_argn("authz", &v, sizeof(v)) && v <= 1) {
