@@ -615,6 +615,7 @@ static struct {
 	uint8_t pending;
 } g_join_req;
 static int g_wifi_auto;
+static uint32_t g_last_rescan_at;   /* wifiauto: re-scan while waiting */
 static int g_vdev_pending;
 static uint32_t g_vdev_at;
 static uint32_t g_quiet_probe_polls;
@@ -4734,9 +4735,22 @@ wcn3990_hif_poll(void)
 		}
 		if (!too_early) {
 			g_autoscan_sent = 1;
+			g_last_rescan_at = g_polls;
 			HIF_LOG("autoscan: WMI ready, issuing START_SCAN");
 			(void)wcn3990_hif_start_scan(40);
 		}
+	}
+	/* wifiauto: a network that was not in the first scan round must not
+	 * leave the link down forever.  wlan-wip wj_step() re-arms
+	 * ws_scan_wanted while WJ_IDLE; re-scan every ~10 s until the requested
+	 * SSID is picked.  g_join_req.pending is cleared once a BSS matches,
+	 * so this stops as soon as the join starts. */
+	if (g_wifi_auto && g_join_req.pending && g_autoscan_sent &&
+	    g_state == HIF_READY && g_join_state == HIF_JOIN_IDLE &&
+	    !g_scan_active && g_polls - g_last_rescan_at >= 10000u) {
+		g_last_rescan_at = g_polls;
+		HIF_LOG("wifiauto: rescan for the requested network");
+		(void)wcn3990_hif_start_scan(40);
 	}
 	/* join=<n>: drive the auth/assoc state machine on the 1 ms tick
 	 * (wlan-wip wj_step()'s retransmit/timeout timing). */
