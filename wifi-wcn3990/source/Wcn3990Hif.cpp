@@ -284,6 +284,11 @@ hif_put64(uint8_t *p, uint64_t v)
 /* snoc.c target_shadow_reg_cfg_map[] also covers CE4/CE5/CE7, one 4-byte
  * slot each in the wrapper's shadow array (src_wr_idx offset 0x3C). */
 #define CE4_SHADOW_SR_WR         0x00032010u
+/* ce.c shadow_dst_wr_ind_addr(): WCN3990's always-on shadow window is
+ * the only safe destination doorbell once the target may be idle.
+ * The CE-body 0x40 register is un-clocked in that state (IMPS 2/4). */
+#define CE1_SHADOW_DST_WR        0x00032034u
+#define CE2_SHADOW_DST_WR        0x00032038u
 /* ce.h: CE_DESC_ADDR_MASK = GENMASK_ULL(34, 0) */
 #define CE_DESC_ADDR_MASK        0x7ffffffffull
 #define CE_DESC_RING_ALIGN       8
@@ -616,11 +621,8 @@ hif_reg_write(uint32_t ce, uint32_t off, uint32_t value)
 	hif_mb();
 }
 
-static inline uint32_t
-hif_shadow_read(uint32_t offset)
-{
-	return *(volatile uint32_t *)(uintptr_t)(g_ce_va + offset);
-}
+/* WCN3990's always-on shadow window is WRITE-ONLY (IMPS patch 2/4):
+ * never read it back, and never read the CE-body 0x3c/0x44/0x48 either. */
 
 /* ce.c: _ath10k_ce_send_nolock_64() + __ath10k_ce_rx_post_buf_64() */
 static int
@@ -678,10 +680,8 @@ hif_ce_send(uint32_t ce, uint8_t *buf, uint32_t len)
 		hif_reg_write(ce, CE_SR_WR_INDEX, *wr);
 	}
 
-	HIF_LOG("ce%u send: desc %u pa %llx len %u -> wr %u (reg %x shadow %x)",
-	    ce, idx, (unsigned long long)pa, len, *wr,
-	    hif_reg_read(ce, CE_SR_WR_INDEX),
-	    shadow ? hif_shadow_read((uint32_t)(uintptr_t)shadow) : 0);
+	HIF_LOG("ce%u send: desc %u pa %llx len %u -> wr %u (shadow %u)",
+	    ce, idx, (unsigned long long)pa, len, *wr, shadow ? 1u : 0u);
 	return 0;
 }
 
@@ -751,7 +751,10 @@ hif_ce2_repost(uint32_t idx)
 	hif_mb();
 
 	g_post2 = (slot + 1) & (CE2_ENTRIES - 1);
-	hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
+	/* Always-on shadow doorbell; the CE-body 0x40 store is unsafe
+	 * once the target has idled (IMPS patch 2/4). */
+	*(volatile uint32_t *)(uintptr_t)(g_ce_va + CE2_SHADOW_DST_WR) = g_post2;
+	hif_mb();
 }
 
 /* ---- HTT receive path (grafted wholesale from wlan-wip wr_*, L4169-4270) -
@@ -924,16 +927,19 @@ hif_service_ce1(void)
 {
 	uint32_t n = hif_shape[1].dst_n;
 	uint32_t budget = n;
-	uint32_t drri = hif_reg_read(1, CE_CURRENT_DRRI) & (n - 1);
-
 	if (g_dr_desc[1] == NULL || g_buf_va[1] == NULL) return;
-	while (budget-- > 0 && drri != g_sw1) {
+	/* CoachZ wc_service() / Linux _ath10k_ce_completed_recv_next_nolock_64():
+	 * completion is decided by the host-memory descriptor nbytes only.
+	 * CE_CURRENT_DRRI is outside WCN3990's always-on shadow window, so a
+	 * read while the target idles is an un-clocked access -> SError. */
+	while (budget-- > 0) {
 		struct wcn_ce_desc_64 *d = &g_dr_desc[1][g_sw1];
 		const uint8_t *b = g_buf_va[1] +
 		    (uint64_t)g_sw1 * hif_shape[1].buf_sz;
 		uint32_t nbytes = d->nbytes;
 
 		if (nbytes == 0) break;          /* not completed yet */
+		hif_reg_write(1, CE_STATUS, 0x1u | 0x1eu);  /* CE is awake now */
 		if (nbytes > hif_shape[1].buf_sz) nbytes = hif_shape[1].buf_sz;
 		d->nbytes = 0;                   /* claim before reposting */
 		/* Every CE buffer starts with the 8-byte HTC header; the
@@ -998,7 +1004,8 @@ hif_service_ce1(void)
 			w->toeplitz = 0;
 			hif_mb();
 			g_post1 = (slot + 1) & (n - 1);
-			hif_reg_write(1, CE_DST_WR_INDEX, g_post1);
+			*(volatile uint32_t *)(uintptr_t)(g_ce_va + CE1_SHADOW_DST_WR) = g_post1;
+			hif_mb();
 		}
 		g_sw1 = (g_sw1 + 1) & (n - 1);
 	}
@@ -4222,7 +4229,7 @@ wcn3990_hif_poll(void)
 		    "join=%d ind=%u ord=%u msdu=%u eapol=%u bad=%u/%u",
 		    g_polls, g_stage, (int)g_state, g_rx_packets, g_beacons,
 		    (unsigned)s_dst2[0].nbytes,
-		    g_bases_programmed ? hif_reg_read(2, CE_CURRENT_DRRI) : 0,
+		    (g_bases_programmed && g_dma) ? ((s_rri[2] >> 16) & 0xffffu) : 0,
 		    g_htt_rx, g_dma ? g_dma->htt_alloc_idx : 0, g_mgmt_seen,
 		    g_mgmt_events, g_join_state,
 		    g_wr_rx_ind, g_wr_rx_in_ord, g_wr_rx_frames, g_wr_rx_eapol,
@@ -4306,8 +4313,8 @@ wcn3990_hif_poll(void)
 			HIF_LOG("scan[%u]: smp2p=%08x", g_scan_polls, smp);
 			g_smp2p_seen = 1;
 			g_smp2p_last = smp;
-			srri3 = hif_reg_read(3, CE_CURRENT_SRRI);
-			drri2 = hif_reg_read(2, CE_CURRENT_DRRI);
+			srri3 = g_dma ? (s_rri[3] & 0xffffu) : 0;
+			drri2 = g_dma ? ((s_rri[2] >> 16) & 0xffffu) : 0;
 			HIF_LOG("scan[%u]: ce3 srri=%u ce2 drri=%u",
 			    g_scan_polls, srri3, drri2);
 			hif_bb(12, srri3, drri2);
@@ -4324,7 +4331,7 @@ wcn3990_hif_poll(void)
 		 * consuming buffers and the wlan is further along than the console
 		 * ever showed. */
 		if (g_quiet_probe_polls != 0 && g_polls >= g_quiet_probe_polls) {
-			uint32_t drri = hif_reg_read(2, CE_CURRENT_DRRI);
+			uint32_t drri = g_dma ? ((s_rri[2] >> 16) & 0xffffu) : 0;
 			uint32_t nb = (unsigned)s_dst2[0].nbytes;
 			extern void picasso_wlan_probe_paint(uint32_t probe,
 			    uint32_t drri, uint32_t nbytes);
@@ -4349,24 +4356,22 @@ wcn3990_hif_poll(void)
 	 * away.  No post-doorbell watch, no gate: CoachZ's pure-poll wc_poll(1)
 	 * proves the CE works without a single interrupt registered. */
 
-	/* ath10k_ce_per_engine_service() / CoachZ wc_service() both acknowledge
-	 * the copy-complete, error and watermark status bits (W1C) before they
-	 * look at the ring.  Leaving them set is what stops the CE after a few
-	 * completions - every build so far froze on the fifth receive. */
-	hif_reg_write(2, CE_STATUS, 0x1u | 0x1eu);
+	/* CoachZ wc_service() acknowledges CE_STATUS only when that engine is
+	 * actually serviced (it completed something, so it is awake).  An
+	 * unconditional W1C on a 1 ms tick is itself a CE-body register access
+	 * and is unsafe once the target idles. */
 
 	/* The block is Normal non-cacheable, so the CE's write to the DDR read
 	 * index and to each descriptor's nbytes is visible immediately: no
 	 * invalidate, no clean, and no risk of writing back a stale line. */
-	/* ath10k_ce_dest_ring_read_index_get(): a pipe without CE_ATTR_DIS_INTR
-	 * (CE2 is one) reads the CE's CURRENT_DRRI register.  The DDR RRI word
-	 * packs src in [15:0] and dst in [31:16] and is only used for the
-	 * DIS_INTR pipes, so indexing s_rri[2] directly was reading the wrong
-	 * half of the wrong source. */
+	/* DDR RRI (CTRL1 bit19 + wrapper 0x24C004/8) packs SRRI in [15:0]
+	 * and DRRI in [31:16].  Diagnostics read it from DDR; the recv loop
+	 * itself needs no read index at all. */
 	{
-		uint32_t drri = hif_reg_read(2, CE_CURRENT_DRRI) & (CE2_ENTRIES - 1);
-
-		while (budget-- > 0 && drri != g_sw2) {
+		/* Linux 64-bit recv path and CoachZ wc_service(): the descriptor's
+		 * nbytes in host memory is the ONLY completion test.  Zero CE
+		 * register reads in the running service loop. */
+		while (budget-- > 0) {
 			struct wcn_ce_desc_64 *d = &s_dst2[g_sw2];
 			uint32_t idx = g_sw2, nbytes;
 
@@ -4374,6 +4379,7 @@ wcn3990_hif_poll(void)
 			 * completed yet, not a full-size frame. */
 			nbytes = d->nbytes;
 			if (nbytes == 0) break;   /* CE has not completed this one yet */
+			hif_reg_write(2, CE_STATUS, 0x1u | 0x1eu);  /* CE is awake now */
 			if (nbytes > CE_BUF_BYTES) nbytes = CE_BUF_BYTES;
 			d->nbytes = 0;            /* claim it before reposting */
 
@@ -4385,9 +4391,9 @@ wcn3990_hif_poll(void)
 		}
 	}
 
-	if (g_state == HIF_CE_UP && (g_polls % 2000) == 0) {
-		hif_reg_write(2, CE_DST_WR_INDEX, g_post2);
-	}
+	/* Repost already rings the always-on shadow doorbell for every
+	 * completed descriptor.  A periodic CE-body 0x40 store on an idle
+	 * engine would be an un-clocked access. */
 
 	/* HTT responses arrive on CE1; drain them on the same 1 ms tick. */
 	hif_service_ce1();

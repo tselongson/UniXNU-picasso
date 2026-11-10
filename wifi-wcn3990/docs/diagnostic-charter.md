@@ -107,3 +107,46 @@ Pass condition is **not** "no panic" and **not** "COMPLETED".  It is
 `mgmtev` stays 0, the next split is FRAG_DESC_BANK_CFG and AGGR_CFG as
 separate bits, then the WMI INIT words where Linux and trogdor disagree
 with us (`ast_skid_limit 16`, `num_wds_entries 2`).
+
+## 5. CE register access rules (authoritative, WCN3990 SNOC)
+
+From the 2018-04-17 IMPS patch set (Rakesh Pillai / Govind Singh,
+`linux-wireless.vger.kernel.org` archive) and Douglas Anderson's
+"Keep track of which interrupts fired, don't poll them"
+(Tested-on: WCN3990 SNOC WLAN.HL.3.2.2):
+
+1. The always-on shadow window `0x32000+` is **WRITE-ONLY**.
+   `CE_HOST_IE` (0x2c) and `CE_MISC_IE` (0x34) must never be read;
+   read-modify-write on them hangs the AHB on this board.
+2. `CE_CURRENT_SRRI` (0x44) / `CE_CURRENT_DRRI` (0x48) are **not mapped**
+   into the shadow window.  Reading them while the target has idled is an
+   un-clocked access ("can lead to un-clocked access ... Read SRRI/DRRI
+   from DDR instead of doing an actual hardware read").  Use the DDR RRI
+   word: `CTRL1` bit19 plus wrapper 0x24C004/0x24C008, SRRI in [15:0],
+   DRRI in [31:16].  This driver already programs both.
+3. Destination doorbells must be rung through the shadow addresses
+   (`shadow_dst_wr_ind_addr()`: CE1 0x32034, CE2 0x32038, CE5 0x32044,
+   CE7 0x3204C, CE8..CE11 0x32050..0x3205C), not the CE-body 0x40.
+4. Receive completion is decided **only** by the host-memory descriptor's
+   `nbytes` (`_ath10k_ce_completed_recv_next_nolock_64()`, ce.c:806;
+   CoachZ `wc_service()` @2489; `ce-irq-service` `hif_ce_service()`).
+   In Linux `dest_ring_read_index_get()` is called at init (:1416) and
+   dump (:1807) only, never on the running path.
+5. `CE_STATUS` (0x30) is W1C and may only be written for an engine that
+   actually completed something (CoachZ services one engine at a time).
+   An unconditional W1C on every 1 ms tick is itself an unsafe access.
+6. Douglas Anderson, verbatim: "if _none_ of the Copy Engines have an
+   interrupt pending then they might go into low power mode and
+   **reading from their address space will cause a full system crash**".
+   The upstream fix records which IRQs fired instead of polling them.
+
+Applied to `Wcn3990Hif.cpp` on 2026-11-10: zero CE-body register reads in
+the 1 ms poll loop; CE_STATUS ACK moved inside the `nbytes != 0` branch
+for both CE1 and CE2; both reposts ring the always-on shadow doorbell;
+heartbeat/scan/quiet diagnostics read DDR RRI.  Stage-2/3 init and
+`hif_dump_regs()` still touch CE registers (the engine is awake there);
+that is intentional and matches Linux.
+
+**Device verification pending** — the 1 ms poll loop no longer performs an
+un-clocked access after VDEV_UP, but this is a build/code result, not a
+device result.  A/B against the previous image is required.
