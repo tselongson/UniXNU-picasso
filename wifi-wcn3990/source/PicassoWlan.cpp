@@ -3793,7 +3793,12 @@ picasso_sta_scan(const struct hakios_sta_scan *what)
 	/* hakios_sta_ask_scan() is synchronous: it calls ops->heard() as soon as
 	 * scan() returns.  Wait here while the modem thread drains CE2, parses
 	 * WMI_MGMT_RX_EVENT beacons and fills g_picasso_bsss[]. */
-	for (unsigned i = 0; i < 30; i++) {
+	/* This runs in the caller's ioctl context (Settings -> Wi-Fi -> scan),
+	 * and hakios_sta_ask_scan() is synchronous.  Waiting the full 3 s here
+	 * froze SpringBoard completely (chain-582 k13/k14: no response, IPC
+	 * backlog).  Wait at most 500 ms; the modem thread keeps filling the
+	 * BSS table, so a second query returns the rest. */
+	for (unsigned i = 0; i < 5; i++) {
 		IOSleep(100);
 	}
 
