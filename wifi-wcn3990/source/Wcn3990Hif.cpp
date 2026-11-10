@@ -1821,20 +1821,11 @@ hif_send_vdev_up(void)
 
 	memset(tlv, 0, sizeof(tlv));
 	memset(&cmd, 0, sizeof(cmd));
-	cmd.vdev_id = 0;
-	/* wlan-wip wj_send_vdev_up and Linux ath10k gen_vdev_up both carry the
-	 * association id and the AP's BSSID here.  The grafted version used to
-	 * send aid=0 with our own station MAC: the firmware then binds the vdev
-	 * to a BSS that matches no peer, and VDEV_UP panics the target the
-	 * moment any peer command has run (chains 547/559/560), while surviving
-	 * peer-less.  That mismatch was the vdev_up SError. */
-	cmd.vdev_assoc_id = g_join_ap.aid & 0x3fffu;
-	memcpy(cmd.bssid, g_join_ap.b.bssid, 6);
+	cmd.bssid[0] = 0x02;
+	cmd.bssid[5] = 0x01;
 	p = hif_put_tlv(p, WMI_TLV_VDEV_UP_CMD, cmdlen, &cmd);
-	HIF_LOG("WMI: send VDEV_UP id=0 aid=%u bssid=%02x:%02x:%02x:%02x:%02x:%02x (%u TLV bytes)",
-	    cmd.vdev_assoc_id, g_join_ap.b.bssid[0], g_join_ap.b.bssid[1],
-	    g_join_ap.b.bssid[2], g_join_ap.b.bssid[3], g_join_ap.b.bssid[4],
-	    g_join_ap.b.bssid[5], (unsigned)(p - tlv));
+	HIF_LOG("WMI: send VDEV_UP id=0 (%u TLV bytes, cmd=%uB)",
+	    (unsigned)(p - tlv), cmdlen);
 	return hif_wmi_command(WMI_VDEV_UP_CMDID, tlv, (uint32_t)(p - tlv));
 }
 
