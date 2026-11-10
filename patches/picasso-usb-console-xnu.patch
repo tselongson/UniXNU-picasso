@@ -14,7 +14,7 @@ diff --git a/bsd/dev/picasso_usb.c b/bsd/dev/picasso_usb.c
 new file mode 100644
 --- /dev/null
 +++ b/bsd/dev/picasso_usb.c
-@@ -0,0 +1,3649 @@
+@@ -0,0 +1,3646 @@
 +/* Picasso USB debug console: CDC-ACM log streaming over DWC3.
 + *
 + * Port of the vermeer (ios-vermeer-lab) USB bring-up to the UniXNU Darwin 23
@@ -2820,15 +2820,12 @@ new file mode 100644
 +		__asm__ volatile ("mrs %0, ESR_EL1" : "=r"(esr1));
 +		__asm__ volatile ("mrs %0, FAR_EL1" : "=r"(far1));
 +		__asm__ volatile ("mrs %0, DISR_EL1" : "=r"(disr));
-+		__asm__ volatile ("mrs %0, ESR_EL2" : "=r"(esr2));
 +		picasso_usb_panic_write("\r\nESR_EL1=", 9);
 +		pup_hex64(esr1);
 +		picasso_usb_panic_write(" FAR_EL1=", 9);
 +		pup_hex64(far1);
 +		picasso_usb_panic_write(" DISR=", 6);
 +		pup_hex64(disr);
-+		picasso_usb_panic_write(" ESR_EL2=", 9);
-+		pup_hex64(esr2);
 +		picasso_usb_panic_write("\r\n", 2);
 +	}
 +	picasso_usb_panic_write("\r\nPICASSO PANIC caller=0x", 25);
