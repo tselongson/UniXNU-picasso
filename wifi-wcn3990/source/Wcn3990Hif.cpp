@@ -4491,13 +4491,19 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 		g_scan_active = false;
 		/* join=<n>: a completed scan round is the trigger.  Join the
 		 * 1-based BSS table entry the boot-arg named, if it exists. */
+		/* A connect request is matched by SSID, not by the join=<n>
+		 * table-size gate: wlan-wip wj_begin() only looks for the
+		 * requested network.  Keeping the old "need at least join
+		 * entries" test would refuse to associate when the scan
+		 * happened to hear exactly one AP -- possibly the right one. */
 		if (g_join && len >= 16 && hif_le32(payload + 8) == 0 &&
 		    g_state == HIF_READY &&
 		    g_join_state == HIF_JOIN_IDLE &&
 		    g_polls >= g_join_backoff_at &&
-		    g_join_bss_count >= (uint32_t)g_join) {
+		    (g_join_req.pending ||
+		    g_join_bss_count >= (uint32_t)g_join)) {
 			hif_join_begin();
-		} else if (g_join && len >= 16 &&
+		} else if (g_join && !g_join_req.pending && len >= 16 &&
 		    hif_le32(payload + 8) == 0 &&
 		    g_join_state == HIF_JOIN_IDLE &&
 		    g_join_bss_count < (uint32_t)g_join) {
