@@ -69,7 +69,8 @@ say_class_presence(void)
 {
 	static const char * const names[] = {
 		"IOService", "IONetworkController", "IOEthernetController",
-		"IONetworkInterface", "IO80211Controller",
+		"IONetworkInterface", "IO80211Interface", "IOEthernetInterface",
+		"IO80211Controller",
 	};
 	unsigned i;
 
@@ -107,6 +108,30 @@ alloc_service(const char * name)
 		object->release();
 	}
 	return service;
+}
+
+/* IONetworkInterface is an abstract class: allocClassWithName() on the name
+ * itself returns NULL by design, which is why the first iOS 16 port logged
+ * "no IONetworkInterface class is loaded" even though the family is prelinked.
+ * The family ships concrete subclasses; try those, keeping the abstract name
+ * last as a fallback so this can never be worse than the old behaviour.  The
+ * class actually allocated is logged, so a device log is the evidence. */
+static IOService *
+alloc_interface(void)
+{
+	static const char * const candidates[] = {
+		"IO80211Interface", "IOEthernetInterface", "IONetworkInterface",
+	};
+	unsigned i;
+
+	for (i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+		IOService * service = alloc_service(candidates[i]);
+		if (service != NULL) {
+			IOLog("HakiosWLAN: interface allocated as %s\n", candidates[i]);
+			return service;
+		}
+	}
+	return NULL;
 }
 
 /* attach, start, register: the service, or NULL */
@@ -163,10 +188,10 @@ HakiosWLANStart(const char * interface, const uint8_t * address)
 		return;
 	}
 
-	wlan = alloc_service("IONetworkInterface");
+	wlan = alloc_interface();
 	if (wlan == NULL) {
 		controller->release();
-		IOLog("HakiosWLAN: no IONetworkInterface class is loaded\n");
+		IOLog("HakiosWLAN: no concrete IONetworkInterface subclass could be allocated\n");
 		return;
 	}
 	/* init() is called on IOService only: the family's own init() overrides expect their

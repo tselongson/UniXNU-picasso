@@ -379,7 +379,11 @@ picasso_wlan_boot_thread(void *arg, wait_result_t wr)
 	 * from ever starting. Five seconds is past the root publication.
 	 * wlan_delay_ms moves the whole bring-up later, which keeps the ~30 MiB
 	 * firmware pull off the UFS host while init is still exec'ing launchd. */
-	uint32_t delay_ms = 70000;
+	/* 150 s: the compositor must finish before the WCN3990 bring-up starts.
+	 * chain-582 measured that 120 s still starves backboardd (29 FBUC calls),
+	 * 150 s keeps it healthy (160 calls) while Wi-Fi still scans/associates
+	 * in the same 400 s window.  wlan_delay_ms overrides. */
+	uint32_t delay_ms = 150000;
 	PE_parse_boot_argn("wlan_delay_ms", &delay_ms, sizeof(delay_ms));
 	if (delay_ms < 1000) delay_ms = 1000;
 	IOSleep(delay_ms);
