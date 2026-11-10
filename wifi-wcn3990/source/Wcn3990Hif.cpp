@@ -498,6 +498,17 @@ static int g_ready_stop;
  * will scan without a vdev at all. */
 static int g_vdev_pre;
 static int g_wmi_init_full = 1; /* Linux WCN3990 resource config (the 44-field one) */
+/* initfix=<n>: per-field gates for the resource-config values the working
+ * same-chip wlan-wip port (work/trogdor/port/WlanRadio.c wm_send_init) uses
+ * and the 44-field Linux table here leaves at zero.  WCN3990's full-RX-
+ * reorder firmware needs offload reorder buffers and an AST table to build a
+ * peer data path; chain-571 saw PEER_CREATE consumed but no peer map, no
+ * HTT frame and no MSDU, which is what a zero-reorder peer looks like.
+ *   bit0 (1): cfg[2]=4 num_offload_peers, cfg[3]=4 num_offload_reorder_bufs
+ *   bit1 (2): cfg[6]=16 ast_skid_limit
+ *   bit2 (4): cfg[22]=2 num_wds_entries
+ * 0 = today's behaviour (control), 7 = all three (reference behaviour). */
+static int g_init_fix;
 static int g_init_arr;        /* initarr: 0 omit, 1 tag 19, 2 tag 18 */
 static int g_scan_shape;      /* scanshp: 0 full, 1 struct only, 2 +empty array */
 static int g_vdev_start;      /* vdstart=1: WMI_VDEV_START before the scan */
@@ -1665,9 +1676,16 @@ hif_send_wmi_init(void)
 		/* num_msdu_desc should describe the host's RX ring, not Linux's
 		 * 1056: this port only hands the target 128 ring entries. */
 		if (g_msdu_desc) cfg[28] = (uint32_t)g_msdu_desc;
+		/* initfix: per-field gates, see the declaration for the mapping.
+		 * Every value is copied verbatim from wm_send_init()'s cfg[46]. */
+		if (g_init_fix & 1) { cfg[2] = 4; cfg[3] = 4; }
+		if (g_init_fix & 2) cfg[6] = 16;
+		if (g_init_fix & 4) cfg[22] = 2;
 		HIF_LOG("WMI: INIT full Linux cfg vdevs=%u peers=%u tids=%u "
-		    "msdu=%u decap=%u max_frag=%u host_capab=0x%x",
-		    cfg[0], cfg[1], cfg[5], cfg[28], cfg[13], cfg[29], cfg[43]);
+		    "msdu=%u decap=%u max_frag=%u host_capab=0x%x "
+		    "offload=%u reorder=%u ast=%u wds=%u initfix=%u",
+		    cfg[0], cfg[1], cfg[5], cfg[28], cfg[13], cfg[29], cfg[43],
+		    cfg[2], cfg[3], cfg[6], cfg[22], (unsigned)g_init_fix);
 	} else {
 		cfg[0] = 2;      /* num_vdevs */
 		cfg[1] = 16;     /* num_peers */
@@ -4925,6 +4943,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	/* bit2 = attention-driven HTT ring drain (chain-571 A/B). */
 	if (PE_parse_boot_argn("dpfix", &v, sizeof(v)) && v <= 7) {
 		g_dp_fix = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("initfix", &v, sizeof(v)) && v <= 7) {
+		g_init_fix = (int)v;
 	}
 	v = 0;
 	if (PE_parse_boot_argn("authz", &v, sizeof(v)) && v <= 1) {
