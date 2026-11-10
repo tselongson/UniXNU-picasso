@@ -52,8 +52,24 @@
 
 extern "C" void flush_dcache64(addr64_t pa, unsigned int len, boolean_t phys);  /* only the one-time clean in PicassoWlan.cpp */
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+/* Darwin's network stack receives fully formed Ethernet frames. */
+extern "C" void hakios_net_input(const uint8_t *frame, size_t length);
 
 #define HIF_LOG(fmt, ...)   printf("WCN3990-HIF: " fmt "\n", ##__VA_ARGS__)
+
+/* TX_FRM slots shared by EAPOL and the real data plane.  Four was enough for
+ * a four-way handshake but not for DHCP/ARP traffic; 8 x 2 KiB still fits in
+ * the 6 MiB DMA window and in the first frag descriptors of htt_frag[]. */
+#define WPA_TX_SLOTS 8u
+/* netpath=1: hand received Ethernet frames to the stack and send its
+ * outgoing frames over HTT TX_FRM instead of faking DHCP/ARP.  0 keeps the
+ * old behaviour as an A/B control. */
+static int g_net_path;
+static int g_dp_diag;
+static uint32_t g_dp_bad_logged;
+/* Set once message 4 has gone out and both keys are installed.  Declared
+ * here because the RX path runs long before the WPA state block below. */
+static int g_link_up;
 
 /* ----------------------------------------------------------- IMEM black box */
 
@@ -396,10 +412,10 @@ struct hif_dma_block {
 	 * stays intact until the target has fetched it.  8 KiB, far inside
 	 * the HIF_DMA_SIZE slack (block is ~4.5 MiB of 6 MiB). */
 	uint8_t mgmt_tx[8][1024];
-	/* WPA2 TX frames: EAPOL msg2/4 go out through HTT TX_FRM with a frag
-	 * descriptor, four rotating 2 KiB slots (same slot count as the frag
-	 * descriptors reserved in htt_frag[0..3]). */
-	uint8_t tx_frame[4][2048];
+	/* WPA2 TX frames and, with netpath=1, real data frames go out through
+	 * HTT TX_FRM with a frag descriptor.  One rotating 2 KiB slot per frag
+	 * descriptor at the head of htt_frag[]. */
+	uint8_t tx_frame[WPA_TX_SLOTS][2048];
 	/* TX_FRM headers for the gather path: hif_htt_send() already rotates
 	 * tx4[], so sharing it would let an HTT H2T message overwrite a header
 	 * the copy engine has not fetched yet (the CVE-2022-50700 pattern). */
@@ -588,7 +604,7 @@ static int g_join_once_mask = 0x1ff; /* joinonce=<n>: per-command gates, 0x1ff =
 static void hif_wpa_tx_compl(const uint8_t *, uint32_t);
 static int g_wpa_diag;                 /* wpadiag=1: log key/MIC fingerprints */
 static uint32_t g_wpa_tx_ack, g_wpa_tx_noack, g_wpa_tx_discard;
-static uint8_t g_wpa_tx_busy[4];       /* TX slots not yet completed */
+static uint8_t g_wpa_tx_busy[WPA_TX_SLOTS]; /* TX slots not yet completed */
 static int g_vdev_pending;
 static uint32_t g_vdev_at;
 static uint32_t g_quiet_probe_polls;
@@ -844,6 +860,25 @@ hif_wr_post(uint64_t pa)
  * frames.  rxfix=0 is kept as the old-behaviour control. */
 static int g_rx_fix = 1;
 
+/* dpdiag=1: log why the first dozen post-key frames were rejected.  After
+ * the four-way handshake the target starts delivering encrypted data frames;
+ * chain-574 x0 counted 21 rejects (bad=21) with only 2 accepted MSDUs, and
+ * a counter alone cannot tell a decryption error from a header layout one. */
+static void
+hif_wr_bad(uint32_t reason, const uint8_t *buf, uint32_t attention,
+    uint32_t start, uint32_t len, uint32_t decap)
+{
+	g_wr_rx_bad++;
+	if (!g_dp_diag || g_dp_bad_logged >= 12u) return;
+	g_dp_bad_logged++;
+	HIF_LOG("DP: bad r=%u attn=%08x start=%08x len=%u decap=%u "
+	    "frame=%02x%02x%02x%02x%02x%02x%02x%02x",
+	    reason, attention, start, len, decap,
+	    buf[360], buf[361], buf[362], buf[363],
+	    buf[364], buf[365], buf[366], buf[367]);
+	hif_dump_hex("DP: bad", buf + 360, 32);
+}
+
 static void
 hif_wr_msdu(uint8_t *buf, uint32_t len)
 {
@@ -856,14 +891,23 @@ hif_wr_msdu(uint8_t *buf, uint32_t len)
 	decap = (start >> 8) & 3u;
 	if (!(attention & (1u << 31))) { g_wr_rx_undone++; return; }
 	if (attention & (1u << 28 | 1u << 29 | 1u << 30 | 1u << 16 |
-	    1u << 17 | 1u << 27)) { g_wr_rx_bad++; return; }
-	if (len < 14u || len > HTT_RX_BUF_SIZE - 360u) { g_wr_rx_bad++; return; }
+	    1u << 17 | 1u << 27)) {
+		hif_wr_bad(1, buf, attention, start, len, decap);
+		return;
+	}
+	if (len < 14u || len > HTT_RX_BUF_SIZE - 360u) {
+		hif_wr_bad(2, buf, attention, start, len, decap);
+		return;
+	}
 
 	eth = buf + 360;
 	bytes = len;
 	if (decap == 1) {
 		if (len < 32u || eth[24] != 0xaa || eth[25] != 0xaa ||
-		    eth[26] != 3) { g_wr_rx_bad++; return; }
+		    eth[26] != 3) {
+			hif_wr_bad(3, buf, attention, start, len, decap);
+			return;
+		}
 		if (g_rx_fix & 1) {
 			/* wlan-wip wr_msdu(): DA = addr1 at frame+4,
 			 * SA = addr2 at frame+16, EtherType stays at
@@ -883,7 +927,7 @@ hif_wr_msdu(uint8_t *buf, uint32_t len)
 		}
 		bytes = len - 32u + 14u;
 	} else if (decap != 2) {
-		g_wr_rx_bad++;
+		hif_wr_bad(4, buf, attention, start, len, decap);
 		return;
 	}
 
@@ -895,6 +939,12 @@ hif_wr_msdu(uint8_t *buf, uint32_t len)
 		    bytes, eth[14], eth[15], eth[16], eth[17], eth[18],
 		    eth[19], eth[20], (unsigned)g_rx_fix);
 		hif_wpa_handle_eapol(eth + 14, bytes - 14u);
+		return;
+	}
+	/* Real data plane: hakios_net_input() copies the Ethernet frame into
+	 * an mbuf, so the DMA buffer can be reposted immediately afterwards. */
+	if (g_net_path && g_link_up) {
+		hakios_net_input(eth, bytes);
 		return;
 	}
 	if ((g_wr_rx_frames & 63u) == 1u)
@@ -2758,7 +2808,7 @@ hif_wpa_tx_compl(const uint8_t *p, uint32_t n)
 		if (status == 0) g_wpa_tx_ack++;
 		else if (status == 2) g_wpa_tx_noack++;
 		else g_wpa_tx_discard++;
-		if (id < 4u) g_wpa_tx_busy[id] = 0;
+		if (id < WPA_TX_SLOTS) g_wpa_tx_busy[id] = 0;
 	}
 	HIF_LOG("WPA: tx compl status=%u count=%u ack=%u noack=%u discard=%u",
 	    (unsigned)status, (unsigned)count, g_wpa_tx_ack,
@@ -2779,9 +2829,10 @@ hif_wpa_tx_frame(const uint8_t *frame, uint32_t len, int eapol)
 	/* Prefer a slot the target has already completed.  wlan-wip keeps a
 	 * free list driven by TX_COMPL_IND; reusing a live slot would let a
 	 * late M1 overwrite the M4 frame before the target reads it. */
-	for (i = 0; i < 4u; i++)
-		if (!g_wpa_tx_busy[(g_wpa_st.tx_slot + i) & 3u]) break;
-	slot = (g_wpa_st.tx_slot + i) & 3u;
+	for (i = 0; i < WPA_TX_SLOTS; i++)
+		if (!g_wpa_tx_busy[(g_wpa_st.tx_slot + i) & (WPA_TX_SLOTS - 1u)])
+			break;
+	slot = (g_wpa_st.tx_slot + i) & (WPA_TX_SLOTS - 1u);
 	g_wpa_st.tx_slot = slot + 1u;
 	g_wpa_tx_busy[slot] = 1;
 	fr_pa = hif_pa_of(g_dma->tx_frame[slot]);
@@ -2820,6 +2871,39 @@ hif_wpa_tx_frame(const uint8_t *frame, uint32_t len, int eapol)
 	HIF_LOG("WPA: tx frame %u bytes slot=%u prefetch=%u rc=%d", len, slot,
 	    prefetch, rc);
 	return rc;
+}
+
+/* wlan-wip wj_net_output() (WlanRadio.c:4769): the stack hands us an
+ * Ethernet frame; wrap it in a 24-byte native-Wi-Fi data header plus
+ * LLC/SNAP and send it over the same HTT TX_FRM path as EAPOL.  The keys
+ * are installed by now, so frame[1] carries the protected bit and
+ * hif_wpa_tx_frame() asks the target to encrypt it. */
+extern "C" int
+wcn3990_hif_net_tx(const uint8_t *eth, size_t len)
+{
+	static uint8_t frame[32 + 1536];
+	uint32_t n;
+
+	if (!g_dma || !g_link_up || len < 14u || len > 1514u) return -1;
+	n = (uint32_t)len - 14u;
+	memset(frame, 0, 32);
+	frame[0] = 0x08;
+	frame[1] = (uint8_t)(0x01u | 0x40u);
+	memcpy(frame + 4, g_join_ap.b.bssid, 6);   /* addr1: the AP */
+	memcpy(frame + 10, g_join_mac, 6);          /* addr2: us */
+	memcpy(frame + 16, eth, 6);                 /* addr3: the frame's DA */
+	frame[24] = frame[25] = 0xaa;
+	frame[26] = 3;
+	frame[30] = eth[12];
+	frame[31] = eth[13];
+	memcpy(frame + 32, eth + 14, n);
+	return hif_wpa_tx_frame(frame, 32u + n, 0);
+}
+
+extern "C" int
+wcn3990_hif_net_ready(void)
+{
+	return (g_net_path && g_link_up && g_dma) ? 1 : 0;
 }
 
 /* wlan-wip wj_send_key(): WMI_VDEV_INSTALL_KEY (0x5009), TLV 0x60 with the
@@ -3043,6 +3127,7 @@ hif_wpa_handle_eapol(const uint8_t *e, uint32_t n)
 			hif_join_send_vdev_up();
 		}
 		g_wpa_st.keyed = 1;
+		g_link_up = 1;
 		HIF_LOG("WPA: msg3 seen, msg4 sent, keys installed, peer authorized");
 		return;
 	}
@@ -5115,6 +5200,14 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	v = 0;
 	if (PE_parse_boot_argn("wpadiag", &v, sizeof(v)) && v <= 1) {
 		g_wpa_diag = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("netpath", &v, sizeof(v)) && v <= 1) {
+		g_net_path = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("dpdiag", &v, sizeof(v)) && v <= 1) {
+		g_dp_diag = (int)v;
 	}
 	v = 0;
 	if (PE_parse_boot_argn("vdwait", &v, sizeof(v)) && v <= 5000) {

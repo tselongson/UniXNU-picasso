@@ -3063,6 +3063,10 @@ bool hakios_net_attach(const struct hakios_net_link *link);
 void hakios_sta_attach(const struct hakios_sta_ops *ops);
 void hakios_net_input(const uint8_t *frame, size_t length);
 int mbuf_copydata(void *m, size_t off, size_t len, void *out_data);
+/* Real WCN3990 data plane (Wcn3990Hif.cpp).  Only live once the four-way
+ * handshake has installed the keys and netpath=1 is set. */
+int wcn3990_hif_net_ready(void);
+int wcn3990_hif_net_tx(const uint8_t *frame, size_t length);
 }
 
 static void picasso_wlan_ce_poll(void);
@@ -3262,6 +3266,15 @@ picasso_wlan_transmit(void *packet, size_t length)
 	      type_str, length,
 	      frame[0], frame[1], frame[2], frame[3], frame[4], frame[5],
 	      frame[6], frame[7], frame[8], frame[9], frame[10], frame[11]);
+
+	/* netpath=1 and the keys are in: send the frame over the real HTT
+	 * TX_FRM data path instead of answering DHCP/ARP with the historical
+	 * fake replies below.  That fake path stays as the A/B control. */
+	if (wcn3990_hif_net_ready()) {
+		IOLog("picasso_wlan_tx: [REAL DATA PLANE] %s %zu bytes over HTT TX_FRM\n",
+		      type_str, length);
+		return wcn3990_hif_net_tx(frame, length) == 0;
+	}
 
 	/* Real Access Point BSSID */
 	static const uint8_t bssid_tomc_5g[6] = { 0x26, 0x0b, 0x2a, 0xb4, 0x69, 0x4c };
