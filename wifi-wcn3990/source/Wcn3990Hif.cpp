@@ -1157,6 +1157,10 @@ hif_dump_regs(const char *why)
  * but it must happen, otherwise the ring wraps and the target stalls. */
 static uint32_t g_htt_ring_rd;
 static uint32_t g_htt_ring_seen;
+/* dpfix bit0: consume MSDUs from the HTT index page (the target may deliver
+ * frames without an RX_IND/RX_IN_ORD message on CE1); bit1: post only
+ * fw_idx_init_val buffers, exactly like trogdor ws_htt_prepare(). */
+static int g_dp_fix;
 
 static void
 hif_service_htt_ring(void)
@@ -1167,15 +1171,34 @@ hif_service_htt_ring(void)
 
 	fw_idx = g_dma->htt_alloc_idx & (HTT_RX_RING_ENTRIES - 1);
 	while (g_htt_ring_rd != fw_idx && budget-- > 0) {
-		const uint8_t *b = g_dma->htt_buf[g_htt_ring_rd];
+		uint8_t *b = g_dma->htt_buf[g_htt_ring_rd];
+		uint64_t pa = g_dma->htt_ring[g_htt_ring_rd];
+		uint32_t attention, start;
 
+		memcpy(&attention, b + 4, 4);
+		memcpy(&start, b + 28, 4);
 		if (g_htt_ring_seen < 8) {
 			/* rx_desc.h: struct rx_attention sits at offset 4 and
 			 * rx_hdr_status at 296 for the wcn3990 descriptor. */
 			HIF_LOG("htt ring #%u idx=%u attn=%02x%02x%02x%02x hdr0=%02x%02x",
 			    g_htt_ring_seen, g_htt_ring_rd,
 			    b[7], b[6], b[5], b[4], b[297], b[296]);
-			g_htt_ring_seen++;
+		}
+		g_htt_ring_seen++;
+		/* dpfix bit0: the target can deliver an MPDU by advancing the
+		 * fw_idx index page without ever sending a CE1 RX_IND/IN_ORD.
+		 * hif_wr_msdu() (wlan-wip wr_msdu) validates the attention word,
+		 * decapsulates and hands EAPOL to the four-way handshake;
+		 * hif_wr_post() returns the buffer to the ring. */
+		if (g_dp_fix & 0x1) {
+			if (attention & (1u << 31)) {
+				uint32_t len = start & 0x3fffu;
+
+				if (len >= 14u &&
+				    len <= HTT_RX_BUF_SIZE - 360u)
+					hif_wr_msdu(b, len);
+			}
+			hif_wr_post(pa);
 		}
 		g_htt_ring_rd = (g_htt_ring_rd + 1) &
 		    (HTT_RX_RING_ENTRIES - 1);
@@ -1338,8 +1361,13 @@ hif_htt_rx_ring_cfg(void)
 	 * addressable (the buffers are static, so a target that walks past
 	 * fill_level still finds valid memory). */
 	fill = HTT_RX_FILL_LEVEL;
-	for (i = 0; i < HTT_RX_RING_ENTRIES - 1; i++) {
-		g_dma->htt_ring[i] = hif_pa_of(g_dma->htt_buf[i]);
+	/* trogdor posts exactly WS_RX_FILL addresses; our old loop filled the
+	 * whole ring while still telling the target fw_idx_init_val = 1023. */
+	{
+		uint32_t nfill = (g_dp_fix & 0x2) ? fill : HTT_RX_RING_ENTRIES - 1u;
+		for (i = 0; i < nfill; i++) {
+			g_dma->htt_ring[i] = hif_pa_of(g_dma->htt_buf[i]);
+		}
 	}
 	g_htt_buf_pa = hif_pa_of(g_dma->htt_buf[0]);
 	g_htt_alloc = fill;
@@ -4801,6 +4829,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	v = 0;
 	if (PE_parse_boot_argn("scanfix", &v, sizeof(v)) && v <= 127) {
 		g_scan_fix = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("dpfix", &v, sizeof(v)) && v <= 3) {
+		g_dp_fix = (int)v;
 	}
 	/* join=N: after a scan round completes, authenticate and associate
 	 * with BSS table entry N (1-based, order of first hearing).  0 or
