@@ -908,10 +908,22 @@ hif_wr_msdu(uint8_t *buf, uint32_t len)
 	memcpy(&start, buf + 36, 4);
 	decap = (start >> 8) & 3u;
 	if (!(attention & (1u << 31))) { g_wr_rx_undone++; return; }
-	if (attention & (1u << 28 | 1u << 29 | 1u << 30 | 1u << 16 |
-	    1u << 17 | 1u << 27)) {
-		hif_wr_bad(1, buf, attention, start, len, decap);
-		return;
+	/* chain-579: on the real data path the target delivered decrypted
+	 * broadcast ARP / IPv4 / IPv6 frames (LLC/SNAP + EtherType visible in
+	 * the dump) with bit28 set, while the fatal bits -- 27 TKIP MIC, 29
+	 * FCS, 30 length, 16/17 -- stayed clear.  wlan-wip's mask treats bit28
+	 * as an error because its CCMP AP never sets it; this AP uses a TKIP
+	 * group key and does.  Keep the old mask for the netpath=0 control and
+	 * ignore bit28 only when real frames are being handed to the stack. */
+	{
+		uint32_t bad = (1u << 29 | 1u << 30 | 1u << 16 | 1u << 17 |
+		    1u << 27);
+
+		if (!g_net_path) bad |= 1u << 28;
+		if (attention & bad) {
+			hif_wr_bad(1, buf, attention, start, len, decap);
+			return;
+		}
 	}
 	if (len < 14u || len > HTT_RX_BUF_SIZE - 360u) {
 		hif_wr_bad(2, buf, attention, start, len, decap);
