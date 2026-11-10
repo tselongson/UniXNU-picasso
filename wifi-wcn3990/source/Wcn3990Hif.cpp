@@ -507,8 +507,14 @@ static int g_wmi_init_full = 1; /* Linux WCN3990 resource config (the 44-field o
  *   bit0 (1): cfg[2]=4 num_offload_peers, cfg[3]=4 num_offload_reorder_bufs
  *   bit1 (2): cfg[6]=16 ast_skid_limit
  *   bit2 (4): cfg[22]=2 num_wds_entries
- * 0 = today's behaviour (control), 7 = all three (reference behaviour). */
-static int g_init_fix;
+ * 0 = today's behaviour (control), 7 = all three (reference behaviour).
+ *
+ * chain-572 four-way single-variable (0/1/3/7) proved bit1 ast_skid_limit
+ * is what makes the target build a peer data path: 0/1 have no peer map,
+ * no HTT RX_IN_ORD and no EAPOL; 3/7 deliver all of them.  bit2 (wds) is
+ * not required.  Default is now 3; initfix=0 still reproduces the old
+ * control for A/B. */
+static int g_init_fix = 3;
 static int g_init_arr;        /* initarr: 0 omit, 1 tag 19, 2 tag 18 */
 static int g_scan_shape;      /* scanshp: 0 full, 1 struct only, 2 +empty array */
 static int g_vdev_start;      /* vdstart=1: WMI_VDEV_START before the scan */
@@ -573,6 +579,16 @@ static int g_join_once;          /* the wj_begin() once-block (vdev/pdev params)
 static int g_join_once_mask = 0x1ff; /* joinonce=<n>: per-command gates, 0x1ff = all */
 #define HTT_T2H_MSG_TYPE_PEER_MAP    3
 #define HTT_T2H_MSG_TYPE_PEER_UNMAP  4
+#define HTT_T2H_MSG_TYPE_TX_COMPL    7
+/* HTT TX_COMPL_IND (0x7) layout, from wlan-wip wj_tx_compl() and the 10.4
+ * enum in work/refs/ath10k/htt.h: {type, status&7, count, flags} followed
+ * by count little-endian 16-bit msdu ids.  status 0 = ACKed, 2 = no ACK,
+ * anything else = discarded.  chain-573 w1 emitted 07 00 01 00 00 00 ff ff
+ * after every M2, i.e. status 0: all four EAPOL replies really went out. */
+static void hif_wpa_tx_compl(const uint8_t *, uint32_t);
+static int g_wpa_diag;                 /* wpadiag=1: log key/MIC fingerprints */
+static uint32_t g_wpa_tx_ack, g_wpa_tx_noack, g_wpa_tx_discard;
+static uint8_t g_wpa_tx_busy[4];       /* TX slots not yet completed */
 static int g_vdev_pending;
 static uint32_t g_vdev_at;
 static uint32_t g_quiet_probe_polls;
@@ -823,7 +839,10 @@ hif_wr_post(uint64_t pa)
  * (24-byte 802.11 header + 8-byte LLC/SNAP).  Our old code left eth at
  * frame+0, so eth+14 landed in the middle of the 802.11 header, 18 bytes
  * early.  rxfix bit0 restores the reference layout. */
-static int g_rx_fix;
+/* chain-573 single-variable rxfix=0/1: rxfix=1 makes EAPOL M1 parse
+ * (ver=1 type=3 info=008a), M2 is built and the target ACKs all four TX
+ * frames.  rxfix=0 is kept as the old-behaviour control. */
+static int g_rx_fix = 1;
 
 static void
 hif_wr_msdu(uint8_t *buf, uint32_t len)
@@ -1021,6 +1040,9 @@ hif_service_ce1(void)
 			case 0x12:
 				hif_wr_in_ord(msg, msglen);
 				break;
+			case HTT_T2H_MSG_TYPE_TX_COMPL:
+				hif_wpa_tx_compl(msg, msglen);
+				break;
 			default:
 				break;
 			}
@@ -1213,8 +1235,13 @@ static uint32_t g_wmi_peer_events;     /* any 0x600x WMI event seen */
  * write index, so the first call walked rd 0..1022 (printing eight empty
  * buffers) and then rd == fw_idx held forever.  That is why every "zero
  * datapath" capture showed htt ring #0..7 attn=0: those were empty buffers
- * scanned BEFORE vdev up, not evidence that the target wrote nothing. */
-static int g_dp_fix;
+ * scanned BEFORE vdev up, not evidence that the target wrote nothing.
+ *
+ * chain-571 proved bit2 (attention-driven drain) is a real fix but not the
+ * cause of the zero datapath; chain-572/573 both ran with bit0+bit2=5 and
+ * received peer maps, RX_IN_ORD and EAPOL frames.  Default is now 5;
+ * dpfix=0 remains the old-behaviour control. */
+static int g_dp_fix = 5;
 /* authz=1: send WMI PEER_AUTHORIZE(3,1) for a SECURE AP right after
  * VDEV_UP.  Linux mac.c and the working WCN7860 port both expose a
  * PEER_AUTHORIZE path; trogdor sends it only after the keys are in. */
@@ -2712,18 +2739,51 @@ wpa_unwrap(const uint8_t kek[16], const uint8_t *in, uint32_t n, uint8_t *out)
 	return 0;
 }
 
+/* wlan-wip wj_tx_compl(): retire the TX slots the target has finished and
+ * expose its status.  chain-573 w1 produced one of these per EAPOL M2 with
+ * status 0, which is why "M2 never left" is not the reason M3 never came. */
+static void
+hif_wpa_tx_compl(const uint8_t *p, uint32_t n)
+{
+	uint32_t i;
+	uint8_t status, count;
+
+	if (n < 4u) return;
+	status = (uint8_t)(p[1] & 7u);
+	count = p[2];
+	for (i = 0; i < count && 4u + 2u * i + 2u <= n; i++) {
+		uint16_t id = (uint16_t)(p[4 + 2 * i] |
+		    (uint16_t)p[5 + 2 * i] << 8);
+
+		if (status == 0) g_wpa_tx_ack++;
+		else if (status == 2) g_wpa_tx_noack++;
+		else g_wpa_tx_discard++;
+		if (id < 4u) g_wpa_tx_busy[id] = 0;
+	}
+	HIF_LOG("WPA: tx compl status=%u count=%u ack=%u noack=%u discard=%u",
+	    (unsigned)status, (unsigned)count, g_wpa_tx_ack,
+	    g_wpa_tx_noack, g_wpa_tx_discard);
+}
+
 /* ---- TX path: 28-byte HTT TX_FRM + frag desc, CE4 two-segment gather ---- */
 static int
 hif_wpa_tx_frame(const uint8_t *frame, uint32_t len, int eapol)
 {
-	uint32_t slot, prefetch, lo, fl;
+	uint32_t slot, prefetch, lo, fl, i;
 	uint64_t pa, fr_pa, desc_pa;
 	uint16_t hi, htc, flags1, id, peer = 0xffff, freq = 0;
 	uint8_t h[28], *ext;
 	int rc;
 
 	if (!g_dma || len > 2048u || len < 14u) return -1;
-	slot = g_wpa_st.tx_slot++ & 3u;
+	/* Prefer a slot the target has already completed.  wlan-wip keeps a
+	 * free list driven by TX_COMPL_IND; reusing a live slot would let a
+	 * late M1 overwrite the M4 frame before the target reads it. */
+	for (i = 0; i < 4u; i++)
+		if (!g_wpa_tx_busy[(g_wpa_st.tx_slot + i) & 3u]) break;
+	slot = (g_wpa_st.tx_slot + i) & 3u;
+	g_wpa_st.tx_slot = slot + 1u;
+	g_wpa_tx_busy[slot] = 1;
 	fr_pa = hif_pa_of(g_dma->tx_frame[slot]);
 	if (!fr_pa) return -1;
 	memcpy(g_dma->tx_frame[slot], frame, len);
@@ -2828,6 +2888,36 @@ hif_wpa_reply(uint16_t info, const uint8_t *replay, const uint8_t *nonce,
 	frame[31] = 0x8e;
 	n = (uint32_t)(WPA_EAPOL_FIXED + data_len);
 	memcpy(frame + 32, f, n);
+	if (g_wpa_diag) {
+		/* Everything needed to recompute the M2 MIC offline with
+		 * hashlib: the exact SSID/passphrase lengths, the PMK/KCK
+		 * fingerprints, both nonces and the full outgoing frame.
+		 * No plaintext passphrase is ever logged. */
+		HIF_LOG("WPA: diag info=%04x ssid=%02x%02x%02x%02x "
+		    "ssid_len=%u passlen=%u "
+		    "pmk=%02x%02x%02x%02x kck=%02x%02x%02x%02x "
+		    "mic=%02x%02x%02x%02x",
+		    (unsigned)info, g_join_ap.b.ssid[0],
+		    g_join_ap.b.ssid[1], g_join_ap.b.ssid[2],
+		    g_join_ap.b.ssid[3],
+		    (unsigned)g_join_ap.b.ssid_len,
+		    (unsigned)strlen(g_wpa_pass),
+		    g_wpa_st.pmk[0], g_wpa_st.pmk[1], g_wpa_st.pmk[2],
+		    g_wpa_st.pmk[3], g_wpa_st.ptk[0], g_wpa_st.ptk[1],
+		    g_wpa_st.ptk[2], g_wpa_st.ptk[3],
+		    digest[0], digest[1], digest[2], digest[3]);
+		HIF_LOG("WPA: diag snonce=%02x%02x%02x%02x "
+		    "anonce=%02x%02x%02x%02x replay=%02x%02x%02x%02x "
+		    "datalen=%u",
+		    g_wpa_st.snonce[0], g_wpa_st.snonce[1],
+		    g_wpa_st.snonce[2], g_wpa_st.snonce[3],
+		    g_wpa_st.anonce[0], g_wpa_st.anonce[1],
+		    g_wpa_st.anonce[2], g_wpa_st.anonce[3],
+		    replay[0], replay[1], replay[2], replay[3],
+		    (unsigned)data_len);
+		hif_dump_hex("WPA: m2", frame,
+		    32u + n > 128u ? 128u : 32u + n);
+	}
 	(void)hif_wpa_tx_frame(frame, 32u + n, 1);
 }
 
@@ -2878,6 +2968,9 @@ hif_wpa_handle_eapol(const uint8_t *e, uint32_t n)
 		uint32_t i, seed;
 
 		memcpy(g_wpa_st.anonce, e + 17, 32);
+		if (g_wpa_diag)
+			hif_dump_hex("WPA: m1", e,
+			    total > 128u ? 128u : total);
 		seed = g_polls * 2654435761u ^ 0x9e3779b9u;
 		for (i = 0; i < 32; i++) {
 			seed ^= seed << 13;
@@ -5016,6 +5109,13 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_wpa = (int)v;
 	}
 	(void)PE_parse_boot_argn("wpass", g_wpa_pass, sizeof(g_wpa_pass));
+	/* wpadiag=1 dumps the M1/M2 frames plus key fingerprints, so the M2
+	 * MIC can be recomputed offline.  Off by default: no key material
+	 * (and never the passphrase) reaches the console otherwise. */
+	v = 0;
+	if (PE_parse_boot_argn("wpadiag", &v, sizeof(v)) && v <= 1) {
+		g_wpa_diag = (int)v;
+	}
 	v = 0;
 	if (PE_parse_boot_argn("vdwait", &v, sizeof(v)) && v <= 5000) {
 		g_vdev_wait_ms = (int)v;
