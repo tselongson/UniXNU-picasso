@@ -3067,6 +3067,8 @@ int mbuf_copydata(void *m, size_t off, size_t len, void *out_data);
  * handshake has installed the keys and netpath=1 is set. */
 int wcn3990_hif_net_ready(void);
 int wcn3990_hif_net_tx(const uint8_t *frame, size_t length);
+int wcn3990_hif_connect(const uint8_t *ssid, size_t slen,
+                        const uint8_t *pass, size_t plen);
 }
 
 static void picasso_wlan_ce_poll(void);
@@ -3837,8 +3839,18 @@ picasso_sta_join(const struct hakios_sta_join *what)
 			g_picasso_last_error = EINVAL;
 			return EINVAL;
 		}
-		IOLog("picasso_sta_join: 4-way WPA2-PSK handshake authenticated successfully\n");
 	}
+
+	/* The old path only printed "handshake authenticated successfully" and
+	 * marked the link UP without ever touching the radio.  Hand the SSID
+	 * and passphrase to the HIF as a pair, exactly like wlan-wip's
+	 * nw_wifi_connect()/wj_begin(), so a wifid join really associates. */
+	if (wcn3990_hif_connect(what->ssid, what->ssid_length,
+	    what->passphrase, what->passphrase_length) != 0) {
+		g_picasso_last_error = EINVAL;
+		return EINVAL;
+	}
+	IOLog("picasso_sta_join: connect request handed to WCN3990 HIF\n");
 
 	if (found) {
 		g_picasso_joined_bss = *found;

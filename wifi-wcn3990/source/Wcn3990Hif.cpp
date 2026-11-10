@@ -605,6 +605,16 @@ static void hif_wpa_tx_compl(const uint8_t *, uint32_t);
 static int g_wpa_diag;                 /* wpadiag=1: log key/MIC fingerprints */
 static uint32_t g_wpa_tx_ack, g_wpa_tx_noack, g_wpa_tx_discard;
 static uint8_t g_wpa_tx_busy[WPA_TX_SLOTS]; /* TX slots not yet completed */
+/* wlan-wip wj_req / nw_wifi_connect(): the 802.11 stack hands down an
+ * SSID + passphrase pair and wj_begin() matches that SSID exactly.  Our
+ * boot-arg joinsel was only ever a lab shortcut; wifiauto and the real
+ * join callback both go through this request now. */
+static struct {
+	uint8_t ssid[32];
+	uint8_t ssid_len;
+	uint8_t pending;
+} g_join_req;
+static int g_wifi_auto;
 static int g_vdev_pending;
 static uint32_t g_vdev_at;
 static uint32_t g_quiet_probe_polls;
@@ -3140,6 +3150,34 @@ hif_wpa_handle_eapol(const uint8_t *e, uint32_t n)
 	}
 }
 
+/* wlan-wip nw_wifi_connect(): the 802.11 stack (or wifiauto at boot) hands
+ * down the SSID and passphrase as a pair.  The join state machine matches
+ * that SSID exactly, so the PMK always belongs to the network we joined --
+ * the chain-573 failure was a passphrase/SSID mismatch, not a bad MIC. */
+extern "C" int
+wcn3990_hif_connect(const uint8_t *ssid, size_t slen,
+    const uint8_t *pass, size_t plen)
+{
+	size_t n;
+
+	if (!ssid || slen == 0 || slen > sizeof(g_join_req.ssid)) return -1;
+	memset(&g_join_req, 0, sizeof(g_join_req));
+	memcpy(g_join_req.ssid, ssid, slen);
+	g_join_req.ssid_len = (uint8_t)slen;
+	memset(g_wpa_pass, 0, sizeof(g_wpa_pass));
+	if (pass && plen) {
+		n = plen < sizeof(g_wpa_pass) - 1u ?
+		    plen : sizeof(g_wpa_pass) - 1u;
+		memcpy(g_wpa_pass, pass, n);
+	}
+	g_join_req.pending = 1;
+	g_join = 2;
+	g_wpa = 1;
+	HIF_LOG("JOIN: connect requested, ssid_len=%u passlen=%u",
+	    (unsigned)slen, (unsigned)strlen(g_wpa_pass));
+	return 0;
+}
+
 /* wlan-wip wj_mgmt_header(): a 24-byte management header to the AP. */
 static void
 hif_join_mgmt_header(uint8_t *f, uint8_t type)
@@ -3749,7 +3787,35 @@ hif_join_begin(void)
 
 		want = (g_join_sel >= 1 && g_join_sel <= 3) ? sel_ssid[g_join_sel] : NULL;
 		pick = g_join_bss_count;
-		if (g_join_sel == 4) {
+		if (g_join_req.pending) {
+			/* wlan-wip wj_begin(): match the requested SSID exactly,
+			 * else wait for it to appear.  A wrong passphrase cannot
+			 * be masked by "any visible AP" here, so the four-way
+			 * handshake always uses the credentials of the network
+			 * it actually joined. */
+			for (i = 0; i < g_join_bss_count; i++) {
+				const struct hif_join_bss *c = &g_join_bss[i];
+
+				if (c->freq_mhz >= 4900) continue;
+				if (c->ssid_len == g_join_req.ssid_len &&
+				    !memcmp(c->ssid, g_join_req.ssid,
+				    c->ssid_len)) {
+					pick = i;
+					break;
+				}
+			}
+			if (pick == g_join_bss_count) {
+				static uint32_t last_wait;
+
+				if (g_polls - last_wait > 5000u) {
+					last_wait = g_polls;
+					HIF_LOG("JOIN: connect waiting for the "
+					    "requested network (%u heard)",
+					    g_join_bss_count);
+				}
+				return;
+			}
+		} else if (g_join_sel == 4) {
 			/* Any visible 2.4 GHz AP: the experiment must not depend on
 			 * one particular router being in the BSS table (chain-564/n2
 			 * lost 220 s to a 5 GHz fallback that always fails auth).
@@ -3814,6 +3880,7 @@ hif_join_begin(void)
 				if (g_join_bss[pick].ssid_len) break;
 		}
 		if (pick == g_join_bss_count) return;
+		g_join_req.pending = 0;
 		b = &g_join_bss[pick];
 	} else {
 		if (g_join == 0 || (uint32_t)g_join > g_join_bss_count) return;
@@ -5019,6 +5086,30 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	uint32_t v = 0;
 	uint32_t i;
 
+	/* wifiauto=1: the unattended daily-use baseline.  Install the exact
+	 * gate set proven on hardware (chain-574/575) as DEFAULTS.  Explicit
+	 * boot-args parsed below still override every one of them, so single-
+	 * variable A/B experiments remain possible on the same build. */
+	if (PE_parse_boot_argn("wifiauto", &v, sizeof(v)) && v <= 1) {
+		g_wifi_auto = (int)v;
+	}
+	if (g_wifi_auto) {
+		g_autoscan = 1;
+		g_chan_list = 1;
+		g_htt_connect = 1;
+		g_htt_setup = 1;
+		g_htt_ring = 7;
+		g_scan_fix = 127;
+		g_join = 2;
+		g_join_sel = 4;
+		g_join_skip = 0;
+		g_wpa = 1;
+		g_net_path = 1;
+		g_init_fix = 3;
+		g_rx_fix = 1;
+		g_dp_fix = 5;
+	}
+
 	/* Black box first: print whatever the previous boot managed to write
 	 * into IMEM before its reset, then start recording this boot. */
 	hif_bb_init();
@@ -5194,6 +5285,25 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_wpa = (int)v;
 	}
 	(void)PE_parse_boot_argn("wpass", g_wpa_pass, sizeof(g_wpa_pass));
+	/* wifiauto: issue the connect request as soon as boot-args are in, so
+	 * the radio scans, joins the matching SSID and obtains an address with
+	 * no experiment parameters at all.  wifissid= overrides the network. */
+	if (g_wifi_auto && g_wpa_pass[0]) {
+		char ssid[33] = "ChinaUnicom-33E6TD";
+		char wanted[33];
+
+		if (PE_parse_boot_argn("wifissid", wanted, sizeof(wanted))) {
+			size_t k = strlen(wanted);
+
+			if (k && k < sizeof(ssid)) {
+				memcpy(ssid, wanted, k);
+				ssid[k] = 0;
+			}
+		}
+		(void)wcn3990_hif_connect((const uint8_t *)ssid, strlen(ssid),
+		    (const uint8_t *)g_wpa_pass, strlen(g_wpa_pass));
+		HIF_LOG("wifiauto: unattended connect for '%s'", ssid);
+	}
 	/* wpadiag=1 dumps the M1/M2 frames plus key fingerprints, so the M2
 	 * MIC can be recomputed offline.  Off by default: no key material
 	 * (and never the passphrase) reaches the console otherwise. */
