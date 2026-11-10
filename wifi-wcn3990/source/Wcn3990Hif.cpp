@@ -957,6 +957,14 @@ hif_service_ce1(void)
 			    nbytes > HTC_HDR_BYTES ? b[HTC_HDR_BYTES] : 0xff,
 			    nbytes > HTC_HDR_BYTES + 1 ? b[HTC_HDR_BYTES + 1] : 0xff,
 			    nbytes > HTC_HDR_BYTES + 2 ? b[HTC_HDR_BYTES + 2] : 0xff);
+			/* Every T2H message, including the 32-byte type=24 that
+			 * chain-570 could only count.  Its payload tells us
+			 * whether the target is announcing a peer map in V2
+			 * layout or something else entirely. */
+			if (g_htt_rx < 12 && nbytes > HTC_HDR_BYTES)
+				hif_dump_hex("HTT t2h", b + HTC_HDR_BYTES,
+				    (nbytes - HTC_HDR_BYTES) > 32 ?
+				    32 : (nbytes - HTC_HDR_BYTES));
 			g_htt_rx++;
 		}
 		/* wlan-wip wj_htt_message(): the whole HTT T2H dispatch.  The
@@ -1157,9 +1165,21 @@ hif_dump_regs(const char *why)
  * but it must happen, otherwise the ring wraps and the target stalls. */
 static uint32_t g_htt_ring_rd;
 static uint32_t g_htt_ring_seen;
+static uint32_t g_htt_ring_done_cnt;   /* MPDUs actually consumed from the ring */
+static uint32_t g_wmi_peer_events;     /* any 0x600x WMI event seen */
 /* dpfix bit0: consume MSDUs from the HTT index page (the target may deliver
  * frames without an RX_IND/RX_IN_ORD message on CE1); bit1: post only
- * fw_idx_init_val buffers, exactly like trogdor ws_htt_prepare(). */
+ * fw_idx_init_val buffers, exactly like trogdor ws_htt_prepare();
+ * bit2: attention-driven drain (see hif_service_htt_ring).
+ *
+ * chain-570 finding: g_dma->htt_alloc_idx is the HOST refill pointer, not
+ * target progress.  Linux htt_rx.c:151 reads it as "next slot to refill" and
+ * :209 writes it back after refilling; fw_idx_shadow_reg_paddr (htt_tx.c:940)
+ * is simply that word's physical address.  The old loop used it as the target
+ * write index, so the first call walked rd 0..1022 (printing eight empty
+ * buffers) and then rd == fw_idx held forever.  That is why every "zero
+ * datapath" capture showed htt ring #0..7 attn=0: those were empty buffers
+ * scanned BEFORE vdev up, not evidence that the target wrote nothing. */
 static int g_dp_fix;
 /* authz=1: send WMI PEER_AUTHORIZE(3,1) for a SECURE AP right after
  * VDEV_UP.  Linux mac.c and the working WCN7860 port both expose a
@@ -1169,44 +1189,73 @@ static int g_authz;
 static void
 hif_service_htt_ring(void)
 {
-	uint32_t fw_idx, budget = HTT_RX_RING_ENTRIES;
+	uint32_t budget = HTT_RX_RING_ENTRIES;
 
 	if (!(g_htt_ring & 1) || !g_htt_ring_done || g_dma == NULL) return;
 
-	fw_idx = g_dma->htt_alloc_idx & (HTT_RX_RING_ENTRIES - 1);
-	while (g_htt_ring_rd != fw_idx && budget-- > 0) {
-		uint8_t *b = g_dma->htt_buf[g_htt_ring_rd];
-		uint32_t attention, start;
+	/* dpfix bit2: attention-driven drain.  The target marks a filled
+	 * buffer by setting rx_attention bit31; the host stops at the first
+	 * slot that is not done.  No target register is read and no shared
+	 * index word is used as a progress boundary. */
+	if (g_dp_fix & 0x4) {
+		while (budget-- > 0) {
+			uint8_t *b = g_dma->htt_buf[g_htt_ring_rd];
+			uint32_t attention, start, len;
 
-		memcpy(&attention, b + 4, 4);
-		memcpy(&start, b + 28, 4);
-		if (g_htt_ring_seen < 8) {
-			/* rx_desc.h: struct rx_attention sits at offset 4 and
-			 * rx_hdr_status at 296 for the wcn3990 descriptor. */
-			HIF_LOG("htt ring #%u idx=%u attn=%02x%02x%02x%02x hdr0=%02x%02x",
-			    g_htt_ring_seen, g_htt_ring_rd,
-			    b[7], b[6], b[5], b[4], b[297], b[296]);
-		}
-		g_htt_ring_seen++;
-		/* dpfix bit0: the target can deliver an MPDU by advancing the
-		 * fw_idx index page without ever sending a CE1 RX_IND/IN_ORD.
-		 * hif_wr_msdu() (wlan-wip wr_msdu) validates the attention word,
-		 * decapsulates and hands EAPOL to the four-way handshake;
-		 * hif_wr_post() returns the buffer to the ring. */
-		if ((g_dp_fix & 0x1) && (attention & (1u << 31))) {
-			uint32_t len = start & 0x3fffu;
-
-			if (len >= 14u &&
+			memcpy(&attention, b + 4, 4);
+			if (!(attention & (1u << 31))) break;   /* ring caught up */
+			memcpy(&start, b + 28, 4);
+			len = start & 0x3fffu;
+			if (g_htt_ring_seen < 16)
+				HIF_LOG("htt dp #%u idx=%u attn=%08x len=%u "
+				    "hdr0=%02x%02x", g_htt_ring_seen,
+				    g_htt_ring_rd, attention, len,
+				    b[297], b[296]);
+			g_htt_ring_seen++;
+			if ((g_dp_fix & 0x1) && len >= 14u &&
 			    len <= HTT_RX_BUF_SIZE - 360u)
 				hif_wr_msdu(b, len);
-			/* Buffers are static and their addresses never move: just
-			 * clear the attention word so the target can reuse the slot.
-			 * Do NOT call hif_wr_post() here -- it rewrites the shared
-			 * fw_idx index page and would make this loop spin forever. */
+			g_htt_ring_done_cnt++;
+			/* Static buffers never move: clear attention so the
+			 * target can reuse the slot.  Do not repost here; the
+			 * index word is the host's own refill pointer. */
 			*(volatile uint32_t *)(uintptr_t)(b + 4) = 0;
+			hif_mb();
+			g_htt_ring_rd = (g_htt_ring_rd + 1) &
+			    (HTT_RX_RING_ENTRIES - 1);
 		}
-		g_htt_ring_rd = (g_htt_ring_rd + 1) &
+		return;
+	}
+
+	/* Original (chain-567) behaviour, kept as the single-variable control:
+	 * walk from rd up to htt_alloc_idx once, then never enter again. */
+	{
+		uint32_t fw_idx = g_dma->htt_alloc_idx &
 		    (HTT_RX_RING_ENTRIES - 1);
+
+		budget = HTT_RX_RING_ENTRIES;
+		while (g_htt_ring_rd != fw_idx && budget-- > 0) {
+			uint8_t *b = g_dma->htt_buf[g_htt_ring_rd];
+			uint32_t attention, start;
+
+			memcpy(&attention, b + 4, 4);
+			memcpy(&start, b + 28, 4);
+			if (g_htt_ring_seen < 8)
+				HIF_LOG("htt ring #%u idx=%u attn=%02x%02x%02x%02x hdr0=%02x%02x",
+				    g_htt_ring_seen, g_htt_ring_rd,
+				    b[7], b[6], b[5], b[4], b[297], b[296]);
+			g_htt_ring_seen++;
+			if ((g_dp_fix & 0x1) && (attention & (1u << 31))) {
+				uint32_t l = start & 0x3fffu;
+
+				if (l >= 14u &&
+				    l <= HTT_RX_BUF_SIZE - 360u)
+					hif_wr_msdu(b, l);
+				*(volatile uint32_t *)(uintptr_t)(b + 4) = 0;
+			}
+			g_htt_ring_rd = (g_htt_ring_rd + 1) &
+			    (HTT_RX_RING_ENTRIES - 1);
+		}
 	}
 }
 
@@ -4159,6 +4208,33 @@ hif_handle_wmi(const uint8_t *payload, uint32_t len)
 		break;
 	default:
 		HIF_LOG("WMI: event 0x%x (%u bytes)", event_id, len);
+		/* WMI_TLV_SERVICE_AVAILABLE_EVENTID (0x3) carries the 128+
+		 * extended service bitmap; wmi-tlv.h says it precedes
+		 * SERVICE_READY.  chain-570 decoded bit143
+		 * PEER_MAP_UNMAP_V2_SUPPORT=1 from its bytes, which means the
+		 * peer-map layout hif_join_peer_event() expects may be wrong.
+		 * Print the words so a later capture settles it without a guess.
+		 * Layout: event_id(4) TLV hdr(4) seg_offset(4) bitmap words. */
+		if (event_id == 0x3 && len >= 20) {
+			uint32_t seg = hif_le32(payload + 8);
+			uint32_t w0 = hif_le32(payload + 12);
+			uint32_t w1 = len >= 24 ? hif_le32(payload + 16) : 0;
+			uint32_t w2 = len >= 28 ? hif_le32(payload + 20) : 0;
+
+			HIF_LOG("WMI: SVC_AVAIL seg=%u ext=%08x %08x %08x "
+			    "v2=%u dma=%u", seg, w0, w1, w2,
+			    (w0 >> 15) & 1u, (w0 >> 18) & 1u);
+		}
+		/* Peer-group events (0x600x) are the other possible path for
+		 * PEER_CREATE confirmation (WMI_TLV_PEER_ASSOC_CONF_EVENTID
+		 * 0x6006 / WMI_TLV_PEER_STATE_EVENTID 0x6005).  Count them so
+		 * "no peer map ever arrived" is a measured fact, not an
+		 * inference from a timeout. */
+		if ((event_id & 0xf000u) == 0x6000u) {
+			g_wmi_peer_events++;
+			HIF_LOG("WMI: PEER event 0x%x count=%u (%u bytes)",
+			    event_id, g_wmi_peer_events, len);
+		}
 		/* wmi.h struct wmi_chan_info_event: err_code, freq, cmd_flags,
 		 * noise_floor, rx_clear_count, cycle_count.  rx_clear/cycle is
 		 * the only observable that says whether there was any RF energy
@@ -4298,14 +4374,16 @@ wcn3990_hif_poll(void)
 	if ((g_polls % 1000) == 0) {
 		HIF_LOG("heartbeat polls=%u stage=%d state=%d rx=%u beacons=%u "
 		    "desc0.nbytes=%u drri=%x htt=%u httidx=%u mgmt=%u mgmtev=%u "
-		    "join=%d ind=%u ord=%u msdu=%u eapol=%u bad=%u/%u",
+		    "join=%d ind=%u ord=%u msdu=%u eapol=%u bad=%u/%u "
+		    "ring=%u/%u",
 		    g_polls, g_stage, (int)g_state, g_rx_packets, g_beacons,
 		    (unsigned)s_dst2[0].nbytes,
 		    (g_bases_programmed && g_dma) ? ((s_rri[2] >> 16) & 0xffffu) : 0,
 		    g_htt_rx, g_dma ? g_dma->htt_alloc_idx : 0, g_mgmt_seen,
 		    g_mgmt_events, g_join_state,
 		    g_wr_rx_ind, g_wr_rx_in_ord, g_wr_rx_frames, g_wr_rx_eapol,
-		    g_wr_rx_bad, g_wr_rx_undone);
+		    g_wr_rx_bad, g_wr_rx_undone,
+		    g_htt_ring_done_cnt, g_htt_ring_seen);
 		/* join=<n>: a compact status line while a join is running. */
 		if (g_join && g_join_state != HIF_JOIN_IDLE) {
 			HIF_LOG("JOIN: state=%d tries=%u bss=%u mgmt "
@@ -4844,7 +4922,8 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_scan_fix = (int)v;
 	}
 	v = 0;
-	if (PE_parse_boot_argn("dpfix", &v, sizeof(v)) && v <= 3) {
+	/* bit2 = attention-driven HTT ring drain (chain-571 A/B). */
+	if (PE_parse_boot_argn("dpfix", &v, sizeof(v)) && v <= 7) {
 		g_dp_fix = (int)v;
 	}
 	v = 0;
