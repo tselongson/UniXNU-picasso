@@ -6,3 +6,8 @@
 policy/verified-root-picasso/** text eol=lf
 policy/verified-root-picasso/**/*.bin binary
 policy/verified-root-picasso/*.bin binary
+
+# The Wi-Fi package ships integration patches that are applied with `git apply`.
+# A CRLF conversion on checkout silently corrupts their hunks, so pin LF
+# regardless of the local core.autocrlf setting.
+wifi-wcn3990/integration/*.patch text eol=lf

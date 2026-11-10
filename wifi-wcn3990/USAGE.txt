@@ -1,0 +1,80 @@
+WCN3990 Wi-Fi package — integration against silenzio UniXNU-picasso 00ea4a0
+===========================================================================
+
+This package is NOT an installer, a boot image, a firmware blob or an IPSW.
+It is source plus four small host-tree integration points.
+
+Baseline
+--------
+  upstream branch : stage12/picasso-ios16
+  upstream commit : 00ea4a0 (2026-11-06)
+  kernel ABI      : DEVELOPMENT_ARM64_BCM2837 / XNU 10063 (iOS 17)
+  device          : picasso / SM7250 / WCN3990
+
+Baseline history
+----------------
+The package first targeted e790d5d (stage12/picasso-cpufreq-big) because the
+next three commits added a picasso_ipc_census_rows() call without installing its
+patch, which broke the kernel link. Upstream's stage12/picasso-ios16 (00ea4a0,
+2026-11-06) supersedes that branch and builds cleanly, so the four integration
+patches are now generated against it.
+
+The stock tree already builds an inert WLAN probe into
+build/native-wlan/libNativeWlan.a (CONFIG_XNU_NATIVE_WLAN=y) and force-loads it.
+This package adds its sources to that same archive, so there is only ONE
+archive and ONE -force_load. Do not link a second library.
+
+Integration (apply the four patches in integration/, in order)
+-------------------------------------------------------------
+  01-board-wifi-arg.patch        board.toml: add "wifi=1" (the only new boot arg)
+  02-build-native-wlan.patch     scripts/build-arm-driver.py: compile source/
+  03-bsd-init-hook.patch         scripts/build-xnu-4k-baseline.sh: one init hook
+  04-native-ufs-raw-read.patch   drivers/NativeUfs/NativeUfs.cpp: read-only
+                                 partition accessor used by the GPT/modem loader
+
+Nothing else in the host tree changes. No defconfig edit is needed: the existing
+CONFIG_XNU_NATIVE_WLAN gate drives the build. No GPU firmware, no UFS transport
+changes, no display or cpufreq arguments, no CI workflow changes.
+
+Runtime
+-------
+  boot argument : wifi=1   (omit or wifi=0 -> picasso_modem_init returns before
+                            attaching en0 or starting the modem/GLINK threads;
+                            the tree behaves exactly like stock upstream)
+  entry point   : picasso_wlan_deferred_start(), called once from bsd_init
+                  after printf(copyright); it spawns a kernel thread that waits
+                  5 s for the network stack, attaches en0, then boots the modem.
+  link          : -force_load build/native-wlan/libNativeWlan.a (already present)
+  HIF           : wcn3990_hif_init() runs once after WLFW mission mode;
+                  the modem thread calls wcn3990_hif_poll() every ~1 ms.
+                  Console prefix "WCN3990-HIF:" shows CE register values,
+                  HTC READY / CONNECT_SERVICE_RESP, WMI READY and START_SCAN.
+                  wcn3990-hif=0 leaves the CE registers untouched.
+
+Alternative integration
+-----------------------
+If the host tree cannot run scripts/build-arm-driver.py, compile each file in
+source/ with the recorded IOPlatformExpert.cpo.json flags, add the resulting
+objects to the kernel filelist in place of the stock WLAN probe objects, and
+keep the single init hook. Do not use both representations at once.
+
+Platform dependencies supplied by the host tree
+-----------------------------------------------
+  native_ufs_raw_read / native_ufs_raw_max_blocks / native_ufs_raw_diag
+  PE_parse_boot_argn, IOSleep, kernel_thread_start, thread_terminate
+  ml_io_map / IOMemoryMap, smc_call, IOLock, mach_absolute_time
+  the existing IONetworkInterface and kern_control KPIs
+
+Firmware
+--------
+No firmware is shipped. The driver reads the modem/WLAN image from the device's
+own `modem` GPT partition (LUN 0) and the BDF from that image's FAT. Keep the
+stock phone firmware; do not replace partitions.
+
+Validation
+----------
+See manifest.json -> validation. Hardware evidence so far: PAS all ret=0, WLFW
+BDF download complete, FW_READY_IND (0x21), MISSION MODE, en0 attached,
+wifid ioctls answered. The CE/HTC/WMI-TLV host stack is implemented but its
+real-device scan results are still being validated; association is not
+implemented.

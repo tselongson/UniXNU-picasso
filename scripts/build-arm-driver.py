@@ -343,10 +343,26 @@ def build_wlan(record: dict):
         obj = out / (Path(name).stem + '.o')
         compile_file(driver / name, obj, record, ['-I', str(driver)], is_c=name.endswith('.c'))
         objects.append(obj)
+    # The WCN3990 stack is a self-contained package at the checkout root, not
+    # part of drivers/NativeWlan. --prepare copies this script into
+    # out/picasso/tree, so walk upwards from __file__ to find it (same approach
+    # as the package's integration/02 patch on the old baseline).
+    package = None
+    for parent in (ROOT, *Path(__file__).resolve().parents):
+        candidate = parent / 'wifi-wcn3990' / 'source'
+        if candidate.is_dir():
+            package = candidate
+            break
+    if package is not None:
+        for src in sorted(package.glob('*.cpp')) + sorted(package.glob('*.c')):
+            obj = out / ('wcn_' + src.stem + '.o')
+            compile_file(src, obj, record, ['-I', str(package)],
+                         is_c=src.suffix == '.c')
+            objects.append(obj)
     archive = out / 'libNativeWlan.a'
     archive.unlink(missing_ok=True)
     subprocess.run(['xcrun', 'ar', 'rcs', str(archive), *map(str, objects)], check=True)
-    print('NativeWlan: bounded SM7250 probe archive built')
+    print(f'NativeWlan: bounded SM7250 probe + WCN3990 archive built ({len(objects)} objects)')
 
 
 def main():

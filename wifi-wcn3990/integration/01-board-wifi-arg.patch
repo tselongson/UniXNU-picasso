@@ -1,0 +1,13 @@
+diff --git a/board.toml b/board.toml
+index 54a16ca..f57ff51 100644
+--- a/board.toml
++++ b/board.toml
+@@ -250,6 +250,8 @@ kernel_args = [
+   # Start the authenticated UFS root and required power-management nub.
+   "native-ufs-root=1",
+   "sheng-pmgr=2",
++  # WCN3990 package (wifi-wcn3990/): set wifi=0 for a stock boot.
++  "wifi=1",
+   # NativeUfs defaults already wait 5 s for USB and use timebase/yield waits.
+   # Omit these two redundant overrides to stay within the boot-argument budget.
+   # Verbose UFS tracing uses its disabled default.
