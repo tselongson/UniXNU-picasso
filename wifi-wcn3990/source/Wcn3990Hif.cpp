@@ -1172,7 +1172,6 @@ hif_service_htt_ring(void)
 	fw_idx = g_dma->htt_alloc_idx & (HTT_RX_RING_ENTRIES - 1);
 	while (g_htt_ring_rd != fw_idx && budget-- > 0) {
 		uint8_t *b = g_dma->htt_buf[g_htt_ring_rd];
-		uint64_t pa = g_dma->htt_ring[g_htt_ring_rd];
 		uint32_t attention, start;
 
 		memcpy(&attention, b + 4, 4);
@@ -1190,15 +1189,17 @@ hif_service_htt_ring(void)
 		 * hif_wr_msdu() (wlan-wip wr_msdu) validates the attention word,
 		 * decapsulates and hands EAPOL to the four-way handshake;
 		 * hif_wr_post() returns the buffer to the ring. */
-		if (g_dp_fix & 0x1) {
-			if (attention & (1u << 31)) {
-				uint32_t len = start & 0x3fffu;
+		if ((g_dp_fix & 0x1) && (attention & (1u << 31))) {
+			uint32_t len = start & 0x3fffu;
 
-				if (len >= 14u &&
-				    len <= HTT_RX_BUF_SIZE - 360u)
-					hif_wr_msdu(b, len);
-			}
-			hif_wr_post(pa);
+			if (len >= 14u &&
+			    len <= HTT_RX_BUF_SIZE - 360u)
+				hif_wr_msdu(b, len);
+			/* Buffers are static and their addresses never move: just
+			 * clear the attention word so the target can reuse the slot.
+			 * Do NOT call hif_wr_post() here -- it rewrites the shared
+			 * fw_idx index page and would make this loop spin forever. */
+			*(volatile uint32_t *)(uintptr_t)(b + 4) = 0;
 		}
 		g_htt_ring_rd = (g_htt_ring_rd + 1) &
 		    (HTT_RX_RING_ENTRIES - 1);
