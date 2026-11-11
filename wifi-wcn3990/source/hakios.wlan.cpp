@@ -44,14 +44,79 @@
  */
 
 #include <IOKit/IOLib.h>
+#include <IOKit/IOKitKeys.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOService.h>
+#include <IOKit/IOUserClient.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSMetaClass.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSSymbol.h>
+#include <pexpert/pexpert.h>
 
 extern "C" void HakiosWLANStart(const char * interface, const uint8_t * address);
+
+/* configd's InterfaceNamer cannot finish until it has opened an
+ * IONetworkStack user client (S_connect in ifnamer.c).  The stock client
+ * demands an entitlement this port does not carry -- kernel.macho has
+ * "IONetworkStack::initWithTask - No Entitlement" -- so the open never
+ * completes and SCNetworkInterfaceCopyAllWithPreferences waits forever in
+ * Preferences (Settings > Wi-Fi freezes, while the rest of the system and
+ * the driver heartbeat stay alive).  The real family is prelinked here, so
+ * rather than defining a colliding IONetworkStack class we keep its service
+ * and give it a minimal user client of our own.  Both reference ports that
+ * reach a working stack do exactly this.  netstack=1 enables it. */
+class HakiosNetworkStackUserClient : public IOUserClient
+{
+	OSDeclareDefaultStructors(HakiosNetworkStackUserClient);
+public:
+	/* Deliberately no initWithTask override: IOUserClient's own does not
+	 * demand an entitlement.  Only the stock IONetworkStackUserClient adds
+	 * that check, which is the open this replacement has to survive. */
+	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
+};
+
+OSDefineMetaClassAndStructors(HakiosNetworkStackUserClient, IOUserClient);
+
+IOReturn
+HakiosNetworkStackUserClient::clientClose(void)
+{
+	if (!isInactive()) {
+		terminate();
+	}
+	return kIOReturnSuccess;
+}
+
+IOReturn
+HakiosNetworkStackUserClient::setProperties(OSObject * properties)
+{
+	/* InterfaceNamer registers BSD names through this channel.  The real
+	 * network stack still owns the registry; accepting the request here is
+	 * what unblocks the naming handshake (CoachzWifiNet.cpp:505-513). */
+	return kIOReturnSuccess;
+}
+
+static void
+bind_network_stack_user_client(void)
+{
+	unsigned enabled = 0;
+
+	PE_parse_boot_argn("netstack", &enabled, sizeof(enabled));
+	if (!enabled) {
+		return;
+	}
+	OSDictionary * match = IOService::serviceMatching("IONetworkStack");
+	IOService * stack = match != NULL ? IOService::copyMatchingService(match) : NULL;
+	OSSafeReleaseNULL(match);
+	if (stack == NULL) {
+		IOLog("HakiosWLAN: no IONetworkStack service to bind\n");
+		return;
+	}
+	stack->setProperty(kIOUserClientClassKey, "HakiosNetworkStackUserClient");
+	IOLog("HakiosWLAN: IONetworkStack user client bound (netstack=1)\n");
+	stack->release();
+}
 
 class IO80211Controller : public IOService
 {
@@ -165,6 +230,7 @@ HakiosWLANStart(const char * interface, const uint8_t * address)
 	OSNumber * number;
 
 	say_class_presence();
+	bind_network_stack_user_client();
 	if (platform == NULL || controller == NULL || !controller->init()) {
 		OSSafeReleaseNULL(controller);
 		OSSafeReleaseNULL(node);
