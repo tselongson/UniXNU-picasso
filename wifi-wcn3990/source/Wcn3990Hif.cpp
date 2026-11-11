@@ -54,6 +54,11 @@ extern "C" void flush_dcache64(addr64_t pa, unsigned int len, boolean_t phys);  
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 /* Darwin's network stack receives fully formed Ethernet frames. */
 extern "C" void hakios_net_input(const uint8_t *frame, size_t length);
+/* hakios.net.c: the only KEV_DL_LINK_ON switch.  configd builds the IPv4
+ * service (and runs DHCP) only after this event. */
+extern "C" void hakios_net_link_state(bool up);
+/* hakios.apple80211.c: HAKIOS_STA_LINK = 3; status 1 joined, 0 left. */
+extern "C" void hakios_apple80211_event(int event, int status);
 
 #define HIF_LOG(fmt, ...)   printf("WCN3990-HIF: " fmt "\n", ##__VA_ARGS__)
 
@@ -3159,7 +3164,13 @@ hif_wpa_handle_eapol(const uint8_t *e, uint32_t n)
 		}
 		g_wpa_st.keyed = 1;
 		g_link_up = 1;
-		HIF_LOG("WPA: msg3 seen, msg4 sent, keys installed, peer authorized");
+		/* The radio is on air.  configd waits for KEV_DL_LINK_ON before it
+		 * builds the IPv4 service and runs DHCP; autojoin ran with 22 MSDUs
+		 * delivered into the stack yet no SIOCSIFADDR ever appeared.
+		 * HAKIOS_STA_LINK (3, 1) keeps wifid's status in sync. */
+		hakios_net_link_state(true);
+		hakios_apple80211_event(3, 1);
+		HIF_LOG("WPA: msg3 seen, msg4 sent, keys installed, peer authorized, link up");
 		return;
 	}
 	if (!pairwise && ack) {
@@ -3594,6 +3605,13 @@ static void
 hif_join_reset(const char *why)
 {
 	HIF_LOG("JOIN: stopped in state %d (%s)", g_join_state, why);
+	if (g_link_up) {
+		/* The session is gone: withdraw the link so configd tears the
+		 * IPv4 service down instead of DHCP-ing into a dead radio. */
+		g_link_up = 0;
+		hakios_net_link_state(false);
+		hakios_apple80211_event(3, 0);
+	}
 	memset(&g_join_ap, 0, sizeof(g_join_ap));
 	g_join_state = HIF_JOIN_IDLE;
 	g_join_tries = 0;
@@ -4216,8 +4234,14 @@ hif_join_resp(const uint8_t *f, uint32_t n)
 			HIF_LOG("JOIN: secure AP, %s", g_wpa ?
 			    "waiting for EAPOL message 1" :
 			    "key handshake not in this phase, stopping after vdev up");
-		else
+		else {
 			hif_join_peer_param(3, 1);  /* PEER_AUTHORIZE */
+			/* An open network is on the air with no key handshake. */
+			g_link_up = 1;
+			hakios_net_link_state(true);
+			hakios_apple80211_event(3, 1);
+			HIF_LOG("JOIN: open AP authorized, link up");
+		}
 		/* authz=1: open the secured port before the AP's first EAPOL.
 		 * Gated so the reference ordering is still the control. */
 		if (g_authz && g_join_ap.secure) {
