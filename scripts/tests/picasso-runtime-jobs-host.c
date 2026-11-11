@@ -29,7 +29,7 @@ static unsigned indexof(const char *p){
     if(!strcmp(p,"/private/var/db/com.apple.xpc.launchd/disabled.plist"))return 3;
     assert(!strcmp(p,"/private/var/db/com.apple.xpc.launchd/.picasso-disabled.tmp"));return 4;
 }
-static int vnode_lookup(const char *p,int flags,vnode_t *v,vfs_context_t c){assert(c==(void *)1 && flags==VNODE_LOOKUP_NOFOLLOW);if(fail())return EIO;unsigned n=indexof(p);if(!nodes[n].exists)return ENOENT;*v=&nodes[n];++refs;return 0;}
+static int vnode_lookup(const char *p,int flags,vnode_t *v,vfs_context_t c){assert(c==(void *)1 && (flags==VNODE_LOOKUP_NOFOLLOW || flags==0));if(fail())return EIO;unsigned n=indexof(p);if(!nodes[n].exists)return ENOENT;*v=&nodes[n];++refs;return 0;}
 static void vnode_put(vnode_t v){assert(v && refs);--refs;}
 static int vnode_vtype(vnode_t v){return v->type;}
 static int vnode_getattr(vnode_t v,struct vnode_attr *a,vfs_context_t c){assert(c==(void *)1);if(fail())return EIO;*a=v->attr;return 0;}
