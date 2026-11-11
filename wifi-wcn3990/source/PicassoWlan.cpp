@@ -4674,7 +4674,13 @@ rmtfs_init_buf(void)
 		for (want = RMTFS_BUF_SIZE; want >= 0x80000; want >>= 1) {
 			kern_return_t kr;
 			va = 0;
-			kr = kmem_alloc_contig(kernel_map, &va, (vm_size_t)want, PAGE_MASK, 0, 0,
+			/* The modem's Q6 rmtfs client puts 32-bit physical addresses in
+			 * ALLOC_BUFF iovecs.  Pages at or above 4 GiB make every iovec
+			 * fail ("rmtfs iovec invalid phys_offset"), MPSS never comes up and
+			 * the APSS watchdog resets at the HIF start.  max_pnum is the 5th
+			 * argument (vm_resident.c:7146); cap it at 4 GiB / 4 KiB. */
+			kr = kmem_alloc_contig(kernel_map, &va, (vm_size_t)want, PAGE_MASK,
+			    (ppnum_t)0x100000, 0,
 			    (kma_flags_t)(KMA_DATA | KMA_ZERO | KMA_PERMANENT), VM_KERN_MEMORY_IOKIT);
 			if (kr == KERN_SUCCESS && va != 0) {
 				break;
