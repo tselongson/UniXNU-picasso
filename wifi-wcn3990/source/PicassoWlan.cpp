@@ -3975,7 +3975,11 @@ static struct hakios_net_link picasso_net_link = {
 	.unit = 0,
 	.address = { 0x00, 0x0a, 0xf5, 0x39, 0x90, 0x01 },
 	.wireless = true,
-	.up = true,
+	/* Attach with the link DOWN: the radio has joined nothing yet.  The
+	 * key-install path raises it via hakios_net_link_state(true), whose
+	 * KEV_DL_LINK_ON is what configd waits for before running DHCP.
+	 * Presetting true made that notification a no-op (up == n->up). */
+	.up = false,
 	.transmit = picasso_wlan_transmit,
 	.poll = picasso_wlan_poll,
 };
