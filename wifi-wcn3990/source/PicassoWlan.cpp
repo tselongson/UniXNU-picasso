@@ -57,6 +57,16 @@ picasso_sleep_ms(uint32_t ms)
 	machine_delay_until(abstime, mach_absolute_time() + abstime);
 }
 
+/* Captured before the macro override below: IOKit IOSleep() blocks
+ * (thread_block) and is proven on this board by the 150 s deferred
+ * bring-up in HakiosCompat.cpp.  machine_delay_until() spins and must
+ * never sit in an unbounded polling loop. */
+static inline void
+picasso_yield_ms(uint32_t ms)
+{
+	IOSleep(ms);
+}
+
 #undef IOSleep
 #define IOSleep(ms) picasso_sleep_ms(ms)
 #undef IODelay
@@ -2613,7 +2623,7 @@ modem_monitor(void *arg __unused, wait_result_t wr __unused)
 	uint32_t last = 0, same = 0;
 
 	for (;;) {
-		IOSleep(500);
+		picasso_yield_ms(500);
 		/* Lock-free witness first: it cannot block. */
 		stall_paint(g_beat, g_action);
 		if ((g_beat & 0x1f) == 0) {
@@ -6002,8 +6012,11 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 			/* 0 = serve the modem for as long as the system runs: EFS,
 			 * the pd-mapper and WLFW all need this thread alive. */
 			unsigned glink_ms = 0;
+			/* wlan_spin=1 restores the original busy-wait for A/B. */
+			unsigned wlan_spin = 0;
 
 			(void)PE_parse_boot_argn("modem_glink_ms", &glink_ms, sizeof(glink_ms));
+			(void)PE_parse_boot_argn("wlan_spin", &wlan_spin, sizeof(wlan_spin));
 			ipcc = (volatile uint8_t *)ml_io_map(IPCC_BASE, 0x1000);
 			LOG("ipcc mapped at %p (pa 0x%llx)", ipcc, (uint64_t)IPCC_BASE);
 			if (glink_start(part)) {
@@ -6030,7 +6043,13 @@ modem_thread(void *arg __unused, wait_result_t wr __unused)
 					glink_poll(part, ms);
 					picasso_wlan_ce_poll();
 					picasso_usb_console_drive_poll();
-					IOSleep(1);
+					/* The old 1 ms machine_delay_until() is a pure spin
+					 * and pinned two big cores at 100%.  A 4 ms blocking
+					 * wait is guaranteed past ml_delay_should_spin(), and
+					 * cuts poll traffic 4x.  CE ACKs stay well inside the
+					 * few-ms window CoachZ services with wc_poll(). */
+					if (wlan_spin) IOSleep(1);
+					else picasso_yield_ms(4);
 				}
 				g_watch = 0;
 				glink_summary();
