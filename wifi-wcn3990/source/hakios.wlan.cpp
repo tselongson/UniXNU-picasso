@@ -70,7 +70,7 @@ say_class_presence(void)
 	static const char * const names[] = {
 		"IOService", "IONetworkController", "IOEthernetController",
 		"IONetworkInterface", "IO80211Interface", "IOEthernetInterface",
-		"IO80211Controller",
+		"IO80211Controller", "IONetworkStack", "IONetworkStackUserClient",
 	};
 	unsigned i;
 

@@ -78,6 +78,15 @@ net_if_unit(unsigned unit)
 #define NAMES_MAX       3000
 static uint32_t net_trace, net_names;
 
+/* boot-arg netfix (default: both fixes on).  0 restores the old behaviour
+ * for a single-variable A/B, 1 = KEV wire layout, 2 = ifnet flags. */
+static uint32_t net_fix = 3;
+
+/* struct kern_event_msg has a trailing event_data[1] placeholder.  Derive
+ * the wire header from the struct itself (the same value as XNU's
+ * KEV_MSG_HEADER_SIZE) so no header macro / offsetof is required here. */
+#define NET_KEV_WIRE_HEADER ((size_t)__builtin_offsetof(struct kern_event_msg, event_data[0]))
+
 static void
 trace_frame(const char *way, const uint8_t *frame, size_t length, size_t whole)
 {
@@ -223,13 +232,18 @@ net_ioctl(ifnet_t ifp, u_long command, void *data)
 	user_addr_t list;
 	errno_t error = 0;
 
-	if (n->link->wireless && net_ioctls_said < 80) {
+	if (n->link->wireless) {
 		char who[32] = "?";
+		static unsigned configd_said;
 
-		/* (while Darwin's Wi-Fi side is being got to talk to this: who asks the interface what) */
+		/* configd used to be filtered out altogether, which hid whether the
+		 * network configuration side ever reached en0.  Its own bounded
+		 * counter keeps that trail visible without flooding the console. */
 		proc_selfname(who, sizeof(who));
-		if (strcmp(who, "configd") != 0) {
-			net_ioctls_said++;
+		if (strcmp(who, "configd") == 0) {
+			if (configd_said++ < 40)
+				printf("net: en0 is asked %#lx by configd\n", command);
+		} else if (net_ioctls_said++ < 80) {
 			printf("net: en0 is asked %#lx by %s\n", command, who);
 		}
 	}
@@ -241,8 +255,12 @@ net_ioctl(ifnet_t ifp, u_long command, void *data)
 		ifnet_set_flags(ifp, IFF_UP, IFF_UP);
 		break;
 	case SIOCSIFFLAGS:
-		/* running whenever it is up: the link is there or it is not, nothing is switched on */
-		ifnet_set_flags(ifp, (ifnet_flags(ifp) & IFF_UP) ? IFF_RUNNING : 0, IFF_RUNNING);
+		/* With netfix bit1 the link owns IFF_RUNNING (see
+		 * hakios_net_link_state_unit); without it keep the old rule.
+		 * Administrative IFF_UP is the caller's business either way. */
+		ifnet_set_flags(ifp,
+		    ((net_fix & 2) ? n->up : (ifnet_flags(ifp) & IFF_UP) != 0) ? IFF_RUNNING : 0,
+		    IFF_RUNNING);
 		break;
 	case SIOCGIFMEDIA32:
 	case SIOCGIFMEDIA64:
@@ -276,15 +294,24 @@ net_ioctl(ifnet_t ifp, u_long command, void *data)
 	return error;
 }
 
-/* Tell whoever listens for kernel events (configd does) that the link is up, or down. */
+/* Tell whoever listens for kernel events (configd does) that the link is up, or down.
+ *
+ * (header + 1) is NOT the wire payload: struct kern_event_msg carries a
+ * trailing event_data[1] placeholder, so sizeof() is one word longer than
+ * KEV_MSG_HEADER_SIZE.  The old layout shifted if_family/if_unit/if_name by
+ * four bytes and inflated total_size, so a KEV_DL subscriber could never
+ * match the event to en0.  PeachNet.c (unixnu-wcn7860, a port with working
+ * DHCP) uses exactly KEV_MSG_HEADER_SIZE + sizeof(struct net_event_data).
+ * netfix bit0 keeps the old layout for the A/B control. */
 static void
 net_link_event(ifnet_t ifp, uint32_t code)
 {
 	_Alignas(struct kern_event_msg) char message[sizeof(struct kern_event_msg) + sizeof(struct net_event_data)] = { 0 };
 	struct kern_event_msg *header = (struct kern_event_msg *)message;
-	struct net_event_data *about = (struct net_event_data *)(header + 1);
+	size_t hdr = (net_fix & 1) ? NET_KEV_WIRE_HEADER : sizeof(struct kern_event_msg);
+	struct net_event_data *about = (struct net_event_data *)(message + hdr);
 
-	header->total_size = sizeof(message);
+	header->total_size = (uint32_t)(hdr + sizeof(*about));
 	header->vendor_code = KEV_VENDOR_APPLE;
 	header->kev_class = KEV_NETWORK_CLASS;
 	header->kev_subclass = KEV_DL_SUBCLASS;
@@ -292,6 +319,10 @@ net_link_event(ifnet_t ifp, uint32_t code)
 	about->if_family = ifnet_family(ifp);
 	about->if_unit = ifnet_unit(ifp);
 	strlcpy(about->if_name, ifnet_name(ifp), IFNAMSIZ);
+	printf("net: en%u KEV_DL_LINK_%s size=%u hdr=%u family=%u unit=%u name=%s fix=%u\n",
+	    ifnet_unit(ifp), code == KEV_DL_LINK_ON ? "ON" : "OFF",
+	    (unsigned)header->total_size, (unsigned)hdr, about->if_family,
+	    about->if_unit, about->if_name, net_fix);
 	ifnet_event(ifp, header);
 }
 
@@ -305,6 +336,12 @@ hakios_net_link_state_unit(unsigned unit, bool up)
 	}
 	n->up = up;
 	printf("net: en%u's link (%s) is %s\n", n->unit, n->link->name, up ? "up" : "down");
+	if (net_fix & 2) {
+		/* configd will not bring an IPv4 service up on an interface the
+		 * stack does not consider running.  Both PeachNet.c:319 and
+		 * CoachzWifiNet.cpp:135 drive IFF_RUNNING with the link. */
+		ifnet_set_flags(n->ifp, up ? IFF_RUNNING : 0, IFF_RUNNING);
+	}
 	net_link_event(n->ifp, up ? KEV_DL_LINK_ON : KEV_DL_LINK_OFF);
 }
 
@@ -416,6 +453,12 @@ hakios_net_attach(const struct hakios_net_link *link)
 	}
 	ifnet_set_lladdr(ifp, address, ETHER_ADDR_LEN);
 	bpfattach(ifp, DLT_EN10MB, ETHER_HDR_LEN);
+	if (net_fix & 2) {
+		/* Administrative up at attach, running only once the radio has
+		 * actually joined (PeachNet.c:289).  The old code cleared both
+		 * with ifnet_set_flags(..., 0xffff) and never set either again. */
+		ifnet_set_flags(ifp, IFF_UP, IFF_UP | IFF_RUNNING);
+	}
 	n->ifp = ifp;
 	if (n->up) {
 		net_link_event(ifp, KEV_DL_LINK_ON);
@@ -439,5 +482,6 @@ hakios_net_init(void)
 {
 	PE_parse_boot_argn("net_trace", &net_trace, sizeof(net_trace));
 	PE_parse_boot_argn("net_names", &net_names, sizeof(net_names));
+	PE_parse_boot_argn("netfix", &net_fix, sizeof(net_fix));
 	hakios_virtio_net_init();
 }
