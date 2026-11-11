@@ -76,7 +76,10 @@ def main():
         literal = re.search('picasso_jobs_' + name + r'_sha\[32\] = \{(.*?)\}', constants)[1]
         assert bytes(int(n, 16) for n in literal.split(',')) == hashlib.sha256(data).digest()
     policy = constants + '\n'.join(module.extract(source, name) for name in
-        ('static int\npicasso_jobs_match(', 'static int\npicasso_jobs_metadata(', 'static int\npicasso_jobs_sync(', 'static int\npicasso_jobs_enable('))
+        ('static int\npicasso_jobs_match(', 'static int\npicasso_jobs_metadata(',
+         'static int\npicasso_jobs_sync(', 'static int\npicasso_jobs_policy_ok(',
+         'static int\npicasso_jobs_released(', 'static int\npicasso_jobs_release_key(',
+         'static int\npicasso_jobs_enable('))
     (out / 'runtime-jobs.inc').write_text(policy, newline='\n')
     (out / 'jobs-data.inc').write_text('\n'.join('static const unsigned char jobs_' + name + '[] = {' + ','.join(str(n) for n in data) + '};' for name, data in [('before', before), ('after', after)]), newline='\n')
     assert data_prepare.count('picasso_jobs_enable(p, scratch)') == 1

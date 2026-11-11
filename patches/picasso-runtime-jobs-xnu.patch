@@ -1,6 +1,6 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -9535,6 +9535,160 @@
+@@ -9535,6 +9535,277 @@
      printf("PICASSO_NETWORK config stage=%d error=%d stack_s=5 quiet_s=5\n", stage, error);
  }
  
@@ -61,6 +61,79 @@
 +}
 +
 +static int
++picasso_jobs_policy_ok(const uint8_t *bytes, size_t size)
++{
++    static const char *const marks[] = {"<?xml", "<plist", "<dict>",
++        "</dict>", "</plist>"};
++    size_t m, i;
++
++    if (size < 64 || size > 8192) return 0;
++    for (m = 0; m < 5; m++) {
++        size_t n = strlen(marks[m]);
++        int found = 0;
++        for (i = 0; i + n <= size; ++i) {
++            if (!memcmp(bytes + i, marks[m], n)) { found = 1; break; }
++        }
++        if (!found) return 0;
++    }
++    return 1;
++}
++
++/* No approved job key may remain after the rewrite. */
++static int
++picasso_jobs_released(const uint8_t *bytes, size_t size)
++{
++    static const char *const keys[] = {
++        "<key>com.apple.bluetoothd</key>",
++        "<key>com.apple.wifid</key>",
++    };
++    size_t k, i;
++
++    for (k = 0; k < 2; ++k) {
++        size_t n = strlen(keys[k]);
++        for (i = 0; i + n <= size; ++i)
++            if (!memcmp(bytes + i, keys[k], n)) return 0;
++    }
++    return 1;
++}
++
++/* Remove ONE approved job entry in place.  Every other byte is preserved.
++ * Returns 0 when the key is absent (already enabled), EINVAL for a value
++ * that is neither <true/> nor <false/> (unknown contents: do not touch). */
++static int
++picasso_jobs_release_key(uint8_t *bytes, uint64_t *size, const char *needle,
++    size_t needle_len, int *removed)
++{
++    static const char true_tag[] = "<true/>";
++    static const char false_tag[] = "<false/>";
++    uint64_t at, start, after, end;
++
++    for (at = 0; at + needle_len <= *size &&
++        memcmp(bytes + at, needle, needle_len); ++at) {}
++    if (at + needle_len > *size) return 0;
++
++    start = at;
++    while (start > 0 && (bytes[start - 1] == '\t' ||
++        bytes[start - 1] == ' ')) start--;
++    after = at + needle_len;
++    while (after < *size && (bytes[after] == ' ' || bytes[after] == '\t' ||
++        bytes[after] == '\r' || bytes[after] == '\n')) after++;
++    if (after + sizeof(true_tag) - 1 > *size) return EINVAL;
++    if (!memcmp(bytes + after, false_tag, sizeof(false_tag) - 1)) {
++        return 0;   /* launchd already enabled this job */
++    }
++    if (memcmp(bytes + after, true_tag, sizeof(true_tag) - 1)) return EINVAL;
++
++    end = after + sizeof(true_tag) - 1;
++    while (end < *size && (bytes[end] == ' ' || bytes[end] == '\t')) end++;
++    if (end < *size && bytes[end] == '\r') end++;
++    if (end < *size && bytes[end] == '\n') end++;
++    memmove(bytes + start, bytes + end, *size - end);
++    *size -= end - start;
++    *removed = 1;
++    return 0;
++}
++static int
 +picasso_jobs_enable(proc_t p, user_addr_t scratch)
 +{
 +    static const char file[] = "/private/var/db/com.apple.xpc.launchd/disabled.plist";
@@ -82,7 +155,17 @@
 +    int diag_vt[4] = {-1, -1, -1, -1};
 +    int diag_e[2] = {-1, -1};
 +    int diag_rd = 0, diag_before = -1, diag_after = -1;
++    int diag_form = 0, diag_removed = 0, strict = 0;
++    static const char *const keys[] = {
++        "<key>com.apple.bluetoothd</key>",
++        "<key>com.apple.wifid</key>",
++    };
++    static const size_t key_lens[] = {
++        sizeof("<key>com.apple.bluetoothd</key>") - 1,
++        sizeof("<key>com.apple.wifid</key>") - 1,
++    };
 +    uint8_t diag_head[8] = {0, 0, 0, 0, 0, 0, 0, 0};
++    char diag_text[97] = {0};
 +    for (unsigned i = 0; !error && i < 3; ++i) {
 +        diag_m[i] = picasso_jobs_metadata(dirs[i], VDIR, ctx, 1, &diag_vt[i]);
 +        error = diag_m[i];
@@ -98,16 +181,42 @@
 +    diag_after = picasso_jobs_match(bytes, (size_t)size, picasso_jobs_after_sha);
 +    if (diag_after) goto done;   /* already migrated: success, no change */
 +    diag_before = picasso_jobs_match(bytes, (size_t)size, picasso_jobs_before_sha);
-+    if (!diag_before) { error = EINVAL; goto done; }
-+    for (unsigned i = 0; i < 2; ++i) {
-+        size_t len = entry_lens[i], at;
-+        for (at = 0; at + len <= size && memcmp(bytes + at, entries[i], len); ++at) {}
-+        diag_e[i] = (int)at;
-+        if (at + len > size) { error = EINVAL; goto done; }
-+        memmove(bytes + at, bytes + at + len, (size_t)size - at - len);
-+        size -= len;
++    for (unsigned i = 0; i < 96 && i < size; ++i) {
++        uint8_t ch = bytes[i];
++        diag_text[i] = (ch >= 32 && ch < 127) ? (char)ch : '.';
 +    }
-+    if (!picasso_jobs_match(bytes, (size_t)size, picasso_jobs_after_sha)) { error = EINVAL; goto done; }
++    diag_text[(size < 96) ? (size_t)size : 96] = 0;
++    if (diag_before) {
++        /* Pristine seed: byte-exact before -> after, verified by SHA. */
++        diag_form = 1;
++        strict = 1;
++        for (unsigned i = 0; i < 2; ++i) {
++            size_t len = entry_lens[i], at;
++            for (at = 0; at + len <= size && memcmp(bytes + at, entries[i], len); ++at) {}
++            diag_e[i] = (int)at;
++            if (at + len > size) { error = EINVAL; goto done; }
++            memmove(bytes + at, bytes + at + len, (size_t)size - at - len);
++            size -= len;
++        }
++        if (!picasso_jobs_match(bytes, (size_t)size, picasso_jobs_after_sha)) { error = EINVAL; goto done; }
++    } else {
++        /* Persistent Data: launchd rewrote the plist in its own XML form
++         * (CoachZ coachz-prelink-watchdog-replace.patch).  Accept a
++         * well-formed XML plist and remove ONLY the two approved keys;
++         * every other byte stays exactly where it was. */
++        diag_form = 2;
++        if (!picasso_jobs_policy_ok(bytes, (size_t)size)) { error = EINVAL; goto done; }
++        for (unsigned i = 0; i < 2; ++i) {
++            error = picasso_jobs_release_key(bytes, &size,
++                keys[i], key_lens[i], &diag_removed);
++            if (error) goto done;
++        }
++        if (!diag_removed) goto done;   /* both keys absent: already enabled */
++        if (!picasso_jobs_policy_ok(bytes, (size_t)size) ||
++            !picasso_jobs_released(bytes, (size_t)size)) {
++            error = EINVAL; goto done;
++        }
++    }
 +    /* A power loss may leave our exclusive temporary file. Never follow links. */
 +    error = picasso_jobs_metadata(temp, VREG, ctx, 0, NULL);
 +    if (!error) {
@@ -131,7 +240,10 @@
 +    if (error) goto done;
 +    uint64_t verify_size = 0;
 +    error = picasso_ifnamer_read(temp, bytes, 8192, &verify_size, ctx);
-+    if (!error && (verify_size != size || !picasso_jobs_match(bytes, (size_t)verify_size, picasso_jobs_after_sha))) error = EIO;
++    if (!error && (verify_size != size ||
++        (strict ? !picasso_jobs_match(bytes, (size_t)verify_size, picasso_jobs_after_sha)
++                : (!picasso_jobs_policy_ok(bytes, (size_t)verify_size) ||
++                   !picasso_jobs_released(bytes, (size_t)verify_size))))) error = EIO;
 +    if (error) goto done;
 +    struct rename_args args = {.from = scratch, .to = scratch + 0x200};
 +    error = copyout(temp, args.from, sizeof(temp));
@@ -140,7 +252,10 @@
 +    if (!error) { changed = 1; error = picasso_jobs_sync(dirs[2], ctx); }
 +    if (!error) {
 +        error = picasso_ifnamer_read(file, bytes, 8192, &verify_size, ctx);
-+        if (!error && (verify_size != size || !picasso_jobs_match(bytes, (size_t)verify_size, picasso_jobs_after_sha))) error = EIO;
++        if (!error && (verify_size != size ||
++        (strict ? !picasso_jobs_match(bytes, (size_t)verify_size, picasso_jobs_after_sha)
++                : (!picasso_jobs_policy_ok(bytes, (size_t)verify_size) ||
++                   !picasso_jobs_released(bytes, (size_t)verify_size))))) error = EIO;
 +    }
 +done:
 +    printf("PICASSO_JOBS diag meta=%d/%d/%d/%d vt=%d/%d/%d/%d rd=%d size=%llu "
@@ -153,6 +268,8 @@
 +        (unsigned)diag_head[5], (unsigned)diag_head[6],
 +        (unsigned)diag_head[7], diag_before, diag_after,
 +        diag_e[0], diag_e[1]);
++    printf("PICASSO_JOBS form=%d removed=%d head=%s\n",
++        diag_form, diag_removed, diag_text);
 +    if (bytes) kfree_data(bytes, 8192);
 +    printf("PICASSO_JOBS jobs enabled=%u changed=%u error=%d\n", !error, changed, error);
 +    return error;
@@ -161,7 +278,7 @@
  /* One read-only library union; signature/MAC/VM checks run normally on load. */
  static void
  picasso_ui_library_mount(proc_t p, user_addr_t scratch)
-@@ -9635,6 +9789,7 @@
+@@ -9635,6 +9906,7 @@
  	if (!error) native_picasso_apps_mount(p, scratch);
  	if (!error) picasso_ui_library_mount(p, scratch);
  	if (!error) picasso_ifnamer_mount(p, scratch);

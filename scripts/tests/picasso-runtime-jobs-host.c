@@ -70,6 +70,28 @@ static void SHA256_Final(uint8_t out[32],SHA256_CTX *s){
 static void setup(void){assert(!refs && !allocs);memset(nodes,0,sizeof nodes);for(unsigned i=0;i<4;++i){nodes[i].exists=1;nodes[i].type=i==3?VREG:VDIR;nodes[i].attr.va_mode=i==3?0644:0755;nodes[i].attr.va_nlink=1;}nodes[3].attr.va_data_size=sizeof jobs_before;memcpy(nodes[3].data,jobs_before,sizeof jobs_before);ops=renames=writes=failAt=0;shortWrite=corruptRead=0;}
 static int is_after(void){return nodes[3].attr.va_data_size==sizeof jobs_after && !memcmp(nodes[3].data,jobs_after,sizeof jobs_after);}
 static int is_before(void){return nodes[3].attr.va_data_size==sizeof jobs_before && !memcmp(nodes[3].data,jobs_before,sizeof jobs_before);}
+/* launchd rewrites disabled.plist in its own XML form on persistent Data. */
+static const char launchd_form[]=
+    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+    "<plist version=\"1.0\">\n<dict>\n"
+    "\t<key>com.apple.ReportCrash</key>\n\t<true/>\n"
+    "\t<key>com.apple.bluetoothd</key>\n\t<true/>\n"
+    "\t<key>com.apple.wifid</key>\n\t<true/>\n"
+    "\t<key>com.apple.watchdogd</key>\n\t<true/>\n"
+    "</dict>\n</plist>\n";
+static void install_launchd_form(void){
+    size_t n=sizeof launchd_form-1;
+    memset(nodes[3].data,0,sizeof nodes[3].data);
+    memcpy(nodes[3].data,launchd_form,n);
+    nodes[3].attr.va_data_size=n;
+}
+static int has_bytes(const void *buf,size_t n,const char *s){
+    size_t m=strlen(s),i;
+    for(i=0;i+m<=n;i++) if(!memcmp((const char *)buf+i,s,m)) return 1;
+    return 0;
+}
+static int no_jobs(const void *buf,size_t n){return !has_bytes(buf,n,"com.apple.wifid") && !has_bytes(buf,n,"com.apple.bluetoothd");}
 static int run(void){int e=picasso_jobs_enable((void *)2,0x1000);assert(!refs && !allocs);return e;}
 int main(void){
     setup();assert(!run() && is_after() && renames==1);unsigned max=ops;ops=0;assert(!run() && renames==1);
@@ -80,5 +102,12 @@ int main(void){
     setup();nodes[3].attr.va_nlink=2;assert(run()==EPERM && is_before());
     setup();nodes[3].data[0]^=1;assert(run()==EINVAL && !writes && !renames);
     setup();nodes[4]=nodes[3];nodes[4].attr.va_data_size=1;assert(!run() && is_after());
-    printf("PASS runtime jobs: %u injected operation failures/recovery, partial temp, short writes, readback, ownership/types, unknown policy and idempotence\n",max);
+    /* launchd-rewritten plist: remove ONLY the two approved keys,
+     * preserve every other job, and stay idempotent. */
+    setup();install_launchd_form();assert(!run() && renames==1);
+    assert(no_jobs(nodes[3].data,nodes[3].attr.va_data_size));
+    assert(has_bytes(nodes[3].data,nodes[3].attr.va_data_size,"com.apple.ReportCrash"));
+    assert(has_bytes(nodes[3].data,nodes[3].attr.va_data_size,"com.apple.watchdogd"));
+    ops=0;assert(!run() && renames==1);
+    printf("PASS runtime jobs: %u injected operation failures/recovery, partial temp, short writes, readback, ownership/types, unknown policy, launchd form and idempotence\n",max);
 }
