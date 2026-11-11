@@ -235,6 +235,9 @@ net_ioctl(ifnet_t ifp, u_long command, void *data)
 	}
 	switch (command) {
 	case SIOCSIFADDR:
+		/* configd is filtered out of the generic ioctl print above, so
+		 * the IPv4 service/DHCP step was invisible in every boot log. */
+		printf("net: en0 SIOCSIFADDR (configd/DHCP path)\n");
 		ifnet_set_flags(ifp, IFF_UP, IFF_UP);
 		break;
 	case SIOCSIFFLAGS:

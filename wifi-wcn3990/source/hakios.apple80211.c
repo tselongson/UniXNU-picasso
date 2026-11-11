@@ -364,6 +364,18 @@ get(struct apple80211req *request)
 		kfree_data(answer, sizeof(*answer));
 		return error;
 	}
+	case 106: {                             /* RSSI_BOUNDS: {version, min, max, threshold} */
+		/* Without this wifid keeps RSSI_THRESHOLD at 0 and calls every
+		 * network "Below minimum RSSI threshold", so nothing auto-joins
+		 * and the status bar shows zero bars (CoachZ hardware result).
+		 * Exact values from CoachzWifiNet.cpp kRssiBounds. */
+		struct {
+			uint32_t version, min, max, threshold;
+		} answer = { .version = 1, .min = (uint32_t)-95,
+		    .max = (uint32_t)-40, .threshold = (uint32_t)-85 };
+
+		return give(request, &answer, sizeof(answer));
+	}
 	case 21:                                /* how the last join went (0: not over yet) */
 		lck_mtx_lock(&apple80211_lock);
 		request->req_val = (int32_t)join_result;

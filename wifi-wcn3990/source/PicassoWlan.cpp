@@ -3923,17 +3923,36 @@ picasso_sta_state(struct hakios_sta_state *state)
 static unsigned
 picasso_sta_channels(struct hakios_sta_channel *channels, unsigned most)
 {
-	static const uint16_t freqs[] = {
+	/* wifid's auto-join skips a known network on a channel missing from
+	 * SUPPORTED_CHANNELS ("BSS channel ... is not supported").  Channels
+	 * 12/13 are passive, 52-64 and 100-144 are DFS/radar.  Exact table
+	 * from the hardware-verified CoachzWifiNet.cpp.  This file privately
+	 * declares struct hakios_sta_channel and does NOT include
+	 * sys/hakios.sta.h, so the flag values are local (1 passive, 2 radar,
+	 * identical to that header). */
+	enum { CH_PASSIVE = 1u, CH_RADAR = 2u };
+	static const uint16_t active[] = {
 		2412, 2417, 2422, 2427, 2432, 2437, 2442, 2447, 2452, 2457, 2462,
-		5180, 5200, 5220, 5240, 5260, 5280, 5300, 5320, 5500, 5520, 5540,
-		5560, 5580, 5600, 5620, 5640, 5660, 5680, 5700, 5745, 5765, 5785,
-		5805, 5825
+		5180, 5200, 5220, 5240, 5745, 5765, 5785, 5805, 5825
 	};
-	unsigned n = sizeof(freqs) / sizeof(freqs[0]);
-	if (n > most) n = most;
-	for (unsigned i = 0; i < n; i++) {
-		channels[i].frequency = freqs[i];
-		channels[i].flags = 0;
+	static const uint16_t passive[] = { 2467, 2472 };
+	static const uint16_t dfs[] = {
+		5260, 5280, 5300, 5320, 5500, 5520, 5540, 5560, 5580, 5600,
+		5620, 5640, 5660, 5680, 5700, 5720
+	};
+	unsigned n = 0, i;
+
+	for (i = 0; i < sizeof(active) / sizeof(active[0]) && n < most; i++, n++) {
+		channels[n].frequency = active[i];
+		channels[n].flags = 0;
+	}
+	for (i = 0; i < sizeof(passive) / sizeof(passive[0]) && n < most; i++, n++) {
+		channels[n].frequency = passive[i];
+		channels[n].flags = CH_PASSIVE;
+	}
+	for (i = 0; i < sizeof(dfs) / sizeof(dfs[0]) && n < most; i++, n++) {
+		channels[n].frequency = dfs[i];
+		channels[n].flags = CH_RADAR | CH_PASSIVE;
 	}
 	return n;
 }
