@@ -68,7 +68,7 @@ def main():
     assert entry.index('picasso_iokit_set_properties_check') < entry.index('entry->setProperties( obj )')
     # Keep seed identity unchanged while applying only the approved runtime job release.
     board = tomllib.loads((ROOT / 'board.toml').read_text())['payload']
-    assert board['runtime_enabled_jobs'] == ['com.apple.bluetoothd']
+    assert board['runtime_enabled_jobs'] == ['com.apple.bluetoothd', 'com.apple.wifid']
     before = plistlib.dumps({job: True for job in board['offline_disabled_jobs']})
     after = plistlib.dumps({job: True for job in board['offline_disabled_jobs'] if job not in board['runtime_enabled_jobs']})
     constants = source[source.index('static const uint8_t picasso_jobs_before_sha'):source.index('static int\npicasso_jobs_match(')]
