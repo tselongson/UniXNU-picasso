@@ -3,12 +3,13 @@
   "revision": "hif-1",
   "kind": "self-contained source package, archived into the host tree's existing libNativeWlan.a",
   "baseline": {
-    "repository": "silenzio111/UniXNU-picasso",
-    "branch": "stage12/picasso-cpufreq-big",
-    "commit": "e790d5d",
+    "repository": "YinCQL/UniXNU-picasso",
+    "branch": "feat/fix-v1",
+    "commit": "d627aa6",
+    "url": "https://github.com/YinCQL/UniXNU-picasso/tree/feat/fix-v1",
     "kernel": "DEVELOPMENT_ARM64_BCM2837",
     "architecture": "arm64",
-    "note": "Last upstream revision that links on its own. ba1aefc..e4a5a51 add an IPC census call without installing its patch into the prepared tree; waiting for upstream to fix that before upgrading."
+    "note": "Baseline switched on 2026-11-12 at the user's request; tip d627aa6 ('ci: verify Compose artifacts in the generated build tree', 2026-11-12) verified with git ls-remote yincql. This is an upstream reference for comparison only: the branch does not contain the wifi-wcn3990 package (0 matching paths), so it does not change the build tree, CI inputs or the kd439-pool fork. integration.patch_base still names e790d5d because the four integration/ patches in this package were authored against that historical tree; rebasing them is a separate change."
   },
   "target": {
     "device": "Xiaomi picasso / SM7250",
