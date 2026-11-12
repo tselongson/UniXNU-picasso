@@ -54,6 +54,10 @@ extern "C" void flush_dcache64(addr64_t pa, unsigned int len, boolean_t phys);  
 extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 /* Darwin's network stack receives fully formed Ethernet frames. */
 extern "C" void hakios_net_input(const uint8_t *frame, size_t length);
+/* hakios.dhcp.c: in-kernel DHCPv4 client (dhcp boot-arg gate). It installs
+ * the address without waiting for configd's InterfaceNamer/IPConfiguration. */
+extern "C" void hakios_dhcp_tick(uint32_t polls, int link_up, const uint8_t mac[6]);
+extern "C" void hakios_dhcp_input(const uint8_t *eth, size_t len);
 /* hakios.net.c: the only KEV_DL_LINK_ON switch.  configd builds the IPv4
  * service (and runs DHCP) only after this event. */
 extern "C" void hakios_net_link_state(bool up);
@@ -70,6 +74,9 @@ extern "C" void hakios_apple80211_event(int event, int status);
  * outgoing frames over HTT TX_FRM instead of faking DHCP/ARP.  0 keeps the
  * old behaviour as an A/B control. */
 static int g_net_path;
+/* dhcp=1 (wifiauto default): run the in-kernel DHCPv4 client on the real
+ * data plane. 0 keeps configd solely in charge, for an exact A/B. */
+static int g_dhcp;
 static int g_dp_diag;
 static uint32_t g_dp_bad_logged;
 /* Set once message 4 has gone out and both keys are installed.  Declared
@@ -980,6 +987,7 @@ hif_wr_msdu(uint8_t *buf, uint32_t len)
 	/* Real data plane: hakios_net_input() copies the Ethernet frame into
 	 * an mbuf, so the DMA buffer can be reposted immediately afterwards. */
 	if (g_net_path && g_link_up) {
+		if (g_dhcp) hakios_dhcp_input(eth, bytes);
 		hakios_net_input(eth, bytes);
 		return;
 	}
@@ -2936,6 +2944,13 @@ wcn3990_hif_net_tx(const uint8_t *eth, size_t len)
 	return hif_wpa_tx_frame(frame, 32u + n, 0);
 }
 
+/* C-linkage bridge for hakios.dhcp.c, which owns no WCN3990 state. */
+extern "C" int
+picasso_dhcp_send(const uint8_t *eth, size_t len)
+{
+	return wcn3990_hif_net_tx(eth, len);
+}
+
 extern "C" int
 wcn3990_hif_net_ready(void)
 {
@@ -4709,6 +4724,10 @@ wcn3990_hif_poll(void)
 
 	if (!g_regs_live) return;
 	g_polls++;
+	/* One cheap tick for the in-kernel DHCP client; no CE register access. */
+	if (g_dhcp) {
+		hakios_dhcp_tick(g_polls, (g_net_path && g_link_up) ? 1 : 0, g_join_mac);
+	}
 
 	/* Heartbeat every ~1000 polls, and advance the staged ladder.  This is
 	 * deliberately cheap: no cache flushes and no CE register access until
@@ -5174,6 +5193,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_join_skip = 0;
 		g_wpa = 1;
 		g_net_path = 1;
+		g_dhcp = 1;            /* usable by default; dhcp=0 restores the A/B */
 		g_init_fix = 3;
 		g_rx_fix = 1;
 		g_dp_fix = 5;
@@ -5387,6 +5407,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	v = 0;
 	if (PE_parse_boot_argn("netpath", &v, sizeof(v)) && v <= 1) {
 		g_net_path = (int)v;
+	}
+	v = 1;
+	if (PE_parse_boot_argn("dhcp", &v, sizeof(v)) && v <= 1) {
+		g_dhcp = (int)v;
 	}
 	v = 0;
 	if (PE_parse_boot_argn("dpdiag", &v, sizeof(v)) && v <= 1) {
