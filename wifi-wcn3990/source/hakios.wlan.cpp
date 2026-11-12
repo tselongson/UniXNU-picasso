@@ -97,6 +97,51 @@ HakiosNetworkStackUserClient::setProperties(OSObject * properties)
 	return kIOReturnSuccess;
 }
 
+/* The interface service is an IOEthernetInterface (IO80211Interface is
+ * absent from this prelink).  configd opens it as part of
+ * SCNetworkInterfaceCopyAllWithPreferences; the stock user client demands
+ * an entitlement this port does not carry, so the open is denied and the
+ * Settings > Wi-Fi pane waits forever.  The same entitlement-free trick
+ * used for IONetworkStack applies here.  ifaceuc=1 gates it so the old
+ * behaviour remains an exact single-variable control. */
+class HakiosWLANInterfaceUserClient : public IOUserClient
+{
+	OSDeclareDefaultStructors(HakiosWLANInterfaceUserClient);
+public:
+	virtual bool initWithTask(task_t task, void * security_token, UInt32 type,
+	    OSDictionary * properties) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
+	virtual IOReturn setProperties(OSObject * properties) APPLE_KEXT_OVERRIDE;
+};
+
+OSDefineMetaClassAndStructors(HakiosWLANInterfaceUserClient, IOUserClient);
+
+bool
+HakiosWLANInterfaceUserClient::initWithTask(task_t task, void * security_token,
+    UInt32 type, OSDictionary * properties)
+{
+	/* Deliberately no entitlement check and no type restriction: the base
+	 * IOUserClient implementation accepts the open that the stock client
+	 * refuses.  Print it so the boot log proves the binding is used. */
+	IOLog("HakiosWLAN: interface user client open type=%u\n", type);
+	return IOUserClient::initWithTask(task, security_token, type, properties);
+}
+
+IOReturn
+HakiosWLANInterfaceUserClient::clientClose(void)
+{
+	if (!isInactive()) {
+		terminate();
+	}
+	return kIOReturnSuccess;
+}
+
+IOReturn
+HakiosWLANInterfaceUserClient::setProperties(OSObject * properties)
+{
+	return kIOReturnSuccess;
+}
+
 static void
 bind_network_stack_user_client(void)
 {
@@ -116,6 +161,15 @@ bind_network_stack_user_client(void)
 	stack->setProperty(kIOUserClientClassKey, "HakiosNetworkStackUserClient");
 	IOLog("HakiosWLAN: IONetworkStack user client bound (netstack=1)\n");
 	stack->release();
+}
+
+static bool
+bind_interface_user_client_enabled(void)
+{
+	unsigned enabled = 0;
+
+	PE_parse_boot_argn("ifaceuc", &enabled, sizeof(enabled));
+	return enabled == 1;
 }
 
 class IO80211Controller : public IOService
@@ -282,6 +336,11 @@ HakiosWLANStart(const char * interface, const uint8_t * address)
 	wlan->setProperty("IOBuiltin", true);
 	wlan->setProperty("IOPrimaryInterface", true);
 	wlan->setProperty("IO80211InterfaceRole", "Infrastructure");
+	if (bind_interface_user_client_enabled()) {
+		wlan->setProperty(kIOUserClientClassKey,
+		    "HakiosWLANInterfaceUserClient");
+		IOLog("HakiosWLAN: interface user client bound (ifaceuc=1)\n");
+	}
 	if (publish(wlan, controller, "HakiosWLAN") == NULL) {
 		IOLog("HakiosWLAN: the service did not start\n");
 	} else {
