@@ -38,6 +38,18 @@
 #include <net/route.h>
 #include <netinet/in.h>
 #include <libkern/libkern.h>
+#include <sys/attr.h>
+#include <sys/errno.h>
+#include <sys/fcntl.h>
+#include <sys/mount.h>
+#include <sys/signal.h>
+#include <sys/uio.h>
+#include <sys/vnode.h>
+
+/* Kernel-internal process helpers (bsd/sys/proc.h).  Declared here the same
+ * way patches/picasso-ipc-census-xnu.patch does, so no private header is
+ * needed. */
+extern void proc_name(int pid, char *buf, int size);
 
 /* Kernel-internal entry points. Declared here rather than pulling in
  * private headers whose availability differs across XNU builds; every one
@@ -54,6 +66,9 @@ extern proc_t current_proc(void);
 /* The C++ side owns the radio. It wraps wcn3990_hif_net_tx() so this C file
  * can put a complete Ethernet frame on the air. */
 extern int picasso_dhcp_send(const uint8_t *eth, size_t len);
+
+/* Defined below, called from dhcp_install() on the driver thread. */
+static void dhcp_publish_dns(void);
 
 #define DHCP_TICK_RETRY   500u    /* polls between retransmits (~0.5-2 s) */
 #define DHCP_MAX_RETRY    12u
@@ -77,6 +92,10 @@ static uint8_t dhcp_yiaddr[4];
 static uint8_t dhcp_server[4];
 static uint8_t dhcp_mask[4];
 static uint8_t dhcp_router[4];
+static uint8_t dhcp_dns[4];
+static uint8_t dhcp_dns2[4];
+static unsigned dhcp_dns_count;
+static unsigned dhcp_opt_logged;
 static int dhcp_have_server;
 
 /* ------------------------------------------------------------ checksums */
@@ -224,6 +243,105 @@ dhcp_reset(void)
 	bzero(dhcp_router, sizeof(dhcp_router));
 }
 
+/* ------------------------------------------------------------ DNS publish */
+
+/* Publish the DHCP-learned resolvers in Apple's plain-text resolver format
+ * ("nameserver <IPv4>" per line, mDNSPosix ParseDNSServers) and ask
+ * mDNSResponder to re-read its configuration.  Every step prints its result:
+ * this boot is also the measurement that tells us whether the iOS platform
+ * layer uses a file at all.  Runs ONLY from dhcp_install() on the driver
+ * thread (v17 charter: no work on launchd's exec path). */
+static void
+dhcp_publish_dns(void)
+{
+	static const char *const paths[] = {
+	    "/private/var/run/resolv.conf",
+	    "/private/etc/resolv.conf",
+	    "/etc/resolv.conf",
+	};
+	char text[128];
+	char name[32];
+	int n, i, pid, found = -1, published = 0;
+	vfs_context_t ctx;
+	vnode_t vp;
+	int error, resid, close_error;
+
+	if (dhcp_dns_count == 0) {
+		printf("DHCP: dns option 6 absent, no resolver to publish\n");
+		return;
+	}
+	n = snprintf(text, sizeof(text),
+	    "# published by the in-kernel DHCP client (option 6)\n"
+	    "nameserver %u.%u.%u.%u\n",
+	    dhcp_dns[0], dhcp_dns[1], dhcp_dns[2], dhcp_dns[3]);
+	if (dhcp_dns_count > 1 && n > 0 && (size_t)n < sizeof(text)) {
+		n += snprintf(text + n, sizeof(text) - (size_t)n,
+		    "nameserver %u.%u.%u.%u\n",
+		    dhcp_dns2[0], dhcp_dns2[1], dhcp_dns2[2], dhcp_dns2[3]);
+	}
+	printf("DHCP: dns %u.%u.%u.%u count=%u\n",
+	    dhcp_dns[0], dhcp_dns[1], dhcp_dns[2], dhcp_dns[3],
+	    dhcp_dns_count);
+	if (dhcp_dns_count > 1) {
+		printf("DHCP: dns2 %u.%u.%u.%u\n",
+		    dhcp_dns2[0], dhcp_dns2[1], dhcp_dns2[2], dhcp_dns2[3]);
+	}
+	if (n <= 0 || (size_t)n >= sizeof(text)) {
+		printf("DHCP: dns text too long, not publishing\n");
+		return;
+	}
+
+	/* Apple's own file-writing sequence, verbatim from
+	 * patches/picasso-ca-prefs-xnu.patch:39-67.  vfs_context_current() takes
+	 * NO arguments (bsd/sys/vnode.h:1597). */
+	ctx = vfs_context_current();
+	for (i = 0; i < (int)(sizeof(paths) / sizeof(paths[0])); i++) {
+		vp = NULLVP;
+		error = vnode_open(paths[i], O_CREAT | O_TRUNC | FWRITE | O_NOFOLLOW,
+		    0644, 0, &vp, ctx);
+		printf("DHCP: dns open %s error=%d\n", paths[i], error);
+		if (error) {
+			continue;
+		}
+		resid = 0;
+		error = vn_rdwr(UIO_WRITE, vp, (caddr_t)text, n, 0, UIO_SYSSPACE,
+		    IO_NOAUTH | IO_UNIT, vfs_context_ucred(ctx), &resid,
+		    vfs_context_proc(ctx));
+		if (!error && resid) {
+			error = EIO;
+		}
+		if (!error) {
+			error = VNOP_FSYNC(vp, MNT_WAIT, ctx);
+		}
+		close_error = vnode_close(vp, FWRITE, ctx);
+		printf("DHCP: dns write %s error=%d close=%d bytes=%d\n",
+		    paths[i], error, close_error, n);
+		if (!error && !close_error) {
+			published = 1;
+			printf("DHCP: dns published via %s\n", paths[i]);
+			break;
+		}
+	}
+	printf("DHCP: dns published=%d\n", published);
+
+	/* Is mDNSResponder actually alive?  /dev/console drops lines, so the
+	 * absence of a launchd exec line is NOT evidence (see the reference
+	 * port's notes.md).  Ask the kernel's process list instead. */
+	for (pid = 1; pid < 4096; pid++) {
+		name[0] = 0;
+		proc_name(pid, name, (int)sizeof(name));
+		if (strncmp(name, "mDNSResponder", 13) == 0) {
+			found = pid;
+			break;
+		}
+	}
+	printf("DHCP: dns resolver pid=%d\n", found);
+	if (found > 0) {
+		proc_signal(found, SIGHUP);
+		printf("DHCP: dns reload signalled pid=%d\n", found);
+	}
+}
+
 /* ------------------------------------------------------------ install */
 
 static void
@@ -309,6 +427,9 @@ dhcp_install(void)
 	    dhcp_mask[0], dhcp_mask[1], dhcp_mask[2], dhcp_mask[3],
 	    dhcp_router[0], dhcp_router[1], dhcp_router[2], dhcp_router[3],
 	    err, rterr);
+	if (err == 0) {
+		dhcp_publish_dns();
+	}
 }
 
 /* ------------------------------------------------------------ receive */
@@ -317,6 +438,8 @@ static void
 dhcp_option(const uint8_t *p, size_t n, uint8_t *msgtype)
 {
 	size_t at = 240;
+	char tags[160] = { 0 };
+	size_t tl = 0;
 	if (n < 244 || p[236] != 0x63 || p[237] != 0x82 ||
 	    p[238] != 0x53 || p[239] != 0x63) {
 		return;
@@ -337,6 +460,13 @@ dhcp_option(const uint8_t *p, size_t n, uint8_t *msgtype)
 		if (at + len > n) {
 			break;
 		}
+		/* Print the FULL option list of the first two DHCP replies.  This is
+		 * the missing evidence: v19 inferred "the AP offered DNS" from our
+		 * own parameter-request list, never from the OFFER bytes. */
+		if (tl + 8 < sizeof(tags)) {
+			tl += (size_t)snprintf(tags + tl, sizeof(tags) - tl,
+			    "%s%u", tl ? "," : "", tag);
+		}
 		switch (tag) {
 		case 1:                                  /* subnet mask */
 			if (len >= 4) {
@@ -346,6 +476,16 @@ dhcp_option(const uint8_t *p, size_t n, uint8_t *msgtype)
 		case 3:                                  /* router */
 			if (len >= 4) {
 				memcpy(dhcp_router, p + at, 4);
+			}
+			break;
+		case 6:                                  /* DNS servers, RFC 2132 */
+			if (len >= 4) {
+				memcpy(dhcp_dns, p + at, 4);
+				dhcp_dns_count = 1;
+			}
+			if (len >= 8) {
+				memcpy(dhcp_dns2, p + at + 4, 4);
+				dhcp_dns_count = 2;
 			}
 			break;
 		case 53:                                 /* DHCP message type */
@@ -363,6 +503,9 @@ dhcp_option(const uint8_t *p, size_t n, uint8_t *msgtype)
 			break;
 		}
 		at += len;
+	}
+	if (dhcp_opt_logged++ < 2) {
+		printf("DHCP: options %s dns=%u\n", tags, dhcp_dns_count);
 	}
 }
 
