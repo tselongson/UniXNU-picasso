@@ -1,6 +1,6 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -9318,6 +9318,389 @@
+@@ -9318,6 +9318,369 @@
      return 0;
  }
  
@@ -135,58 +135,38 @@
 +static int picasso_ifnamer_read(const char *path, uint8_t *buffer,
 +    size_t capacity, uint64_t *size, vfs_context_t ctx);
 +
-+/* Read-only: which configd plug-in bundles are actually visible on the
-+ * root volume.  Apple pluginsCopy() discovers plug-ins by scanning
-+ * /System/Library/SystemConfiguration/*.bundle; builtin entries in
-+ * plugins_builtin[] only supply load pointers for bundles it found. */
++/* Read-only: which configd plug-in bundles are visible on the root volume.
++ * Apple pluginsCopy() discovers plug-ins by scanning *.bundle there;
++ * plugins_builtin[] only fills load pointers for bundles it found.
++ * vnode_lookup() only -- no VNOP_READDIR (chain-595: it panicked in the
++ * launchd exec context with ESR 0x96000047). */
 +static void
 +picasso_netsvc_bundles(vfs_context_t ctx)
 +{
-+    static const char dir[] = "/System/Library/SystemConfiguration";
-+    vnode_t vp = NULLVP;
-+    int error = vnode_lookup(dir, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
-+    if (error) {
-+        printf("PICASSO_NETWORK bundles_lookup error=%d\n", error);
-+        return;
-+    }
-+    char *buffer = kalloc_data(4096, Z_WAITOK);
-+    uio_t uio = buffer ? uio_create(1, 0, UIO_SYSSPACE, UIO_READ) : NULL;
-+    int read_error = uio ? 0 : ENOMEM, eof = 0;
-+    unsigned count = 0;
-+    for (unsigned batch = 0; !read_error && !eof && batch < 4; ++batch) {
-+        uio_reset(uio, uio_offset(uio), UIO_SYSSPACE, UIO_READ);
-+        read_error = uio_addiov(uio, CAST_USER_ADDR_T(buffer), 4096);
-+        int entries = 0;
-+        if (!read_error) read_error = VNOP_READDIR(vp, uio, 0, &eof, &entries, ctx);
-+        if (read_error) break;
-+        size_t used = 4096 - uio_resid(uio), at = 0;
-+        const size_t header = offsetof(struct dirent, d_name);
-+        while (at < used) {
-+            if (used - at <= header) break;
-+            const struct dirent *entry = (const struct dirent *)(buffer + at);
-+            if (entry->d_reclen <= header || entry->d_reclen > used - at ||
-+                entry->d_namlen >= entry->d_reclen - header ||
-+                entry->d_name[entry->d_namlen]) break;
-+            int dot = entry->d_namlen == 1 && entry->d_name[0] == '.';
-+            int dotdot = entry->d_namlen == 2 && !memcmp(entry->d_name, "..", 2);
-+            if (!dot && !dotdot) {
-+                char name[64];
-+                size_t n = entry->d_namlen < sizeof(name) - 1 ?
-+                    entry->d_namlen : sizeof(name) - 1;
-+                memcpy(name, entry->d_name, n);
-+                name[n] = 0;
-+                ++count;
-+                if (count <= 32)
-+                    printf("PICASSO_NETWORK bundle name=%s\n", name);
-+            }
-+            at += entry->d_reclen;
++    static const char * const names[] = {
++        "InterfaceNamer.bundle", "KernelEventMonitor.bundle", "PreferencesMonitor.bundle", "IPConfiguration.bundle",
++        "IPMonitor.bundle", "EAPOLController.bundle", "LinkConfiguration.bundle", "QoSMarking.bundle",
++    };
++    char path[128];
++    unsigned present = 0;
++    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
++        vnode_t vp = NULLVP;
++        int error;
++        (void) snprintf(path, sizeof(path),
++            "/System/Library/SystemConfiguration/%s", names[i]);
++        error = vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
++        if (!error) {
++            ++present;
++            printf("PICASSO_NETWORK bundle present=%s type=%d\n",
++                names[i], (int)vnode_vtype(vp));
++            vnode_put(vp);
++        } else {
++            printf("PICASSO_NETWORK bundle absent=%s error=%d\n",
++                names[i], error);
 +        }
-+        if (!used && !eof) break;
 +    }
-+    printf("PICASSO_NETWORK bundles_scan error=%d count=%u\n", read_error, count);
-+    if (uio) uio_free(uio);
-+    if (buffer) kfree_data(buffer, 4096);
-+    vnode_put(vp);
++    printf("PICASSO_NETWORK bundles_scan present=%u of %u\n",
++        present, (unsigned)(sizeof(names) / sizeof(names[0])));
 +}
 +
 +/* Diagnose/populate the network service store before configd is exec'd.
