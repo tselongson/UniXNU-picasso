@@ -1,6 +1,6 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -9318,6 +9318,328 @@
+@@ -9318,6 +9318,332 @@
      return 0;
  }
  
@@ -130,6 +130,10 @@
 +	"	</dict>\n"
 +	"</dict>\n"
 +	"</plist>\n";
++
++/* Prototype: picasso_ifnamer_read() is defined later in this hunk. */
++static int picasso_ifnamer_read(const char *path, uint8_t *buffer,
++    size_t capacity, uint64_t *size, vfs_context_t ctx);
 +
 +/* Diagnose/populate the network service store before configd is exec'd.
 + * The same narrow write primitive as InterfaceNamer.bundle/Info.plist is
