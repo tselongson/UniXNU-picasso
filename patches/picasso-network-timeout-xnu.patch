@@ -140,7 +140,7 @@
 + * plugins_builtin[] only fills load pointers for bundles it found.
 + * vnode_lookup() only -- no VNOP_READDIR (chain-595: it panicked in the
 + * launchd exec context with ESR 0x96000047). */
-+static void
++static void __attribute__((unused))
 +picasso_netsvc_bundles(vfs_context_t ctx)
 +{
 +    static const char * const names[] = {
@@ -185,13 +185,13 @@
 +	};
 +	static const char file[] =
 +	    "/private/var/preferences/SystemConfiguration/preferences.plist";
-+	uint8_t probe[2048];
++	static uint8_t probe[2048];
 +	uint64_t size = 0;
 +	int error, i;
 +
 +	if (done) return;
 +	done = 1;
-+	picasso_netsvc_bundles(ctx);
++	/* bundle inventory deferred to a driver thread (exec stack) */
 +	PE_parse_boot_argn("netsvc", &enabled, sizeof(enabled));
 +	error = picasso_ifnamer_read(file, probe, sizeof(probe), &size, ctx);
 +	printf("PICASSO_NETWORK netsvc=%u prefs_error=%d prefs_size=%llu\n",
