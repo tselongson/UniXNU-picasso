@@ -3634,6 +3634,20 @@ hif_join_reset(const char *why)
 	 * "temporarily rejected" (or went silent) needs its stale session
 	 * entry to expire; hammering it every scan round keeps it refusing. */
 	g_join_backoff_at = g_polls + 10000u;
+	if (g_wifi_auto && g_join_req.ssid_len != 0) {
+		/* wlan-wip wj_step() re-arms ws_scan_wanted while WJ_IDLE.
+		 * hif_join_begin() cleared pending when it picked the BSS, which
+		 * also disabled the 10 s rescan loop; g_autoscan_sent stayed 1,
+		 * so no further scan-completed event could trigger a rejoin.
+		 * After one deauth (frame 0xc0 reason 3 in live-dnsfix-status.cap)
+		 * the daily-use baseline stayed join=0 forever with ord/msdu frozen.
+		 * Re-arm both gates; the 10 s backoff above still applies. */
+		g_join_req.pending = 1;
+		g_autoscan_sent = 0;
+		g_scan_active = 0;
+		g_last_rescan_at = g_polls;
+		HIF_LOG("JOIN: wifiauto re-arming connect after %s", why);
+	}
 }
 
 /* ---- the wj_begin() once-block (chain-537 gap) ---------------------------

@@ -319,7 +319,11 @@ dhcp_publish_dns(void)
 		if (!error && !close_error) {
 			published = 1;
 			printf("DHCP: dns published via %s\n", paths[i]);
-			break;
+			/* Do NOT stop at the first success: pong's
+			 * userland/package-network.c also publishes /etc/resolv.conf
+			 * (an alias of the run file).  Try every candidate and print
+			 * each errno, so the device tells us which paths really exist
+			 * and which need a symlink. */
 		}
 	}
 	printf("DHCP: dns published=%d\n", published);
