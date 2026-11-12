@@ -72,7 +72,9 @@ type_name(int32_t type)
 		{ 44, "HARDWARE_VERSION" }, { 46, "RSN_IE" }, { 47, "BACKGROUND_SCAN" }, { 48, "AP_IE_LIST" }, { 49, "STATS" },
 		{ 50, "ASSOCIATION_STATUS" }, { 51, "COUNTRY_CODE" }, { 54, "RADIO_INFO" }, { 57, "MCS" }, { 66, "MCS_INDEX_SET" },
 		{ 79, "STA_STATS" }, { 80, "ROAM_THRESH" }, { 85, "IE" }, { 86, "SCAN_REQ_MULTIPLE" }, { 87, "BTCOEX_MODE" },
-		{ 90, "SCANCACHE_CLEAR" }, { 94, "VIRTUAL_IF_CREATE" }, { 95, "VIRTUAL_IF_DELETE" }, { 103, "CURRENT_NETWORK" },
+		{ 90, "SCANCACHE_CLEAR" }, { 94, "VIRTUAL_IF_CREATE" }, { 95, "VIRTUAL_IF_DELETE" },
+		{ 70, "WOW_ENABLED" }, { 96, "VIRTUAL_IF_ROLE" }, { 97, "VIRTUAL_IF_PARENT" },
+		{ 103, "CURRENT_NETWORK" },
 		{ 106, "RSSI_BOUNDS" }, { 107, "ROAM" }, { 207, "CHANNELS_INFO" }, { 254, "HW_SUPPORTED_CHANNELS" },
 	};
 
@@ -456,6 +458,32 @@ get(struct apple80211req *request)
 		error = state->phase != HAKIOS_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
 		break;
 	}
+	case 70:                                /* WOW_ENABLED: no suspend path */
+	case 96: {                              /* VIRTUAL_IF_ROLE / WOW_ENABLED */
+		/* pong-wifi/PongWifiNet.cpp:288 answer_value(): a get with no
+		 * buffer takes the value in req_val, one with a buffer gets
+		 * {version, value}.  en0 is a physical infrastructure station,
+		 * not P2P/AWDL: role 0, no WoW. */
+		uint32_t answer[2] = { 1, 0 };
+
+		if (request->req_len == 0 || request->req_data == USER_ADDR_NULL) {
+			request->req_val = 0;
+			error = 0;
+		} else {
+			error = give(request, &answer, sizeof(answer));
+		}
+		break;
+	}
+	case 97:                                /* VIRTUAL_IF_PARENT: none */
+		/* pong-wifi/PongWifiNet.cpp:401 answer_bytes(..., 0): no virtual
+		 * parent, so the reply carries zero bytes. */
+		if (request->req_data == USER_ADDR_NULL) {
+			error = EINVAL;
+		} else {
+			request->req_len = 0;
+			error = 0;
+		}
+		break;
 	default:
 		error = EOPNOTSUPP;
 		break;
