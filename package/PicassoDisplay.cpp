@@ -336,6 +336,29 @@ static void picasso_network_stack_start(void) {
     OSDictionary *match = !loaded ? IOService::serviceMatching("IONetworkStack") : nullptr;
     IOService *stack = match ? IOService::waitForMatchingService(match, 1000000000ULL) : nullptr;
     IOLog("PICASSO_NETWORK stack load=%x found=%u resource_busy=%u\n", loaded, stack != nullptr, resources->getBusyState());
+    /* InterfaceNamer opens IONetworkStack once, as soon as configd starts
+     * (t+47 s). IOServiceOpen() has no retry in ifnamer.c:4108, so a failure
+     * there leaves S_connect == MACH_PORT_NULL forever: no IOKit quiet, no
+     * InterfaceNamer completion, no IPv4 service, no DHCP. HakiosWLANStart()
+     * binds the entitlement-free client only at en0 attach (t+168 s), which
+     * is 121 s too late. CoachZ (same WCN3990) publishes the stack with its
+     * client up front, before configd. netstack=2 enables that ordering;
+     * netstack=0/1 keeps the old ordering as an in-image control. */
+    if (stack != nullptr) {
+        unsigned netstack = 0;
+        PE_parse_boot_argn("netstack", &netstack, sizeof(netstack));
+        if (netstack == 2) {
+            OSSymbol *client = OSSymbol::withCString("HakiosNetworkStackUserClient");
+            bool registered = client != nullptr &&
+                OSMetaClass::getMetaClassWithName(client) != nullptr;
+            if (registered) {
+                stack->setProperty("IOUserClientClass", "HakiosNetworkStackUserClient");
+            }
+            IOLog("PICASSO_NETWORK stack early client=%u registered=%u\n",
+                netstack, registered);
+            OSSafeReleaseNULL(client);
+        }
+    }
     OSSafeReleaseNULL(stack); OSSafeReleaseNULL(match);
 }
 
