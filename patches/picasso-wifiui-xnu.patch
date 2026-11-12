@@ -25,3 +25,16 @@
  	bool springboard = imgp->ip_ndp->ni_cnd.cn_namelen == sizeof(program) - 1 &&
  	    !strncmp(imgp->ip_ndp->ni_cnd.cn_nameptr, program, sizeof(program) - 1);
  	if (!springboard) {
+@@ -5851,6 +5869,12 @@ picasso_dyld_inject_target(proc_t p)
+ 	char library[200];
+ 	if (p != current_proc() ||
+ 	    !PE_parse_boot_argn("picasso_inject_sb", library, sizeof(library)) || library[0] != '/') return false;
+ 	if (!strcmp(p->p_name, "SpringBoard")) return true;
++	/* wifiui=1 also injects configd: without allowing AMFI's DYLD path
++	 * variables there, dyld prunes DYLD_INSERT_LIBRARIES and the library
++	 * constructor never runs.  Keep this gated on the same boot-arg. */
++	unsigned wifiui = 0;
++	if (!strcmp(p->p_name, "configd") &&
++	    PE_parse_boot_argn("wifiui", &wifiui, sizeof(wifiui)) && wifiui == 1) return true;
+ 	int applications = 0;
+ 	if (!PE_parse_boot_argn("picasso_inject_apps", &applications, sizeof(applications)) ||
