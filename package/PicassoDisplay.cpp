@@ -348,7 +348,11 @@ static void picasso_network_stack_start(void) {
         unsigned netstack = 0;
         PE_parse_boot_argn("netstack", &netstack, sizeof(netstack));
         if (netstack == 2) {
-            OSSymbol *client = OSSymbol::withCString("HakiosNetworkStackUserClient");
+            /* withCString() returns OSPtr<const OSSymbol> in this XNU; the
+             * const-qualified pointer + explicit release() is the exact form
+             * already used by say_class_presence() in hakios.wlan.cpp. */
+            const OSSymbol *client =
+                OSSymbol::withCString("HakiosNetworkStackUserClient");
             bool registered = client != nullptr &&
                 OSMetaClass::getMetaClassWithName(client) != nullptr;
             if (registered) {
@@ -356,7 +360,9 @@ static void picasso_network_stack_start(void) {
             }
             IOLog("PICASSO_NETWORK stack early client=%u registered=%u\n",
                 netstack, registered);
-            OSSafeReleaseNULL(client);
+            if (client != nullptr) {
+                client->release();
+            }
         }
     }
     OSSafeReleaseNULL(stack); OSSafeReleaseNULL(match);
