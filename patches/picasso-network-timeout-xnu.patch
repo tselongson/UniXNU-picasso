@@ -1,6 +1,6 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -9318,6 +9318,332 @@
+@@ -9318,6 +9318,389 @@
      return 0;
  }
  
@@ -135,6 +135,60 @@
 +static int picasso_ifnamer_read(const char *path, uint8_t *buffer,
 +    size_t capacity, uint64_t *size, vfs_context_t ctx);
 +
++/* Read-only: which configd plug-in bundles are actually visible on the
++ * root volume.  Apple pluginsCopy() discovers plug-ins by scanning
++ * /System/Library/SystemConfiguration/*.bundle; builtin entries in
++ * plugins_builtin[] only supply load pointers for bundles it found. */
++static void
++picasso_netsvc_bundles(vfs_context_t ctx)
++{
++    static const char dir[] = "/System/Library/SystemConfiguration";
++    vnode_t vp = NULLVP;
++    int error = vnode_lookup(dir, VNODE_LOOKUP_NOFOLLOW, &vp, ctx);
++    if (error) {
++        printf("PICASSO_NETWORK bundles_lookup error=%d\n", error);
++        return;
++    }
++    char *buffer = kalloc_data(4096, Z_WAITOK);
++    uio_t uio = buffer ? uio_create(1, 0, UIO_SYSSPACE, UIO_READ) : NULL;
++    int read_error = uio ? 0 : ENOMEM, eof = 0;
++    unsigned count = 0;
++    for (unsigned batch = 0; !read_error && !eof && batch < 4; ++batch) {
++        uio_reset(uio, uio_offset(uio), UIO_SYSSPACE, UIO_READ);
++        read_error = uio_addiov(uio, CAST_USER_ADDR_T(buffer), 4096);
++        int entries = 0;
++        if (!read_error) read_error = VNOP_READDIR(vp, uio, 0, &eof, &entries, ctx);
++        if (read_error) break;
++        size_t used = 4096 - uio_resid(uio), at = 0;
++        const size_t header = offsetof(struct dirent, d_name);
++        while (at < used) {
++            if (used - at <= header) break;
++            const struct dirent *entry = (const struct dirent *)(buffer + at);
++            if (entry->d_reclen <= header || entry->d_reclen > used - at ||
++                entry->d_namlen >= entry->d_reclen - header ||
++                entry->d_name[entry->d_namlen]) break;
++            int dot = entry->d_namlen == 1 && entry->d_name[0] == '.';
++            int dotdot = entry->d_namlen == 2 && !memcmp(entry->d_name, "..", 2);
++            if (!dot && !dotdot) {
++                char name[64];
++                size_t n = entry->d_namlen < sizeof(name) - 1 ?
++                    entry->d_namlen : sizeof(name) - 1;
++                memcpy(name, entry->d_name, n);
++                name[n] = 0;
++                ++count;
++                if (count <= 32)
++                    printf("PICASSO_NETWORK bundle name=%s\n", name);
++            }
++            at += entry->d_reclen;
++        }
++        if (!used && !eof) break;
++    }
++    printf("PICASSO_NETWORK bundles_scan error=%d count=%u\n", read_error, count);
++    if (uio) uio_free(uio);
++    if (buffer) kfree_data(buffer, 4096);
++    vnode_put(vp);
++}
++
 +/* Diagnose/populate the network service store before configd is exec'd.
 + * The same narrow write primitive as InterfaceNamer.bundle/Info.plist is
 + * used; no seed identity or existing file is modified when netsvc=0. */
@@ -151,12 +205,13 @@
 +	};
 +	static const char file[] =
 +	    "/private/var/preferences/SystemConfiguration/preferences.plist";
-+	uint8_t probe[512];
++	uint8_t probe[2048];
 +	uint64_t size = 0;
 +	int error, i;
 +
 +	if (done) return;
 +	done = 1;
++	picasso_netsvc_bundles(ctx);
 +	PE_parse_boot_argn("netsvc", &enabled, sizeof(enabled));
 +	error = picasso_ifnamer_read(file, probe, sizeof(probe), &size, ctx);
 +	printf("PICASSO_NETWORK netsvc=%u prefs_error=%d prefs_size=%llu\n",
@@ -177,9 +232,11 @@
 +	    sizeof(picasso_netsvc_plist) - 1, 0644, ctx);
 +	if (error == -1) error = 0;
 +	size = 0;
-+	(void) picasso_ifnamer_read(file, probe, sizeof(probe), &size, ctx);
-+	printf("PICASSO_NETWORK netsvc write error=%d bytes=%lu verify_size=%llu\n",
-+	    error, (unsigned long)(sizeof(picasso_netsvc_plist) - 1), size);
++	int verify_error = picasso_ifnamer_read(file, probe, sizeof(probe), &size, ctx);
++	printf("PICASSO_NETWORK netsvc write error=%d bytes=%lu "
++	    "verify_error=%d verify_size=%llu head=%02x%02x%02x%02x\n",
++	    error, (unsigned long)(sizeof(picasso_netsvc_plist) - 1),
++	    verify_error, size, probe[0], probe[1], probe[2], probe[3]);
 +}
 +
 +static int
@@ -343,7 +400,7 @@
  	if (data_root) vnode_put(data_root);
 --- a/iokit/Kernel/IOUserClient.cpp
 +++ b/iokit/Kernel/IOUserClient.cpp
-@@ -4447,6 +4447,29 @@
+@@ -4447,6 +4447,31 @@
  	return kIOReturnSuccess;
  }
  
@@ -352,10 +409,12 @@
 +{
 +    char name[32] = {};
 +    proc_name(proc_selfpid(), name, sizeof(name));
-+    if (strcmp(name, "configd") || service != IOService::getServiceRoot()) return;
++    if (strcmp(name, "configd")) return;
 +    static unsigned reports;
-+    if (__atomic_fetch_add(&reports, 1U, __ATOMIC_RELAXED) >= 2) return;
-+    IOLog("PICASSO_NETWORK configd root_busy=%u\n", busy);
++    if (__atomic_fetch_add(&reports, 1U, __ATOMIC_RELAXED) >= 8) return;
++    IOLog("PICASSO_NETWORK configd root_busy=%u class=%s is_root=%u\n",
++        busy, service->getMetaClass()->getClassName(),
++        service == IOService::getServiceRoot());
 +    if (!busy) return;
 +    IORegistryIterator *it = IORegistryIterator::iterateOver(service, gIOServicePlane, kIORegistryIterateRecursively);
 +    IORegistryEntry *entry;
@@ -381,22 +440,42 @@
  
  	return kIOReturnSuccess;
  }
-@@ -4644,6 +4668,8 @@
+@@ -4644,6 +4668,18 @@
  		picasso_service_end(trace, kIOReturnNotPermitted, kIOReturnNotPermitted, false);
  #endif
  /* PICASSO_SERVICE_TRACE_END */
 +		if (!strcmp(service->getMetaClass()->getClassName(), "IONetworkStack"))
 +			IOLog("PICASSO_NETWORK stack_open pid=%d service_mac_denied=1\n", proc_selfpid());
++		{
++			char caller[32] = {};
++			proc_name(proc_selfpid(), caller, sizeof(caller));
++			if (!strcmp(caller, "configd")) {
++				static unsigned cfg;
++				if (__atomic_fetch_add(&cfg, 1U, __ATOMIC_RELAXED) < 16)
++					IOLog("PICASSO_NETWORK configd_open where=denied class=%s pid=%d\n",
++					    service->getMetaClass()->getClassName(), proc_selfpid());
++			}
++		}
  		return kIOReturnNotPermitted;
  	}
  #endif
-@@ -4854,6 +4880,9 @@
+@@ -4854,6 +4880,19 @@
  
  	*connection = client;
  	*result = res;
 +	if (!strcmp(service->getMetaClass()->getClassName(), "IONetworkStack"))
 +		IOLog("PICASSO_NETWORK stack_open pid=%d type=%u error=%x result=%x client=%u\n",
 +		    proc_selfpid(), connect_type, err, res, client != nullptr);
++	{
++		char caller[32] = {};
++		proc_name(proc_selfpid(), caller, sizeof(caller));
++		if (!strcmp(caller, "configd")) {
++			static unsigned cfg;
++			if (__atomic_fetch_add(&cfg, 1U, __ATOMIC_RELAXED) < 16)
++				IOLog("PICASSO_NETWORK configd_open where=ok class=%s pid=%d error=%x\n",
++				    service->getMetaClass()->getClassName(), proc_selfpid(), err);
++		}
++	}
  
  /* PICASSO_SERVICE_TRACE_BEGIN */
  #if DEVELOPMENT || DEBUG
