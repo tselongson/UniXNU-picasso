@@ -85,6 +85,206 @@ static void wifiui_log(const char *text)
         __builtin_memcpy(&(slot), &address_, sizeof(address_));         \
     } while (0)
 
+// ---------------------------------------------------------------------------
+// Native SC network service (UniXNU-pong/userland/wifi-bootstrap.c:27-97).
+//
+// Publishing *TIMEOUT* unblocks SCNetworkInterfaceCopyAll(), but configd still
+// has no network service for en0, so IPMonitor never publishes
+// State:/Network/Global/DNS -- that is the remaining DNS gap (handoff v23 §5).
+// Pong's services108 records the user confirming system Wi-Fi works after
+// configure_interface() creates the service from the *real* IOKit interface
+// object with SCPreferencesCommitChanges/ApplyChanges.  Order matters: pong
+// calls it AFTER publish_namer_result(), because SCPreferencesApplyChanges
+// itself waits for InterfaceNamer.
+//
+// Board difference (not a guess): this kernel prelinks no IO80211Interface
+// (hakios.wlan.cpp:100), our interface service is IOEthernetInterface.  So the
+// pong class check is replaced by the two properties SystemConfiguration
+// itself uses: BSD name == en0 and SCNetworkInterfaceGetInterfaceType(), which
+// SCNetworkInterface.c:1790 derives from the IO80211Controller parent (our
+// controller stub is published at hakios.wlan.cpp:304).  No device dictionary
+// or enabled Wi-Fi UI state is manufactured.
+// ---------------------------------------------------------------------------
+static void wifiui_configure_service(void *sc, void *iokit)
+{
+    typedef const void *(*match_bsd_fn)(unsigned int, unsigned int, const char *);
+    typedef const void *(*match_class_fn)(const char *);
+    typedef unsigned int (*get_service_fn)(unsigned int, const void *);
+    typedef const void *(*registry_prop_fn)(unsigned int, const void *, const void *, unsigned int);
+    typedef int (*release_fn)(unsigned int);
+    typedef unsigned char (*conforms_fn)(unsigned int, const char *);
+    typedef const void *(*iface_create_fn)(unsigned int);
+    typedef const void *(*ptr1_fn)(const void *);
+    typedef const void *(*ptr2_fn)(const void *, const void *);
+    typedef const void *(*ptr3_fn)(const void *, const void *, const void *);
+    typedef unsigned char (*bool1_fn)(const void *);
+    typedef unsigned char (*bool2_fn)(const void *, unsigned char);
+    typedef unsigned char (*boolptr2_fn)(const void *, const void *);
+
+    char line[320];
+    match_bsd_fn match_bsd = NULL;
+    match_class_fn match_class = NULL;
+    get_service_fn get_service = NULL;
+    registry_prop_fn registry_prop = NULL;
+    release_fn release_service = NULL;
+    conforms_fn conforms = NULL;
+    iface_create_fn iface_create = NULL;
+    ptr1_fn iface_bsd = NULL, iface_type = NULL, services_copy = NULL,
+            service_iface = NULL, set_copy = NULL, set_create = NULL,
+            defaults = NULL, commit = NULL, apply = NULL;
+    ptr2_fn service_create = NULL;
+    ptr3_fn prefs_create = NULL;
+    bool1_fn unlock = NULL, set_current = NULL;
+    bool2_fn lock = NULL, enable = NULL;
+    boolptr2_fn set_add = NULL;
+
+    if (iokit == NULL) {
+        wifiui_log("PICASSO_WIFIUI service IOKit unavailable\n");
+        return;
+    }
+    WIFIUI_RESOLVE(match_bsd, iokit, "IOBSDNameMatching");
+    WIFIUI_RESOLVE(match_class, iokit, "IOServiceMatching");
+    WIFIUI_RESOLVE(get_service, iokit, "IOServiceGetMatchingService");
+    WIFIUI_RESOLVE(registry_prop, iokit, "IORegistryEntryCreateCFProperty");
+    WIFIUI_RESOLVE(release_service, iokit, "IOObjectRelease");
+    WIFIUI_RESOLVE(conforms, iokit, "IOObjectConformsTo");
+    WIFIUI_RESOLVE(iface_create, sc, "_SCNetworkInterfaceCreateWithIONetworkInterfaceObject");
+    WIFIUI_RESOLVE(iface_bsd, sc, "SCNetworkInterfaceGetBSDName");
+    WIFIUI_RESOLVE(iface_type, sc, "SCNetworkInterfaceGetInterfaceType");
+    WIFIUI_RESOLVE(prefs_create, sc, "SCPreferencesCreate");
+    WIFIUI_RESOLVE(lock, sc, "SCPreferencesLock");
+    WIFIUI_RESOLVE(unlock, sc, "SCPreferencesUnlock");
+    WIFIUI_RESOLVE(commit, sc, "SCPreferencesCommitChanges");
+    WIFIUI_RESOLVE(apply, sc, "SCPreferencesApplyChanges");
+    WIFIUI_RESOLVE(services_copy, sc, "SCNetworkServiceCopyAll");
+    WIFIUI_RESOLVE(service_iface, sc, "SCNetworkServiceGetInterface");
+    WIFIUI_RESOLVE(service_create, sc, "SCNetworkServiceCreate");
+    WIFIUI_RESOLVE(defaults, sc, "SCNetworkServiceEstablishDefaultConfiguration");
+    WIFIUI_RESOLVE(enable, sc, "SCNetworkServiceSetEnabled");
+    WIFIUI_RESOLVE(set_copy, sc, "SCNetworkSetCopyCurrent");
+    WIFIUI_RESOLVE(set_create, sc, "SCNetworkSetCreate");
+    WIFIUI_RESOLVE(set_current, sc, "SCNetworkSetSetCurrent");
+    WIFIUI_RESOLVE(set_add, sc, "SCNetworkSetAddService");
+    if (match_bsd == NULL || match_class == NULL || get_service == NULL ||
+        registry_prop == NULL || release_service == NULL || conforms == NULL ||
+        iface_create == NULL || iface_bsd == NULL || iface_type == NULL ||
+        prefs_create == NULL || lock == NULL || unlock == NULL ||
+        commit == NULL || apply == NULL || services_copy == NULL ||
+        service_iface == NULL || service_create == NULL || defaults == NULL ||
+        enable == NULL || set_copy == NULL || set_create == NULL ||
+        set_current == NULL || set_add == NULL) {
+        wifiui_log("PICASSO_WIFIUI service SC/IOKit symbols unresolved\n");
+        return;
+    }
+
+    // Locate the real IOKit object that carries BSD Name = en0.  Pong's
+    // IOBSDNameMatching first, then concrete interface classes as fallback.
+    unsigned int entry = 0;
+    const void *matching = match_bsd(0, 0, "en0");
+    if (matching != NULL) {
+        entry = get_service(0, matching);
+        CFRelease(matching);
+    }
+    if (entry == 0) {
+        static const char *const classes[] = {
+            "IO80211Interface", "IOEthernetInterface", "IONetworkInterface"
+        };
+        for (unsigned i = 0; i < sizeof(classes) / sizeof(classes[0]); ++i) {
+            const void *dict = match_class(classes[i]);
+            if (dict == NULL) continue;
+            unsigned int candidate = get_service(0, dict);
+            CFRelease(dict);
+            if (candidate == 0) continue;
+            const void *name = registry_prop(candidate, CFSTR("BSD Name"), NULL, 0);
+            unsigned valid = (name != NULL &&
+                              CFGetTypeID(name) == CFStringGetTypeID() &&
+                              CFEqual(name, CFSTR("en0"))) ? 1u : 0u;
+            if (name != NULL) CFRelease(name);
+            if (valid) { entry = candidate; break; }
+            (void)release_service(candidate);
+        }
+    }
+    if (entry == 0) {
+        wifiui_log("PICASSO_WIFIUI service registry en0 absent\n");
+        return;
+    }
+    (void)snprintf(line, sizeof(line),
+        "PICASSO_WIFIUI service entry=%u wifi_class=%u\n",
+        entry, (unsigned)conforms(entry, "IO80211Interface"));
+    wifiui_log(line);
+
+    const void *interface = iface_create(entry);
+    (void)release_service(entry);
+    if (interface == NULL) {
+        wifiui_log("PICASSO_WIFIUI service interface create failed\n");
+        return;
+    }
+    const void *bsd = iface_bsd(interface);
+    const void *type = iface_type(interface);
+    char typebuf[64] = "?";
+    if (type != NULL && CFGetTypeID(type) == CFStringGetTypeID())
+        (void)CFStringGetCString((CFStringRef)type, typebuf, sizeof(typebuf),
+                                 kCFStringEncodingUTF8);
+    unsigned named = (bsd != NULL && CFGetTypeID(bsd) == CFStringGetTypeID() &&
+                      CFEqual(bsd, CFSTR("en0"))) ? 1u : 0u;
+    (void)snprintf(line, sizeof(line),
+        "PICASSO_WIFIUI service en0_named=%u type=%s\n", named, typebuf);
+    wifiui_log(line);
+    if (!named) {
+        CFRelease(interface);
+        return;
+    }
+
+    const void *prefs = prefs_create(NULL, CFSTR("picasso native WLAN service"), NULL);
+    int result = 1;
+    if (prefs != NULL && lock(prefs, 0)) {
+        const void *services = services_copy(prefs);
+        unsigned found = 0;
+        if (services != NULL && CFGetTypeID(services) == CFArrayGetTypeID()) {
+            CFArrayRef list = (CFArrayRef)services;
+            for (CFIndex i = 0; i < CFArrayGetCount(list); ++i) {
+                const void *candidate = service_iface(CFArrayGetValueAtIndex(list, i));
+                const void *name = candidate != NULL ? iface_bsd(candidate) : NULL;
+                if (name != NULL && CFGetTypeID(name) == CFStringGetTypeID() &&
+                    CFEqual(name, CFSTR("en0"))) { found = 1; break; }
+            }
+        }
+        if (services != NULL) CFRelease(services);
+        if (found) {
+            result = 0;   // idempotent: a native en0 service already exists
+        } else {
+            const void *set = set_copy(prefs);
+            unsigned current = (set != NULL) ? 1u : 0u;
+            if (set == NULL) {
+                set = set_create(prefs);
+                current = (set != NULL && set_current(set)) ? 1u : 0u;
+            }
+            const void *service = current ? service_create(prefs, interface) : NULL;
+            if (service != NULL) {
+                unsigned d = defaults(service) ? 1u : 0u;
+                unsigned e = enable(service, 1) ? 1u : 0u;
+                unsigned a = set_add(set, service) ? 1u : 0u;
+                wifiui_log("PICASSO_WIFIUI service applying SCPreferences changes\n");
+                unsigned c = commit(prefs) ? 1u : 0u;
+                unsigned p = apply(prefs) ? 1u : 0u;
+                (void)snprintf(line, sizeof(line),
+                    "PICASSO_WIFIUI service defaults=%u enable=%u add=%u commit=%u apply=%u\n",
+                    d, e, a, c, p);
+                wifiui_log(line);
+                result = (d && e && a && c && p) ? 0 : 1;
+                CFRelease(service);
+            }
+            if (set != NULL) CFRelease(set);
+        }
+        (void)unlock(prefs);
+    }
+    if (prefs != NULL) CFRelease(prefs);
+    CFRelease(interface);
+    (void)snprintf(line, sizeof(line),
+        "PICASSO_WIFIUI service result=%d type=%s\n", result, typebuf);
+    wifiui_log(line);
+}
+
 static void wifiui_bootstrap(void)
 {
     static const char sc_path[] =
@@ -114,22 +314,32 @@ static void wifiui_bootstrap(void)
     }
 
     // A real bounded wait.  kIOMainPortDefault is MACH_PORT_NULL (0).
+    // Apple documents IOKitWaitQuiet for iOS 18.4+; this device is 20H392,
+    // so the symbol is normally absent and we take the real 5 s wait path.
+    // Only KERN_SUCCESS (0) and kIOReturnTimeout (0xe00002e6) are honest
+    // terminal outcomes (pong services107).  Any other error must NOT
+    // publish a marker: that would fabricate a completed IOKit handshake.
     int quiet_result = -1;
+    unsigned wait_truthful = 0;
     const char *marker = "*TIMEOUT*";
     if (wait_quiet != NULL) {
         mach_timespec_t deadline = { 5, 0 };
         quiet_result = wait_quiet(0, &deadline);
-        if (quiet_result == 0) marker = "*QUIET*";
+        if (quiet_result == 0) {
+            marker = "*QUIET*";
+            wait_truthful = 1;
+        } else if ((unsigned)quiet_result == 0xe00002e6u) {
+            wait_truthful = 1;   // kIOReturnTimeout, the native fallback
+        }
     } else {
-        // 20H392 may not export IOKitWaitQuiet (Apple documents it for
-        // iOS 18.4+).  Still perform a real bounded wait rather than
-        // publishing a terminal marker without waiting.
+        // No IOKitWaitQuiet: a real bounded wait still elapsed.
         sleep(5);
+        wait_truthful = 1;
     }
     (void)snprintf(line, sizeof(line),
-        "PICASSO_WIFIUI pid=%d euid=%u quiet_api=%s quiet_result=%d marker=%s\n",
+        "PICASSO_WIFIUI pid=%d euid=%u quiet_api=%s quiet_result=%d truthful=%u marker=%s\n",
         (int)getpid(), (unsigned)geteuid(), wait_quiet != NULL ? "yes" : "no",
-        quiet_result, marker);
+        quiet_result, wait_truthful, marker);
     wifiui_log(line);
 
     const void *store = store_create(NULL, CFSTR("picasso InterfaceNamer bootstrap"), NULL, NULL);
@@ -160,14 +370,14 @@ static void wifiui_bootstrap(void)
         if (CFDictionaryContainsKey(record, terminal[i])) already = 1;
 
     int published = -1;
-    if (!already) {
+    if (!already && wait_truthful) {
         CFStringRef chosen = quiet_result == 0 ? CFSTR("*QUIET*") : CFSTR("*TIMEOUT*");
         CFDictionarySetValue(record, chosen, kCFBooleanTrue);
         published = store_set(store, key, record) ? 1 : 0;
     }
     (void)snprintf(line, sizeof(line),
-        "PICASSO_WIFIUI key=Plugin:InterfaceNamer already=%u publish=%d\n",
-        already, published);
+        "PICASSO_WIFIUI key=Plugin:InterfaceNamer already=%u truthful=%u publish=%d\n",
+        already, wait_truthful, published);
     wifiui_log(line);
 
     // The interface arrival notification is what wifid consumes before it
@@ -205,6 +415,15 @@ static void wifiui_bootstrap(void)
     CFRelease(record);
     if (previous != NULL) CFRelease(previous);
     CFRelease(store);
+
+    // pong services107/108: only after the native terminal marker exists may
+    // we build the service, because SCPreferencesApplyChanges waits for
+    // InterfaceNamer.  This runs on our detached pthread, never configd's
+    // main run loop, so a stalled ApplyChanges cannot stall configd itself.
+    if (already || published == 1)
+        wifiui_configure_service(sc, iokit);
+    else
+        wifiui_log("PICASSO_WIFIUI service skipped (no honest terminal marker)\n");
 }
 
 static void *wifiui_thread(void *unused)
@@ -219,7 +438,9 @@ static void *wifiui_thread(void *unused)
         wifiui_log("PICASSO_WIFIUI en0 absent after 200 s, no marker\n");
         return NULL;
     }
-    @autoreleasepool { wifiui_bootstrap(); }
+    // Pure C on purpose: configd is a non-UI root daemon and must not touch
+    // the Objective-C/UIKit runtime on this path.
+    wifiui_bootstrap();
     return NULL;
 }
 
