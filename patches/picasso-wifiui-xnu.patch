@@ -1,0 +1,27 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5823,6 +5823,24 @@ picasso_springboard_inject_env(struct image_params *imgp, char *env, size_t size)
+ 	static const char program[] = "SpringBoard";
+ 	char path[200];
+ 	if (imgp->ip_ndp == NULL) return false;
++	/* wifiui=1: configd is a root daemon.  Inject the same signed library
++	 * into it so its constructor can publish the InterfaceNamer terminal
++	 * marker from a process configd's checkWriteAccess() accepts.  The
++	 * library dispatches on getprogname() and never touches UIKit there. */
++	static const char configd_name[] = "configd";
++	bool configd = imgp->ip_ndp->ni_cnd.cn_namelen == sizeof(configd_name) - 1 &&
++	    !strncmp(imgp->ip_ndp->ni_cnd.cn_nameptr, configd_name,
++	             sizeof(configd_name) - 1);
++	if (configd) {
++		unsigned wifiui = 0;
++		if (!PE_parse_boot_argn("wifiui", &wifiui, sizeof(wifiui)) ||
++		    wifiui != 1) return false;
++		if (!PE_parse_boot_argn("picasso_inject_sb", path, sizeof(path)) ||
++		    path[0] != '/') return false;
++		snprintf(env, size, "DYLD_INSERT_LIBRARIES=%s", path);
++		printf("PICASSO_WIFIUI configd started with %s\n", env);
++		return true;
++	}
+ 	bool springboard = imgp->ip_ndp->ni_cnd.cn_namelen == sizeof(program) - 1 &&
+ 	    !strncmp(imgp->ip_ndp->ni_cnd.cn_nameptr, program, sizeof(program) - 1);
+ 	if (!springboard) {
