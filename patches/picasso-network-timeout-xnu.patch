@@ -1,6 +1,6 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -9318,6 +9318,223 @@
+@@ -9318,6 +9318,328 @@
      return 0;
  }
  
@@ -73,6 +73,110 @@
 +    "\t<integer>5</integer>\n"
 +    "</dict>\n"
 +    "</plist>\n";
++/* One AirPort service on en0 with DHCP. Written before configd starts.
++ * Standard SCPreferences schema: NetworkServices + Sets/CurrentSet.
++ */
++static const char picasso_netsvc_plist[] =
++	"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
++	"<plist version=\"1.0\">\n"
++	"<dict>\n"
++	"	<key>CurrentSet</key>\n"
++	"	<string>/Sets/0</string>\n"
++	"	<key>NetworkServices</key>\n"
++	"	<dict>\n"
++	"		<key>E4A7B1C2-3D4E-5F60-7182-93A4B5C6D7E8</key>\n"
++	"		<dict>\n"
++	"			<key>Interface</key>\n"
++	"			<dict>\n"
++	"				<key>DeviceName</key><string>en0</string>\n"
++	"				<key>Hardware</key><string>AirPort</string>\n"
++	"				<key>Type</key><string>AirPort</string>\n"
++	"				<key>UserDefinedName</key><string>Wi-Fi</string>\n"
++	"			</dict>\n"
++	"			<key>IPv4</key>\n"
++	"			<dict><key>ConfigMethod</key><string>DHCP</string></dict>\n"
++	"			<key>IPv6</key>\n"
++	"			<dict><key>ConfigMethod</key><string>Automatic</string></dict>\n"
++	"			<key>DNS</key><dict/>\n"
++	"			<key>Proxies</key>\n"
++	"			<dict><key>FTPPassive</key><integer>1</integer><key>ExceptionsList</key><array/></dict>\n"
++	"		</dict>\n"
++	"	</dict>\n"
++	"	<key>Sets</key>\n"
++	"	<dict>\n"
++	"		<key>0</key>\n"
++	"		<dict>\n"
++	"			<key>Network</key>\n"
++	"			<dict>\n"
++	"				<key>Global</key>\n"
++	"				<dict><key>IPv4</key><dict><key>ServiceOrder</key><array><string>E4A7B1C2-3D4E-5F60-7182-93A4B5C6D7E8</string></array></dict></dict>\n"
++	"				<key>Service</key>\n"
++	"				<dict>\n"
++	"					<key>E4A7B1C2-3D4E-5F60-7182-93A4B5C6D7E8</key>\n"
++	"					<dict>\n"
++	"						<key>Interface</key>\n"
++	"						<dict><key>DeviceName</key><string>en0</string><key>Hardware</key><string>AirPort</string><key>Type</key><string>AirPort</string></dict>\n"
++	"						<key>__LINK__</key><string>/NetworkServices/E4A7B1C2-3D4E-5F60-7182-93A4B5C6D7E8</string>\n"
++	"					</dict>\n"
++	"				</dict>\n"
++	"			</dict>\n"
++	"			<key>UserDefinedName</key><string>Automatic</string>\n"
++	"		</dict>\n"
++	"	</dict>\n"
++	"	<key>System</key>\n"
++	"	<dict>\n"
++	"		<key>Network</key><dict><key>HostNames</key><dict><key>LocalHostName</key><string>localhost</string></dict></dict>\n"
++	"		<key>System</key><dict><key>ComputerName</key><string>iPhone</string><key>ComputerNameEncoding</key><integer>0</integer></dict>\n"
++	"	</dict>\n"
++	"</dict>\n"
++	"</plist>\n";
++
++/* Diagnose/populate the network service store before configd is exec'd.
++ * The same narrow write primitive as InterfaceNamer.bundle/Info.plist is
++ * used; no seed identity or existing file is modified when netsvc=0. */
++static void
++picasso_netsvc_prepare(proc_t p, user_addr_t scratch, vfs_context_t ctx)
++{
++	static int done;
++	unsigned enabled = 0;
++	/* PE_parse_boot_argn is already declared and used by kern_exec.c
++	 * (launchdsuffix, exe_boothash_salt); do not redeclare it here. */
++	static const char * const dirs[] = {
++		"/private/var/preferences",
++		"/private/var/preferences/SystemConfiguration",
++	};
++	static const char file[] =
++	    "/private/var/preferences/SystemConfiguration/preferences.plist";
++	uint8_t probe[512];
++	uint64_t size = 0;
++	int error, i;
++
++	if (done) return;
++	done = 1;
++	PE_parse_boot_argn("netsvc", &enabled, sizeof(enabled));
++	error = picasso_ifnamer_read(file, probe, sizeof(probe), &size, ctx);
++	printf("PICASSO_NETWORK netsvc=%u prefs_error=%d prefs_size=%llu\n",
++	    enabled, error, size);
++	if (enabled != 1) return;
++	for (i = 0; i < 2; i++) {
++		struct mkdir_args args = { .path = scratch, .mode = 0755 };
++		int32_t made = 0;
++		error = copyout(dirs[i], scratch, strlen(dirs[i]) + 1);
++		if (!error) error = mkdir(p, &args, &made);
++		if (error == EEXIST) error = 0;
++		if (error) {
++			printf("PICASSO_NETWORK netsvc dir error=%d at %s\n", error, dirs[i]);
++			return;
++		}
++	}
++	error = native_gpu_addon_write(file, (const uint8_t *)picasso_netsvc_plist,
++	    sizeof(picasso_netsvc_plist) - 1, 0644, ctx);
++	if (error == -1) error = 0;
++	size = 0;
++	(void) picasso_ifnamer_read(file, probe, sizeof(probe), &size, ctx);
++	printf("PICASSO_NETWORK netsvc write error=%d bytes=%lu verify_size=%llu\n",
++	    error, (unsigned long)(sizeof(picasso_netsvc_plist) - 1), size);
++}
 +
 +static int
 +picasso_ifnamer_directory(vnode_t vp, vfs_context_t ctx)
@@ -218,6 +322,7 @@
 +        if (!error && (size != sizeof(picasso_ifnamer_plist) - 1 ||
 +            memcmp(buffer, picasso_ifnamer_plist, (size_t)size))) error = EIO;
 +    } else error = status ? status : EIO;
++    picasso_netsvc_prepare(p, scratch, ctx);
 +    printf("PICASSO_NETWORK config stage=%d error=%d stack_s=5 quiet_s=5\n", stage, error);
 +}
 +
