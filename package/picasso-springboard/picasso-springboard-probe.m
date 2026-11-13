@@ -245,7 +245,16 @@ static void wifiui_configure_service(void *sc, void *iokit)
 
     const void *prefs = prefs_create(NULL, CFSTR("picasso native WLAN service"), NULL);
     int result = 1;
-    unsigned locked = (prefs != NULL) ? (lock(prefs, 0) ? 1u : 0u) : 0u;
+    // SCPreferencesLock(prefs, wait).  Apple SCPLock.c:523 opens
+    // "<prefs>-lock" with O_EXLOCK|O_NONBLOCK when wait==FALSE, so a lock
+    // held by configd itself returns EWOULDBLOCK / kSCStatusPrefsBusy
+    // immediately.  pong runs in a separate process and can use FALSE; this
+    // library is injected INTO configd, so the daemon already holds the
+    // file lock.  With wait==TRUE Apple uses blocking O_EXLOCK, which waits
+    // for configd's main run loop to release it.  We are on a detached
+    // pthread (never configd's main run loop), so blocking cannot deadlock.
+    // chain-606-lite2 measured: service prefs=1 locked=0 (the FALSE case).
+    unsigned locked = (prefs != NULL) ? (lock(prefs, 1) ? 1u : 0u) : 0u;
     (void)snprintf(line, sizeof(line),
         "PICASSO_WIFIUI service prefs=%d locked=%u\n", prefs != NULL, locked);
     wifiui_log(line);
