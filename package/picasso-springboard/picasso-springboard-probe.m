@@ -71,6 +71,14 @@ typedef const void *(*wifiui_store_copy_fn)(const void *, const void *);
 typedef unsigned char (*wifiui_store_set_fn)(const void *, const void *, const void *);
 typedef int (*wifiui_wait_quiet_fn)(unsigned int, mach_timespec_t *);
 
+/* Mach / IOKit terminal outcomes (osfmk/mach/kern_return.h,
+ * iokit/IOKit/IOReturn.h).  kIOReturnTimeout == iokit_common_err(0x2d6);
+ * the constant used before this fix was off by 0x10 and is removed. */
+#define WIFIUI_KERN_SUCCESS      0
+#define WIFIUI_KERN_DENIED       53
+#define WIFIUI_IORETURN_TIMEOUT  0xe00002d6u
+#define WIFIUI_WAIT_SECONDS      5
+
 static void wifiui_log(const char *text)
 {
     int fd = open("/dev/console", O_WRONLY);
@@ -313,29 +321,42 @@ static void wifiui_bootstrap(void)
         return;
     }
 
-    // A real bounded wait.  kIOMainPortDefault is MACH_PORT_NULL (0).
-    // Apple documents IOKitWaitQuiet for iOS 18.4+; this device is 20H392,
-    // so the symbol is normally absent and we take the real 5 s wait path.
-    // Only KERN_SUCCESS (0) and kIOReturnTimeout (0xe00002e6) are honest
-    // terminal outcomes (pong services107).  Any other error must NOT
-    // publish a marker: that would fabricate a completed IOKit handshake.
+    // A real bounded wait before publishing any terminal marker.
+    // kIOMainPortDefault is MACH_PORT_NULL (0), which is what Apple's
+    // IOKitWaitQuiet() expects (it resolves the default main port itself).
+    //
+    // Honesty rule (UniXNU-pong services107): claim *QUIET* only when IOKit
+    // actually reported success.  Every other outcome publishes *TIMEOUT*,
+    // which means "we stopped waiting" -- it does NOT assert that IOKit
+    // quiesced.  SCNetworkInterface.c:4946-4950 accepts *TIMEOUT* on iOS,
+    // and ifnamer.c:4312 timerCallback() publishes the same marker natively.
+    //
+    // On iOS 16 (20H392) IOKitWaitQuiet exists but is gated and returns
+    // KERN_DENIED (53) from io_registry_entry_from_path(); Apple only
+    // documents the API as public from iOS 18.4.  That is an "API
+    // unavailable" outcome, not a busy IOKit, and is handled exactly like
+    // the missing-symbol case: a real bounded sleep, then *TIMEOUT*.
+    // No device-specific error value is special-cased in this control flow.
     int quiet_result = -1;
-    unsigned wait_truthful = 0;
+    unsigned wait_truthful = 1;
     const char *marker = "*TIMEOUT*";
+    unsigned waited = 0;
     if (wait_quiet != NULL) {
-        mach_timespec_t deadline = { 5, 0 };
+        mach_timespec_t deadline = { WIFIUI_WAIT_SECONDS, 0 };
         quiet_result = wait_quiet(0, &deadline);
-        if (quiet_result == 0) {
+        if (quiet_result == WIFIUI_KERN_SUCCESS) {
             marker = "*QUIET*";
-            wait_truthful = 1;
-        } else if ((unsigned)quiet_result == 0xe00002e6u) {
-            wait_truthful = 1;   // kIOReturnTimeout, the native fallback
+        } else if ((unsigned)quiet_result == WIFIUI_IORETURN_TIMEOUT) {
+            waited = 1;          // the native call really waited 5 s
         }
-    } else {
-        // No IOKitWaitQuiet: a real bounded wait still elapsed.
-        sleep(5);
-        wait_truthful = 1;
+        // KERN_DENIED / KERN_NOT_SUPPORTED / MIG or entitlement failures all
+        // mean "this API cannot tell us whether IOKit is quiet".  Do the
+        // bounded wait ourselves rather than treating it as a fatal error.
     }
+    if (!waited && quiet_result != WIFIUI_KERN_SUCCESS)
+        sleep(WIFIUI_WAIT_SECONDS);
+    if (quiet_result == WIFIUI_KERN_DENIED)
+        wifiui_log("PICASSO_WIFIUI quiet KERN_DENIED: API gated on this OS, bounded wait elapsed\n");
     (void)snprintf(line, sizeof(line),
         "PICASSO_WIFIUI pid=%d euid=%u quiet_api=%s quiet_result=%d truthful=%u marker=%s\n",
         (int)getpid(), (unsigned)geteuid(), wait_quiet != NULL ? "yes" : "no",
@@ -416,14 +437,19 @@ static void wifiui_bootstrap(void)
     if (previous != NULL) CFRelease(previous);
     CFRelease(store);
 
-    // pong services107/108: only after the native terminal marker exists may
-    // we build the service, because SCPreferencesApplyChanges waits for
-    // InterfaceNamer.  This runs on our detached pthread, never configd's
-    // main run loop, so a stalled ApplyChanges cannot stall configd itself.
-    if (already || published == 1)
-        wifiui_configure_service(sc, iokit);
-    else
-        wifiui_log("PICASSO_WIFIUI service skipped (no honest terminal marker)\n");
+    // UniXNU-pong/userland/wifi-bootstrap.c --configure-only runs
+    // configure_interface() unconditionally, even when publish_namer_result()
+    // failed.  Truthfulness constrains only whether *QUIET* may be claimed;
+    // it must not prevent the native en0 service from being created.  The
+    // service is built from the REAL IORegistry en0 object (no fabricated
+    // device dictionary), and wifiui_configure_service() is idempotent.
+    // This runs on our detached pthread, never configd's main run loop, so a
+    // stalled SCPreferencesApplyChanges cannot stall configd itself.
+    (void)snprintf(line, sizeof(line),
+        "PICASSO_WIFIUI service begin already=%u published=%d\n",
+        already, published);
+    wifiui_log(line);
+    wifiui_configure_service(sc, iokit);
 }
 
 static void *wifiui_thread(void *unused)
