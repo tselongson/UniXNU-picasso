@@ -4811,7 +4811,7 @@ wcn3990_hif_poll(void)
 		HIF_LOG("heartbeat polls=%u stage=%d state=%d rx=%u beacons=%u "
 		    "desc0.nbytes=%u drri=%x htt=%u httidx=%u mgmt=%u mgmtev=%u "
 		    "join=%d ind=%u ord=%u msdu=%u eapol=%u bad=%u/%u "
-		    "ring=%u/%u",
+		    "ring=%u/%u srri4=%u wr4=%u",
 		    g_polls, g_stage, (int)g_state, g_rx_packets, g_beacons,
 		    (unsigned)s_dst2[0].nbytes,
 		    (g_bases_programmed && g_dma) ? ((s_rri[2] >> 16) & 0xffffu) : 0,
@@ -4819,7 +4819,14 @@ wcn3990_hif_poll(void)
 		    g_mgmt_events, g_join_state,
 		    g_wr_rx_ind, g_wr_rx_in_ord, g_wr_rx_frames, g_wr_rx_eapol,
 		    g_wr_rx_bad, g_wr_rx_undone,
-		    g_htt_ring_done_cnt, g_htt_ring_seen);
+		    g_htt_ring_done_cnt, g_htt_ring_seen,
+		    /* CE4 source read index is the input to the txguard ring
+		     * check.  Printing it every heartbeat makes a stalled RRI
+		     * (which would otherwise wedge TX with repeated -2) visible
+		     * without any device interaction. */
+		    (g_bases_programmed && g_dma) ?
+		        ((*(volatile uint32_t *)&g_dma->rri[4]) & 0xffffu) : 0,
+		    g_wr4);
 		/* join=<n>: a compact status line while a join is running. */
 		if (g_join && g_join_state != HIF_JOIN_IDLE) {
 			HIF_LOG("JOIN: state=%d tries=%u bss=%u mgmt "
