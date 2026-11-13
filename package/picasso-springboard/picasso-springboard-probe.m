@@ -78,6 +78,11 @@ typedef int (*wifiui_wait_quiet_fn)(unsigned int, mach_timespec_t *);
 #define WIFIUI_KERN_DENIED       53
 #define WIFIUI_IORETURN_TIMEOUT  0xe00002d6u
 #define WIFIUI_WAIT_SECONDS      5
+/* The in-kernel DHCP client writes /private/var/run/resolv.conf only after
+ * the WCN3990 association completes (~t+168 s on this board), while configd
+ * starts much earlier.  This detached pthread must bound-wait instead of
+ * guessing the timing; it never blocks configd's main run loop. */
+#define WIFIUI_DNS_WAIT_SECONDS  240
 
 static void wifiui_log(const char *text)
 {
@@ -312,21 +317,43 @@ static void wifiui_configure_service(void *sc, void *iokit)
 }
 
 // ---------------------------------------------------------------------------
-// Publish DNS through the native dynamic-store key that configd's IPMonitor
-// itself maintains: State:/Network/Global/DNS -> { ServerAddresses: [ ... ] }.
+// Publish DNS through IPMonitor's *INPUT* keys, not its output key.
 //
-// The addresses are NOT invented: the in-kernel DHCP client parses RFC 2132
-// option 6 and writes them, in Apple's own resolver-file syntax, to
-// /private/var/run/resolv.conf (see hakios.dhcp.c dhcp_publish_dns()).  We
-// read that file back so the value stays correct for whatever network the
-// device joins.  Apple's kSCPropNetDNSServerAddresses == "ServerAddresses"
-// (SCSchemaDefinitions.c:126) and ip_plugin.c:6262 publishes exactly this
-// key; dns_configuration_set() consumes it.
+// Correction to c6725d1 (Apple OSS configd, verified locally and against the
+// upstream repository): State:/Network/Global/DNS is WRITTEN BY IPMonitor
+// (ip_plugin.c:6245/6262 update_dns_global_resolver -> keyChangeListSetValue),
+// and ip_plugin_init() even removes it at startup (:9103).  IPMonitor's
+// notification keys/patterns (ip_plugin_copy_keys/patterns, :8953-9004) cover
+// Setup:/Network/Global/IPv4 and per-service State:/Setup:/Network/Service/
+// <serviceID>/<entity> -- including kSCEntNetDNS (entityTypeNames[2], :572).
+// A third-party write to the GLOBAL key therefore triggers NO recomputation:
+// dns_configuration_copy() (dnsinfo_copy.c) is an XPC client of
+// dnsinfo_server, fed only by dns_configuration_set() ->
+// _dns_configuration_store() (dns-configuration.c:1758).
+//
+// The supported chain is:
+//   State:/Network/Service/<id>/DNS change
+//     -> parseNetworkServiceString() -> get_dns_changes()
+//     -> S_service_state_dict -> update_dnsinfo() (:8673)
+//     -> dns_configuration_set() -> _dns_configuration_store() -> resolver.
+//
+// The DNS dictionary MUST contain SupplementalMatchDomains: add_supplemental()
+// (dns-configuration.c:270-276) discards any DNS entity without it; the empty
+// string "" is Apple's "match all queries / no domain name" entry (:311-316).
+// ServerAddresses alone is silently dropped, which is why writing only the
+// Global/DNS key could never reach mDNSResponder.
+//
+// Addresses are NOT invented: the in-kernel DHCP client parses RFC 2132
+// option 6 and writes them to /private/var/run/resolv.conf
+// (hakios.dhcp.c dhcp_publish_dns()).  We bound-wait for that file.
+// kSCPropNetDNSServerAddresses == "ServerAddresses"
+// (SCSchemaDefinitions.c:126); kSCPropNetDNSSupplementalMatchDomains ==
+// "SupplementalMatchDomains" (:130).
 //
 // This path needs NO SCPreferences lock.  On this board configd holds
 // preferences.plist-lock on its own main run loop, so building a native
 // service from inside the injected daemon cannot obtain it (chain-606-lite2:
-// "service prefs=1 locked=0").  Writing the dynamic store is already proven
+// "service prefs=1 locked=0").  SCDynamicStoreSetValue is already proven
 // on device by publish=1 and arrival_publish=1 above.
 // ---------------------------------------------------------------------------
 static void wifiui_publish_dns(const void *store, wifiui_store_set_fn store_set)
@@ -336,15 +363,27 @@ static void wifiui_publish_dns(const void *store, wifiui_store_set_fn store_set)
     char line[320];
     CFMutableArrayRef servers;
     CFMutableDictionaryRef dns;
-    int fd, n, count = 0;
+    int fd = -1, n, count = 0, i;
+    unsigned waited = 0;
     char *p, *end;
 
     if (store == NULL || store_set == NULL) return;
-    fd = open(resolver_path, O_RDONLY);
+    /* Bounded wait: configd starts long before the radio associates and the
+     * kernel DHCP client writes resolv.conf (t+168 s).  This is the detached
+     * pthread, so sleeping here never blocks configd's main run loop. */
+    for (; waited < WIFIUI_DNS_WAIT_SECONDS && fd < 0; ++waited) {
+        fd = open(resolver_path, O_RDONLY);
+        if (fd < 0) sleep(1);
+    }
     if (fd < 0) {
-        wifiui_log("PICASSO_WIFIUI dns resolver file absent\n");
+        (void)snprintf(line, sizeof(line),
+            "PICASSO_WIFIUI dns resolver file absent after %us\n", waited);
+        wifiui_log(line);
         return;
     }
+    (void)snprintf(line, sizeof(line),
+        "PICASSO_WIFIUI dns wait=%us\n", waited);
+    wifiui_log(line);
     n = (int)read(fd, text, sizeof(text) - 1);
     close(fd);
     if (n <= 0) {
@@ -398,11 +437,44 @@ static void wifiui_publish_dns(const void *store, wifiui_store_set_fn store_set)
     }
     CFDictionarySetValue(dns, CFSTR("ServerAddresses"), servers);
     CFRelease(servers);
+    /* add_supplemental() (dns-configuration.c:270-276) returns immediately
+     * unless SupplementalMatchDomains is present.  The empty string is
+     * Apple's "match all queries" entry (:311-316 removes DomainName), which
+     * turns this into a real default resolver rather than a domain-scoped
+     * one.  ServerAddresses alone was silently discarded. */
+    {
+        CFMutableArrayRef matches = CFArrayCreateMutable(NULL, 0,
+                                                        &kCFTypeArrayCallBacks);
+        if (matches != NULL) {
+            CFArrayAppendValue(matches, CFSTR(""));
+            CFDictionarySetValue(dns, CFSTR("SupplementalMatchDomains"),
+                                 matches);
+            CFRelease(matches);
+        }
+    }
 
-    int ok = store_set(store, CFSTR("State:/Network/Global/DNS"), dns) ? 1 : 0;
-    (void)snprintf(line, sizeof(line),
-        "PICASSO_WIFIUI dns publish=%d key=State:/Network/Global/DNS\n", ok);
-    wifiui_log(line);
+    /* IPMonitor watches per-service Setup:/ and State:/ entity keys; write
+     * both so get_dns_changes() sees a complete service, then the Global
+     * state key as a status for other clients (it is IPMonitor's OUTPUT,
+     * never its input). */
+    static const char *const dns_keys[] = {
+        "Setup:/Network/Service/picasso-wifi/DNS",
+        "State:/Network/Service/picasso-wifi/DNS",
+        "State:/Network/Global/DNS",
+    };
+    for (i = 0; i < 3; i++) {
+        CFStringRef key = CFStringCreateWithCString(NULL, dns_keys[i],
+                                                   kCFStringEncodingUTF8);
+        int ok = 0;
+
+        if (key != NULL) {
+            ok = store_set(store, key, dns) ? 1 : 0;
+            CFRelease(key);
+        }
+        (void)snprintf(line, sizeof(line),
+            "PICASSO_WIFIUI dns set=%d key=%s\n", ok, dns_keys[i]);
+        wifiui_log(line);
+    }
     CFRelease(dns);
 }
 
@@ -547,14 +619,11 @@ static void wifiui_bootstrap(void)
     }
     if (arrival_old != NULL) CFRelease(arrival_old);
 
-    // Native DNS publication needs no SCPreferences lock.  Do it while the
-    // SCDynamicStore session is still open, after the kernel DHCP client has
-    // written resolv.conf (HIF + DHCP complete around t+168 s).
-    wifiui_publish_dns(store, store_set);
-
     CFRelease(record);
     if (previous != NULL) CFRelease(previous);
-    CFRelease(store);
+    // Keep the SCDynamicStore session open: DNS publication is deliberately
+    // the LAST step (see below).  Its bounded wait must not delay the
+    // *TIMEOUT* marker / service checkpoints already verified on device.
 
     // UniXNU-pong/userland/wifi-bootstrap.c --configure-only runs
     // configure_interface() unconditionally, even when publish_namer_result()
@@ -569,6 +638,12 @@ static void wifiui_bootstrap(void)
         already, published);
     wifiui_log(line);
     wifiui_configure_service(sc, iokit);
+
+    // Native DNS publication needs no SCPreferences lock.  Run it LAST while
+    // the session is still open, after the in-kernel DHCP client has written
+    // resolv.conf.  The bounded wait runs on this detached pthread only.
+    wifiui_publish_dns(store, store_set);
+    CFRelease(store);
 }
 
 static void *wifiui_thread(void *unused)
