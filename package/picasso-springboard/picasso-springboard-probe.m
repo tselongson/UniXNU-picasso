@@ -83,6 +83,12 @@ typedef int (*wifiui_wait_quiet_fn)(unsigned int, mach_timespec_t *);
  * starts much earlier.  This detached pthread must bound-wait instead of
  * guessing the timing; it never blocks configd's main run loop. */
 #define WIFIUI_DNS_WAIT_SECONDS  240
+/* chain-607 c1 measured 6 configd restarts, each immediately after
+ * "service begin" with EXC_CORPSE for configd's own pid.  v26 §4.8 already
+ * concluded that creating an SCPreferences service from INSIDE configd is
+ * structurally impossible (configd holds preferences.plist-lock on its own
+ * main run loop).  Keep the reference for future work but never call it. */
+#define WIFIUI_ALLOW_INTERNAL_SERVICE 0
 
 static void wifiui_log(const char *text)
 {
@@ -625,24 +631,22 @@ static void wifiui_bootstrap(void)
     // the LAST step (see below).  Its bounded wait must not delay the
     // *TIMEOUT* marker / service checkpoints already verified on device.
 
-    // UniXNU-pong/userland/wifi-bootstrap.c --configure-only runs
-    // configure_interface() unconditionally, even when publish_namer_result()
-    // failed.  Truthfulness constrains only whether *QUIET* may be claimed;
-    // it must not prevent the native en0 service from being created.  The
-    // service is built from the REAL IORegistry en0 object (no fabricated
-    // device dictionary), and wifiui_configure_service() is idempotent.
-    // This runs on our detached pthread, never configd's main run loop, so a
-    // stalled SCPreferencesApplyChanges cannot stall configd itself.
     (void)snprintf(line, sizeof(line),
         "PICASSO_WIFIUI service begin already=%u published=%d\n",
         already, published);
     wifiui_log(line);
-    wifiui_configure_service(sc, iokit);
-
-    // Native DNS publication needs no SCPreferences lock.  Run it LAST while
-    // the session is still open, after the in-kernel DHCP client has written
-    // resolv.conf.  The bounded wait runs on this detached pthread only.
-    wifiui_publish_dns(store, store_set);
+    /* chain-607 c1: every "service begin" was followed by EXC_CORPSE for
+     * configd's own pid and a launchd restart (6 times in 400 s).  Because
+     * DNS publication used to sit AFTER this call, it never ran once
+     * (dns wait=/dns servers=/dns set= all zero).  v26 §4.8 is the
+     * structural reason: configd holds preferences.plist-lock itself.
+     * Do not call it from inside configd; DNS now runs on its OWN detached
+     * pthread (wifiui_dns_thread) so nothing here can prevent it. */
+    if (WIFIUI_ALLOW_INTERNAL_SERVICE) {
+        wifiui_configure_service(sc, iokit);
+    } else {
+        wifiui_log("PICASSO_WIFIUI service disabled (configd-internal prefs lock, chain-607)\n");
+    }
     CFRelease(store);
 }
 
@@ -661,6 +665,43 @@ static void *wifiui_thread(void *unused)
     // Pure C on purpose: configd is a non-UI root daemon and must not touch
     // the Objective-C/UIKit runtime on this path.
     wifiui_bootstrap();
+    return NULL;
+}
+
+/* DNS publication gets its OWN detached pthread with its OWN dynamic-store
+ * session.  chain-607 c1 proved that anything placed after
+ * wifiui_configure_service() inside wifiui_bootstrap() can be skipped
+ * entirely (6 configd restarts).  This thread starts at injection time,
+ * independently waits for the kernel DHCP resolver file, and publishes to
+ * IPMonitor's per-service input keys. */
+static void *wifiui_dns_thread(void *unused)
+{
+    static const char sc_path[] =
+        "/System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration";
+    wifiui_store_create_fn store_create = NULL;
+    wifiui_store_set_fn store_set = NULL;
+    const void *store;
+    void *sc;
+
+    (void)unused;
+    sc = dlopen(sc_path, RTLD_LAZY | RTLD_LOCAL);
+    if (sc == NULL) {
+        wifiui_log("PICASSO_WIFIUI dns SC unavailable\n");
+        return NULL;
+    }
+    WIFIUI_RESOLVE(store_create, sc, "SCDynamicStoreCreate");
+    WIFIUI_RESOLVE(store_set, sc, "SCDynamicStoreSetValue");
+    if (store_create == NULL || store_set == NULL) {
+        wifiui_log("PICASSO_WIFIUI dns SC symbols unresolved\n");
+        return NULL;
+    }
+    store = store_create(NULL, CFSTR("picasso DNS publisher"), NULL, NULL);
+    if (store == NULL) {
+        wifiui_log("PICASSO_WIFIUI dns store session unavailable\n");
+        return NULL;
+    }
+    wifiui_publish_dns(store, store_set);
+    CFRelease(store);
     return NULL;
 }
 
@@ -697,10 +738,14 @@ static void picasso_springboard_probe(void)
     // on a detached thread, and never touch UIKit/objc in that process.
     const char *program = getprogname();
     if (program != NULL && !strcmp(program, "configd")) {
+        pthread_t worker, dns_worker;
+
         wifiui_log("PICASSO_WIFIUI loaded in configd\n");
-        pthread_t worker;
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
+        /* Independent of the bootstrap path on purpose (chain-607). */
+        if (pthread_create(&dns_worker, NULL, wifiui_dns_thread, NULL) == 0)
+            pthread_detach(dns_worker);
         return;
     }
     // Record entry before either installation path can fail.
