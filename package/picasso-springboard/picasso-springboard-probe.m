@@ -245,16 +245,17 @@ static void wifiui_configure_service(void *sc, void *iokit)
 
     const void *prefs = prefs_create(NULL, CFSTR("picasso native WLAN service"), NULL);
     int result = 1;
-    // SCPreferencesLock(prefs, wait).  Apple SCPLock.c:523 opens
-    // "<prefs>-lock" with O_EXLOCK|O_NONBLOCK when wait==FALSE, so a lock
-    // held by configd itself returns EWOULDBLOCK / kSCStatusPrefsBusy
-    // immediately.  pong runs in a separate process and can use FALSE; this
-    // library is injected INTO configd, so the daemon already holds the
-    // file lock.  With wait==TRUE Apple uses blocking O_EXLOCK, which waits
-    // for configd's main run loop to release it.  We are on a detached
-    // pthread (never configd's main run loop), so blocking cannot deadlock.
-    // chain-606-lite2 measured: service prefs=1 locked=0 (the FALSE case).
-    unsigned locked = (prefs != NULL) ? (lock(prefs, 1) ? 1u : 0u) : 0u;
+    // SCPreferencesLock(prefs, FALSE) is the ONLY safe choice here.
+    // Apple SCPLock.c:523 opens "<prefs>-lock" with O_EXLOCK|O_NONBLOCK when
+    // wait==FALSE; configd's own main run loop holds that file lock, so a
+    // non-blocking attempt returns EWOULDBLOCK / kSCStatusPrefsBusy.
+    // pong uses FALSE from a SEPARATE process.  We are injected INTO configd;
+    // chain-606-lite2 measured "service prefs=1 locked=0".  A wait==TRUE
+    // attempt (5cb8977) was measured to DEADLOCK configd: 8 restarts in one
+    // 400 s boot, EXC_CORPSE x50, never reaching the next checkpoint.  Do not
+    // reintroduce it.  When the lock is unavailable we still publish DNS via
+    // the dynamic store below, which needs no SCPreferences lock at all.
+    unsigned locked = (prefs != NULL) ? (lock(prefs, 0) ? 1u : 0u) : 0u;
     (void)snprintf(line, sizeof(line),
         "PICASSO_WIFIUI service prefs=%d locked=%u\n", prefs != NULL, locked);
     wifiui_log(line);
@@ -308,6 +309,101 @@ static void wifiui_configure_service(void *sc, void *iokit)
     (void)snprintf(line, sizeof(line),
         "PICASSO_WIFIUI service result=%d type=%s\n", result, typebuf);
     wifiui_log(line);
+}
+
+// ---------------------------------------------------------------------------
+// Publish DNS through the native dynamic-store key that configd's IPMonitor
+// itself maintains: State:/Network/Global/DNS -> { ServerAddresses: [ ... ] }.
+//
+// The addresses are NOT invented: the in-kernel DHCP client parses RFC 2132
+// option 6 and writes them, in Apple's own resolver-file syntax, to
+// /private/var/run/resolv.conf (see hakios.dhcp.c dhcp_publish_dns()).  We
+// read that file back so the value stays correct for whatever network the
+// device joins.  Apple's kSCPropNetDNSServerAddresses == "ServerAddresses"
+// (SCSchemaDefinitions.c:126) and ip_plugin.c:6262 publishes exactly this
+// key; dns_configuration_set() consumes it.
+//
+// This path needs NO SCPreferences lock.  On this board configd holds
+// preferences.plist-lock on its own main run loop, so building a native
+// service from inside the injected daemon cannot obtain it (chain-606-lite2:
+// "service prefs=1 locked=0").  Writing the dynamic store is already proven
+// on device by publish=1 and arrival_publish=1 above.
+// ---------------------------------------------------------------------------
+static void wifiui_publish_dns(const void *store, wifiui_store_set_fn store_set)
+{
+    static const char resolver_path[] = "/private/var/run/resolv.conf";
+    char text[512];
+    char line[320];
+    CFMutableArrayRef servers;
+    CFMutableDictionaryRef dns;
+    int fd, n, count = 0;
+    char *p, *end;
+
+    if (store == NULL || store_set == NULL) return;
+    fd = open(resolver_path, O_RDONLY);
+    if (fd < 0) {
+        wifiui_log("PICASSO_WIFIUI dns resolver file absent\n");
+        return;
+    }
+    n = (int)read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0) {
+        wifiui_log("PICASSO_WIFIUI dns resolver file empty\n");
+        return;
+    }
+    text[n] = '\0';
+
+    servers = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+    if (servers == NULL) return;
+    p = text;
+    end = text + n;
+    while (p < end && count < 4) {
+        char *eol = strchr(p, '\n');
+        char addr[64];
+        size_t len;
+        if (eol == NULL) eol = end;
+        len = (size_t)(eol - p);
+        if (len >= 11 && !strncmp(p, "nameserver ", 11)) {
+            const char *value = p + 11;
+            size_t vlen = len - 11;
+            while (vlen > 0 && (value[vlen - 1] == ' ' || value[vlen - 1] == '\r' ||
+                                value[vlen - 1] == '\t')) vlen--;
+            if (vlen > 0 && vlen < sizeof(addr)) {
+                CFStringRef s;
+                memcpy(addr, value, vlen);
+                addr[vlen] = '\0';
+                s = CFStringCreateWithCString(NULL, addr, kCFStringEncodingUTF8);
+                if (s != NULL) {
+                    CFArrayAppendValue(servers, s);
+                    CFRelease(s);
+                    ++count;
+                }
+            }
+        }
+        p = (eol < end) ? eol + 1 : end;
+    }
+    (void)snprintf(line, sizeof(line),
+        "PICASSO_WIFIUI dns servers=%u\n", count);
+    wifiui_log(line);
+    if (count == 0) {
+        CFRelease(servers);
+        return;
+    }
+
+    dns = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
+                                    &kCFTypeDictionaryValueCallBacks);
+    if (dns == NULL) {
+        CFRelease(servers);
+        return;
+    }
+    CFDictionarySetValue(dns, CFSTR("ServerAddresses"), servers);
+    CFRelease(servers);
+
+    int ok = store_set(store, CFSTR("State:/Network/Global/DNS"), dns) ? 1 : 0;
+    (void)snprintf(line, sizeof(line),
+        "PICASSO_WIFIUI dns publish=%d key=State:/Network/Global/DNS\n", ok);
+    wifiui_log(line);
+    CFRelease(dns);
 }
 
 static void wifiui_bootstrap(void)
@@ -450,6 +546,12 @@ static void wifiui_bootstrap(void)
         CFRelease(arrival);
     }
     if (arrival_old != NULL) CFRelease(arrival_old);
+
+    // Native DNS publication needs no SCPreferences lock.  Do it while the
+    // SCDynamicStore session is still open, after the kernel DHCP client has
+    // written resolv.conf (HIF + DHCP complete around t+168 s).
+    wifiui_publish_dns(store, store_set);
+
     CFRelease(record);
     if (previous != NULL) CFRelease(previous);
     CFRelease(store);
