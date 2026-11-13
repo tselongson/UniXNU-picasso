@@ -245,7 +245,11 @@ static void wifiui_configure_service(void *sc, void *iokit)
 
     const void *prefs = prefs_create(NULL, CFSTR("picasso native WLAN service"), NULL);
     int result = 1;
-    if (prefs != NULL && lock(prefs, 0)) {
+    unsigned locked = (prefs != NULL) ? (lock(prefs, 0) ? 1u : 0u) : 0u;
+    (void)snprintf(line, sizeof(line),
+        "PICASSO_WIFIUI service prefs=%d locked=%u\n", prefs != NULL, locked);
+    wifiui_log(line);
+    if (prefs != NULL && locked) {
         const void *services = services_copy(prefs);
         unsigned found = 0;
         if (services != NULL && CFGetTypeID(services) == CFArrayGetTypeID()) {
@@ -268,6 +272,10 @@ static void wifiui_configure_service(void *sc, void *iokit)
                 current = (set != NULL && set_current(set)) ? 1u : 0u;
             }
             const void *service = current ? service_create(prefs, interface) : NULL;
+            (void)snprintf(line, sizeof(line),
+                "PICASSO_WIFIUI service found=%u set=%d current=%u service=%d\n",
+                found, set != NULL, current, service != NULL);
+            wifiui_log(line);
             if (service != NULL) {
                 unsigned d = defaults(service) ? 1u : 0u;
                 unsigned e = enable(service, 1) ? 1u : 0u;
