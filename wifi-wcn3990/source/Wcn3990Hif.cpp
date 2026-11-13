@@ -74,6 +74,21 @@ extern "C" void hakios_apple80211_event(int event, int status);
  * outgoing frames over HTT TX_FRM instead of faking DHCP/ARP.  0 keeps the
  * old behaviour as an A/B control. */
 static int g_net_path;
+/* txguard=1 (default): keep the WCN3990 CE4 source ring from being
+ * overwritten while the copy engine is still reading it.  WCN3990 raises
+ * copy-complete / advances SRRI *before* the last DMA has finished
+ * (Linux mainline "ath10k: Set tx credit to one for wcn3990 snoc based
+ * devices" + "ath10k: Delay the unmapping of the buffer", CVE-2022-50700).
+ * Trogdor-ipadOS WlanRadio.c wc_send_gather() refuses the send unless two
+ * descriptors are free, gives every descriptor its own header buffer and
+ * drops a frame when no TX slot is free.  Our old code did none of the
+ * three, so the next gather overwrote a live descriptor/header: SMMU
+ * context fault -> NATIVE_UFS_FAILURE -> disk5 I/O error -> SError panic.
+ * A/B on picasso: netpath=1 panics, netpath=0 never does.
+ * txguard=0 restores the old behaviour as the exact control. */
+static int g_tx_guard = 1;
+static uint32_t g_ce4_busy;
+static uint32_t g_ce4_busy_logged;
 /* dhcp=1 (wifiauto default): run the in-kernel DHCPv4 client on the real
  * data plane. 0 keeps configd solely in charge, for an exact A/B. */
 static int g_dhcp;
@@ -428,10 +443,14 @@ struct hif_dma_block {
 	 * HTT TX_FRM with a frag descriptor.  One rotating 2 KiB slot per frag
 	 * descriptor at the head of htt_frag[]. */
 	uint8_t tx_frame[WPA_TX_SLOTS][2048];
-	/* TX_FRM headers for the gather path: hif_htt_send() already rotates
-	 * tx4[], so sharing it would let an HTT H2T message overwrite a header
-	 * the copy engine has not fetched yet (the CVE-2022-50700 pattern). */
-	uint8_t tx_head[4][64];
+	/* TX_FRM headers for the gather path.  Trogdor wc_send_gather() puts
+	 * the header in a per-descriptor buffer (s->buf + write * src_max), so
+	 * it cannot be reused before the CE has consumed that descriptor.
+	 * The old tx_head[idx & 3] shared just four 64-byte slots (in practice
+	 * only two, because a gather advances the write index by two), and
+	 * head_len can be up to 256 bytes.  One 256-byte slot per CE4 source
+	 * descriptor = 8 KiB, well inside HIF_DMA_SIZE. */
+	uint8_t tx_head[32][256];
 	/* wcn3990 keeps the per-CE read indices in DDR (hw_params.rri_on_ddr);
 	 * ce.c: ath10k_ce_alloc_rri() points the wrapper at this array. */
 	uint32_t rri[16];
@@ -455,6 +474,12 @@ struct hif_dma_block {
  * buffers plus the 2048-entry paddr ring) must fit; make an overflow a
  * build error. */
 typedef char hif_dma_window_check[(sizeof(struct hif_dma_block) <= HIF_DMA_SIZE) ? 1 : -1];
+/* CE4 gather headers: one 256-byte slot per source descriptor (32), so a
+ * header cannot be reused before the CE has consumed that descriptor. */
+typedef char hif_ce4_head_check[
+    (sizeof(((struct hif_dma_block *)0)->tx_head) /
+         sizeof(((struct hif_dma_block *)0)->tx_head[0]) >= 32u &&
+     sizeof(((struct hif_dma_block *)0)->tx_head[0]) >= 256u) ? 1 : -1];
 static struct hif_dma_block *g_dma;
 static uint64_t g_dma_pa;         /* physical base of the uncached alias */
 /* The CE DMA block is a Normal non-cacheable / write-combining mapping, so
@@ -766,14 +791,37 @@ hif_ce_send_gather(uint32_t ce, const uint8_t *head, uint32_t head_len,
 	uint8_t *shadow = NULL, *hbuf;
 	uint64_t head_pa;
 
-	if (!g_regs_live || g_stage < 3 || ce != 4) return -1;
+	if (!g_regs_live || g_stage < 3 || ce != 4 || !g_dma) return -1;
 	if (body_len > (uint32_t)CE_BUF_BYTES || head_len > 256u) return -1;
 	ring = g_dma->src4;
 	entries = hif_shape[4].src_n;
+	if (entries > (sizeof(g_dma->tx_head) / sizeof(g_dma->tx_head[0])))
+		return -1;
 	wr = &g_wr4;
 	idx = *wr & (entries - 1);
 
-	hbuf = g_dma->tx_head[idx & 3];
+	/* Trogdor wc_send_gather(): read the CE's DDR source read index and
+	 * refuse the send unless at least two descriptors are free.  WCN3990
+	 * advances SRRI early (CVE-2022-50700 / mainline ath10k tx-credit=1
+	 * and delayed-unmap patches), so without this the next gather rewrites
+	 * a descriptor the copy engine is still fetching.  The DDR RRI array
+	 * is written by the CE through the wrapper programmed in
+	 * hif_program_bases(); read it volatile, same as wc.rri[]. */
+	if (g_tx_guard) {
+		uint32_t srri = (*(volatile uint32_t *)&g_dma->rri[4]) & 0xffffu;
+		if ((((srri - 1u) - *wr) & (entries - 1u)) < 2u) {
+			g_ce4_busy++;
+			if (g_ce4_busy_logged < 16u ||
+			    (g_ce4_busy & 0x3ffu) == 0u) {
+				g_ce4_busy_logged++;
+				HIF_LOG("ce4 gather busy=%u srri=%u wr=%u (txguard)",
+				    g_ce4_busy, srri, *wr);
+			}
+			return -2;
+		}
+	}
+
+	hbuf = g_dma->tx_head[idx];
 	memcpy(hbuf, head, head_len);
 	head_pa = hif_pa_of(hbuf);
 	if (!head_pa) return -1;
@@ -2876,6 +2924,19 @@ hif_wpa_tx_frame(const uint8_t *frame, uint32_t len, int eapol)
 	for (i = 0; i < WPA_TX_SLOTS; i++)
 		if (!g_wpa_tx_busy[(g_wpa_st.tx_slot + i) & (WPA_TX_SLOTS - 1u)])
 			break;
+	/* Trogdor wj_tx_put() returns -2 when the free list is empty instead
+	 * of wrapping around: the old code wrapped to g_wpa_st.tx_slot and
+	 * reused a slot whose frame the target is still DMA-ing.  A dropped
+	 * frame is recoverable (DHCP/TCP retry); a torn DMA buffer is a
+	 * whole-machine SError.  txguard=0 keeps the old wrap for the A/B. */
+	if (g_tx_guard && i == WPA_TX_SLOTS) {
+		static uint32_t drops;
+		drops++;
+		if (drops <= 8u || (drops & 0xffu) == 0u)
+			HIF_LOG("WPA: tx slots busy drops=%u drop %u bytes (txguard)",
+			    drops, len);
+		return -1;
+	}
 	slot = (g_wpa_st.tx_slot + i) & (WPA_TX_SLOTS - 1u);
 	g_wpa_st.tx_slot = slot + 1u;
 	g_wpa_tx_busy[slot] = 1;
@@ -5421,6 +5482,13 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	v = 0;
 	if (PE_parse_boot_argn("netpath", &v, sizeof(v)) && v <= 1) {
 		g_net_path = (int)v;
+	}
+	/* txguard defaults to 1 (the CE4 source-ring / TX-slot guards above).
+	 * 0 restores the pre-fix behaviour so the same image can A/B the
+	 * netpath=1 SError without a rebuild.  Same length as netpath=N. */
+	v = 1;
+	if (PE_parse_boot_argn("txguard", &v, sizeof(v)) && v <= 1) {
+		g_tx_guard = (int)v;
 	}
 	v = 1;
 	if (PE_parse_boot_argn("dhcp", &v, sizeof(v)) && v <= 1) {
