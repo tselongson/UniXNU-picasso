@@ -4001,7 +4001,11 @@ picasso_wlan_net_attach(void)
 	 * carried a MAC the firmware never listens on.  wifix=1 aligns en0 with
 	 * the STA address the firmware and the AP actually use. */
 	static const uint8_t radio_mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
-	uint32_t wifix = 0;
+	/* Default ON: chain-617 w1 proved this is the root cause -- with the
+	 * aligned lladdr the PC pinged 192.168.101.18 6/6 (0% loss, TTL=64)
+	 * and driver unicast RX went uni=0 -> uni=34, with 0 PANIC / 0 UFS
+	 * failure.  wifix=0 restores the old (broken) behaviour for A/B only. */
+	uint32_t wifix = 1;
 
 	if (picasso_net_attached) {
 		return;
