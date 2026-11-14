@@ -665,3 +665,76 @@ hakios_dhcp_tick(uint32_t polls, int link_up, const uint8_t mac[6])
 	}
 	dhcp_next = polls + DHCP_TICK_RETRY;
 }
+
+/* ---- chain-626: datapath liveness probe -------------------------------
+ * A quiet link and a wedged rx path look identical on the host side: the
+ * CE1 completion counter and the delivered-frames counter both freeze.
+ * The only host-side way to tell them apart is to provoke traffic: send a
+ * broadcast ARP request for the gateway and watch the unicast counter -
+ * the reply is unicast, comes back through the whole rx path, and beacons
+ * keep arriving over CE2/WMI meanwhile.  Three silent probes while the
+ * link is up flag the datapath stuck; recover=1 acts on that. */
+static uint32_t dhcp_probe_next;
+static uint32_t dhcp_probe_uni_at;
+static unsigned dhcp_probe_miss;
+static int dhcp_datapath_stuck;
+
+uint32_t wcn3990_hif_rx_unicast_count(void);
+
+void
+hakios_dhcp_datapath_probe(uint32_t polls, int link_up)
+{
+	uint8_t fr[42];
+	uint32_t uni;
+	unsigned i;
+
+	if (!link_up || dhcp_yiaddr[0] == 0 || dhcp_router[0] == 0) return;
+	uni = wcn3990_hif_rx_unicast_count();
+
+	if (dhcp_probe_next == 0) {
+		dhcp_probe_uni_at = uni;
+		dhcp_probe_next = polls + 10000u;
+		return;
+	}
+	if ((int32_t)(polls - dhcp_probe_next) < 0) {
+		if (uni != dhcp_probe_uni_at) {
+			dhcp_probe_miss = 0;
+			dhcp_datapath_stuck = 0;
+		}
+		return;
+	}
+	dhcp_probe_next = polls + 10000u;
+	if (uni != dhcp_probe_uni_at) {
+		dhcp_probe_miss = 0;
+		dhcp_datapath_stuck = 0;
+		dhcp_probe_uni_at = uni;
+		return;
+	}
+	dhcp_probe_miss++;
+	printf("DHCP: probe %u: no unicast in ~43 s (miss %u%s)\n",
+	    polls, dhcp_probe_miss,
+	    dhcp_datapath_stuck ? ", datapath STUCK" : "");
+	if (dhcp_probe_miss >= 3) dhcp_datapath_stuck = 1;
+	/* Provoke rx: broadcast ARP "who has the gateway". */
+	memset(fr, 0, sizeof(fr));
+	for (i = 0; i < 6; i++) {
+		fr[i] = 0xff;              /* eth dst: broadcast */
+		fr[6 + i] = dhcp_mac[i];   /* eth src: us */
+	}
+	fr[12] = 0x08; fr[13] = 0x06;  /* ethertype ARP */
+	fr[14] = 0x00; fr[15] = 0x01;  /* hrd ethernet */
+	fr[16] = 0x08; fr[17] = 0x00;  /* pro IPv4 */
+	fr[18] = 6; fr[19] = 4;        /* hln/pln */
+	fr[20] = 0x00; fr[21] = 0x01;  /* op request */
+	for (i = 0; i < 6; i++) fr[22 + i] = dhcp_mac[i];
+	for (i = 0; i < 4; i++) fr[28 + i] = dhcp_yiaddr[i];
+	/* fr[32..37] target hw stays zero; fr[38..41] target proto */
+	for (i = 0; i < 4; i++) fr[38 + i] = dhcp_router[i];
+	(void)picasso_dhcp_send(fr, sizeof(fr));
+}
+
+int
+hakios_dhcp_datapath_stuck(void)
+{
+	return dhcp_datapath_stuck;
+}

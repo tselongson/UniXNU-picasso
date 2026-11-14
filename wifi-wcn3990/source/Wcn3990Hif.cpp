@@ -57,6 +57,8 @@ extern "C" void hakios_net_input(const uint8_t *frame, size_t length);
 /* hakios.dhcp.c: in-kernel DHCPv4 client (dhcp boot-arg gate). It installs
  * the address without waiting for configd's InterfaceNamer/IPConfiguration. */
 extern "C" void hakios_dhcp_tick(uint32_t polls, int link_up, const uint8_t mac[6]);
+extern "C" void hakios_dhcp_datapath_probe(uint32_t polls, int link_up);
+extern "C" int hakios_dhcp_datapath_stuck(void);
 extern "C" void hakios_dhcp_input(const uint8_t *eth, size_t len);
 /* hakios.net.c: the only KEV_DL_LINK_ON switch.  configd builds the IPv4
  * service (and runs DHCP) only after this event. */
@@ -628,13 +630,14 @@ static uint32_t g_ce1_done, g_ps_keep_sent;
  * ce1kick=1 additionally refills the free slots exactly like Trogdor
  * wc_rx_post() does, so the "buffer leak" hypothesis can be tested with no
  * extra CI.  Default 0 keeps this build behaviourally identical to e20ca34. */
-static uint32_t g_ce1_mark, g_ce1_mark_polls, g_ce1_stall;
+static uint32_t g_ce1_mark_polls, g_ce1_stall;
+static uint32_t g_mgmtev_mark;   /* chain-626: mgmt-event freeze detector */
 static int g_ce1_kick;
 /* chain-625: a real stall freezes BOTH ce1 (tx compl + rx in-ord) and msdu
  * (frames actually delivered).  chain-624 proved that ce1 alone goes quiet
  * during ordinary idle gaps too - 43 false stalls on the control arm - and
  * that a false-stall rejoin panics, so both counters must agree. */
-static uint32_t g_msdu_mark;
+
 /* chain-625: recover-driven rejoin.  While set, the join state machine must
  * NOT fall into "peer map timeout, sending auth anyway": the rejoin starts
  * with VDEV_DOWN, and if the target is still wedged the peer map never
@@ -5038,6 +5041,9 @@ wcn3990_hif_poll(void)
 	if (g_dhcp) {
 		hakios_dhcp_tick(g_polls, (g_net_path && g_link_up) ? 1 : 0, g_join_mac);
 	}
+	/* chain-626: provoke rx with a periodic gateway ARP request and watch
+	 * the unicast counter; three silent probes flag the datapath stuck. */
+	hakios_dhcp_datapath_probe(g_polls, (g_net_path && g_link_up) ? 1 : 0);
 
 	/* Heartbeat every ~1000 polls, and advance the staged ladder.  This is
 	 * deliberately cheap: no cache flushes and no CE register access until
@@ -5120,17 +5126,22 @@ wcn3990_hif_poll(void)
 				hif_post_buffers();
 			}
 		}
-		/* chain-622/623: bounded CE1 stall snapshot.  The stall lands at a
-		 * reproducible poll count (both chain-622 boots froze at
-		 * polls ~= 210000, ~15 min), so the detector must fire well
-		 * before the capture window ends.  800 polls (~3.4 s) without a
-		 * single completed descriptor is safe: every queued frame
-		 * produces a TX_COMPL on CE1, and the system keeps sending. */
+		/* chain-626: two independent detectors, because the two failure
+		 * shapes need different responses.
+		 * (1) mgmtev frozen: beacons are a continuous ~300 ms broadcast
+		 *     from the AP, so if the WMI event counter stops moving the
+		 *     target->host direction is wedged as a whole.  No recovery
+		 *     action here - a rejoin needs WMI, which is exactly what
+		 *     just died; this arms the WLAN-PD-restart decision.
+		 * (2) datapath stuck: hakios.dhcp.c provokes rx with a periodic
+		 *     ARP request to the gateway and flags 3 consecutive probes
+		 *     with no unicast reply while beacons keep arriving.  That
+		 *     is the CE1-only shape, and VDEV_DOWN + rejoin is safe and
+		 *     effective there (the WMI task answered VDEV_START in
+		 *     every join since chain-625's g_recover_active gate). */
 		if (g_link_up && g_polls - g_ce1_mark_polls >= 800u) {
-			if (g_ce1_done != g_ce1_mark ||
-			    g_wr_rx_frames != g_msdu_mark) {
-				g_ce1_mark = g_ce1_done;
-				g_msdu_mark = g_wr_rx_frames;
+			if (g_mgmt_events != g_mgmtev_mark) {
+				g_mgmtev_mark = g_mgmt_events;
 				g_ce1_mark_polls = g_polls;
 				g_ce1_stall = 0;
 			} else if (g_ce1_stall < 3) {
@@ -5139,40 +5150,34 @@ wcn3990_hif_poll(void)
 				    (hif_shape[1].dst_n - 1u)].nbytes : 0xffffu;
 
 				g_ce1_stall++;
-				HIF_LOG("CE1 STALL #%u polls=%u ce1=%u drri1=%08x "
-				    "sw1=%u post1=%u nb1=%u rri2=%08x httidx=%u "
+				HIF_LOG("RX STALL-GLOBAL #%u polls=%u "
+				    "mgmtev=%u ce1=%u drri1=%08x sw1=%u "
+				    "post1=%u nb1=%u rri2=%08x httidx=%u "
 				    "ord=%u msdu=%u",
-				    g_ce1_stall, g_polls, g_ce1_done,
+				    g_ce1_stall, g_polls, g_mgmt_events,
+				    g_ce1_done,
 				    g_dma ? (unsigned)s_rri[1] : 0u,
 				    g_sw1, g_post1, nb1,
 				    g_dma ? (unsigned)s_rri[2] : 0u,
 				    g_dma ? (unsigned)g_dma->htt_alloc_idx : 0u,
 				    g_wr_rx_in_ord, g_wr_rx_frames);
-				if (g_ce1_kick) hif_ce1_kick();
-				if (g_recover && g_recover_used < 2) {
-					g_recover_used++;
-					HIF_LOG("recover #%u: VDEV_DOWN then "
-					    "rejoin after the rx stall "
-					    "(srri4=%u wr4=%u: the target "
-					    "still consumes tx, so it is "
-					    "alive)",
-					    g_recover_used,
-					    g_dma ?
-					        (unsigned)(s_rri[4] & 0xffffu) :
-					        0u,
-					    g_wr4);
-					/* Without VDEV_DOWN the firmware keeps
-					 * the vdev started and never answers
-					 * the second VDEV_START: that is the
-					 * "peer map timeout" chain-624 died
-					 * from. */
-					(void)hif_join_send_vdev_down();
-					g_recover_active = 1;
-					hif_join_reset(
-					    "rx stalled: target->host went "
-					    "silent");
-				}
 			}
+		}
+		if (g_link_up && g_recover && g_recover_used < 2 &&
+		    hakios_dhcp_datapath_stuck()) {
+			g_recover_used++;
+			HIF_LOG("recover #%u: VDEV_DOWN then rejoin - "
+			    "3 ARP probes got no unicast reply while beacons "
+			    "kept arriving (srri4=%u wr4=%u)",
+			    g_recover_used,
+			    g_dma ? (unsigned)(s_rri[4] & 0xffffu) : 0u,
+			    g_wr4);
+			/* Without VDEV_DOWN the firmware keeps the vdev started
+			 * and never answers the second VDEV_START: that is the
+			 * "peer map timeout" chain-624 died from. */
+			(void)hif_join_send_vdev_down();
+			g_recover_active = 1;
+			hif_join_reset("rx stalled: datapath stuck, probe");
 		}
 	}
 
@@ -5560,6 +5565,14 @@ hif_post_buffers(void)
 
 extern "C" void
 wcn3990_hif_poll(void);
+
+/* chain-626: the C-side datapath probe reads this through a plain C symbol
+ * because g_rx_unicast is a C++ static here. */
+extern "C" uint32_t
+wcn3990_hif_rx_unicast_count(void)
+{
+	return g_rx_unicast;
+}
 
 extern "C" void
 wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
@@ -5953,11 +5966,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	g_post1 = (hif_shape[1].dst_n > 0) ? (uint32_t)(hif_shape[1].dst_n - 1) : 0;
 	g_htt_rx = 0;
 	g_ce1_done = 0;
-	g_ce1_mark = 0;
 	g_ce1_mark_polls = 0;
 	g_ce1_stall = 0;
+	g_mgmtev_mark = 0;
 	g_recover_used = 0;
-	g_msdu_mark = 0;
 	g_recover_active = 0;
 	g_polls = 0;
 	g_rx_packets = 0;
