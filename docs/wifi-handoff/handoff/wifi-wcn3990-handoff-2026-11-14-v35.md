@@ -34,8 +34,13 @@
       现成心跳计数把停摆层级定位为「CE2/WMI 信标照常、CE1 HTT 数据消息静默」：
       ps0 drri 持续推进而 ord/msdu/httidx/uni/grp 全冻结；ring=1/1 说明
       attention-drain 未参与，全部 MSDU 走 RX_IN_ORD + repost。
-  ── chain-621（e20ca34，CI 43596531534）：pskeep=0/1 等长 A/B 上机中，
-      新增无上限 psk/ce1 计数用于一次分流「固件不交 MSDU」vs「CE1 管道卡住」
+  ★ chain-621 判决（21:1x，CI 43596531534 SUCCESS）：pskeep 证伪。
+      k0(pskeep=0) 采集后 ping 20/20，k1(pskeep=1) 13/20 且 5 次超时；
+      实时现场 psk=14→19 一直在重发 PS-off，ce1=204 仍冻结 27 个心跳周期
+      ⇒ PS 方向关闭，默认值保持 0。k0 的 20/20 只是窗口内尚未停摆，不是修复。
+      ce1 无上限计数把阻塞收敛到「CE1 管道本身静默」
+      （CE2 rx/drri 仍推进、TX 仍发 IPv4、卷/PANIC 全 0）。
+  ── 下一刀：CE1 ring 状态探针（g_sw1/g_post1/nbytes/shadow DST_WR），纯诊断
   ⚠ 网络层已闭环，但「Safari 能开网页」未实测，不得宣称全部完成
 ```
 
@@ -470,7 +475,7 @@ ps1: polls=47000 起 drri=4、rx=899、beacons=720 也全冻结（CE2 一并停�
   `g_post1` 初值 `dst_n-1` 是 `snoc.c ath10k_snoc_rx_post_pipe()` 的
   「留一槽」设计（`:5752` 注释），repost 指针领先读指针 n-1 属正确。
 
-#### ★ chain-621（进行中）：`pskeep` 等长 A/B + CE1 分流探针
+#### ★ chain-621 实机判决（21:1x）：`pskeep` 证伪，阻塞收敛到 CE1 管道
 
 `e20ca34`（`work/fix-pskeep-621.py --apply`，+24/−3 单文件）：
 - `pskeep=0|1` 门控，默认 0 行为不变；`=1` 在心跳里每 5000 polls
@@ -491,7 +496,44 @@ ps1: polls=47000 起 drri=4、rx=899、beacons=720 也全冻结（CE2 一并停�
 `wmi-master.h:5825 WMI_STA_PS_MODE_DISABLED`（`ENABLED=1`），
 不是把语义写反。所以 `pskeep=1` 重发的确实是「PS off」。
 
-> 在 chain-621 判决出来前，**不得宣称数据面停摆已修好**。
+**判决（`work/chain-621-pskeep.out`，CI `43596531534` SUCCESS）**：k0/k1 各 400 s
+有效轮（`install=1 join5=45/55 dhcp=1`），两组卷错误 / PANIC / UFS failure 全 0。
+
+| 判据 | k0 (`pskeep=0`) | k1 (`pskeep=1`) |
+|---|---|---|
+| 采集第 300 s PC ping | 6/6 | 6/6 |
+| **采集后 20 次 PC ping（主判据）** | **20/20** | **13/20，5 次超时** |
+| `psk` / `ce1`（采集末心跳 55000） | 0 / 156 | 11 / 173 |
+| `dns set=1` / `arp op=2` / `PANIC` | 3 / 3 / 0 | 3 / 4 / 0 |
+
+⇒ **`pskeep` 无效且略有害**（k1 更差），PS 假设关闭，默认值保持 0、不启用。
+**k0 的 20/20 不是修复**：链结束后对设备的实时串口复查
+（`work/621-pskeep-evidence/status-now.txt`）显示它照样会停摆。
+
+**实时现场把层级定死**（`polls=71000→98000`，27 个心跳周期）：
+
+```text
+ce1=204  httidx=1146  ord=122  msdu=123  uni=58  grp=62   ← 全部冻结
+rx=1267→1272   drri=34→39      ← CE2 / WMI 信标仍在推进
+psk=14→19                       ← PS-off 一直在重发，仍停摆
+[REAL DATA PLANE] IPv4 78/84 bytes over HTT TX_FRM  ← TX 还在发
+卷错误 / PANIC / NATIVE_UFS_FAILURE 全 0，UI 健康
+```
+
+`ce1` 是我为这一轮新加的**无上限**计数（旧 `g_htt_rx` 有 64 打印上限，判不了后期静默）。
+按预设判据，`ce1` 与数据面**一起冻结** ⇒ 不是「固件只不发数据消息但 CE1 还有
+TX_COMPL 等流量」，而是 **CE1 这条管道整体静默**。于是：
+
+- 已排除：attention-drain 重复消费（`ring=1/1` 只命中一帧）、RX_IND 路径（`ind=0`）、
+  TX 帧误置 PM bit（`frame[1]=0x41`）、CE1 `g_post1=dst_n-1` 语义（snoc 留一槽设计）、
+  **DMA 缓存一致性** —— `Wcn3990Hif.cpp:484` 明确 `g_dma` 是
+  "physical base of the **uncached alias**"，`dst1[32]` 就在这块映射里。
+- 仍未区分：固件不再往 CE1 写（`DST_WR` 状态机 / HTT RX buffer 计数）
+  vs host 没读到已写的描述符（`g_sw1` 与 `nbytes`）。
+
+**下一刀（纯诊断，不改行为）**：心跳里加 `g_sw1` / `g_post1` /
+`g_dr_desc[1][g_sw1].nbytes` / shadow `CE1_SHADOW_DST_WR` 回读值，
+一次上机按 §5.4 的判据表分流。**在探针判决出来前不得改 CE1/固件，也不得宣称已修好。**
 
 ### 5.5 交付边界（如实）
 - **已修并闭环**：WiFi 单播双向、ARP 被对端接受、PC ping 通、三层 IPv4 流量、

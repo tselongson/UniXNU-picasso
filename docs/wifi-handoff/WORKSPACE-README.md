@@ -1,9 +1,11 @@
 # picasso XNU 移植 — 工作区
 
+> **发布说明**：本文是本地工作区 README 的快照，链接已重定位到本目录。文中以行内代码出现的 `src/...`、`docs/build-handoff-...` 路径属于本地其它检出的文件，未随本仓库上传；`handoff/`、`logs/` 链接在本目录内有效。
+
 Redmi K30 5G（picasso / SM7250）上运行 XNU（Darwin 23 / iPadOS 17.7.11）。
 目标是从 UEFI 引导走到挂载根卷、启动 `launchd`，并把外设（当前主攻 WCN3990 WiFi）做到可用。
 
-> **当前唯一权威状态源**：[`handoff/wifi-wcn3990-handoff-2026-11-14-v35.md`](handoff/wifi-wcn3990-handoff-2026-11-14-v35.md)（v35，2026-11-14 21:0x；en0 lladdr 与空口 STA MAC 不一致是根因，已修复并默认化，PC ping 6/6、`uni=41` 实机闭环；`pspoke` 已由 chain-619 干净 A/B 再次证伪，停摆层级收敛到「CE2/WMI 正常、CE1 HTT 数据消息静默」；chain-621 的 `pskeep` A/B 进行中，见 §5.4）。
+> **当前唯一权威状态源**：[`handoff/wifi-wcn3990-handoff-2026-11-14-v35.md`](handoff/wifi-wcn3990-handoff-2026-11-14-v35.md)（v35，2026-11-14 21:0x；en0 lladdr 与空口 STA MAC 不一致是根因，已修复并默认化，PC ping 6/6、`uni=41` 实机闭环；`pspoke` 已由 chain-619 干净 A/B 再次证伪；chain-621 判决 `pskeep` 同样证伪，现成 `ce1` 计数把阻塞收敛到「CE1 管道整体静默、CE2/WMI 与 TX 正常」，下一刀是 CE1 ring 状态探针，见 §5.4）。
 > 本文件与 `docs/*.md` 里的阶段状态是历史归档，冲突时以交接文档为准。
 > 最新逐轮事实：`logs/2026-11-14.md`（工作日志，追加不覆盖）。
 
@@ -87,16 +89,16 @@ bash work/chain-573.sh        # 见脚本头部注释：改 RUN / COMMON / 变�
   `python work/serial-cmd.py COM5 reboot-fastboot 3`。
 - 证据规则见 `upstream/silenzio-picasso/wifi-wcn3990/docs/diagnostic-charter.md`。
 
-构建侧的历史状态与已修问题见 [`docs/build-handoff-2026-11-02.md`](docs/build-handoff-2026-11-02.md)。
+构建侧的历史状态与已修问题见 `docs/build-handoff-2026-11-02.md`。
 
 ## 另一条线：`src/YinCQL_UniXNU-picasso`
 
 内核跑过 BSD 层、USB 控制台可用、UFS 已发布根设备、APFS 读到容器 checkpoint（xid 14），
 卡在 **APFS 容器方案探测失败**。文档入口：
-[status.md](src/YinCQL_UniXNU-picasso/docs/status.md)、
-[handoff.md](src/YinCQL_UniXNU-picasso/docs/handoff.md)、
-[ufs-root.md](src/YinCQL_UniXNU-picasso/docs/ufs-root.md)、
-[debugging.md](src/YinCQL_UniXNU-picasso/docs/debugging.md)。
+`src/YinCQL_UniXNU-picasso/docs/status.md`、
+`src/YinCQL_UniXNU-picasso/docs/handoff.md`、
+`src/YinCQL_UniXNU-picasso/docs/ufs-root.md`、
+`src/YinCQL_UniXNU-picasso/docs/debugging.md`。
 
 ## 设备操作
 
