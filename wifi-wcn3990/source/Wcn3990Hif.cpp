@@ -621,7 +621,7 @@ static uint32_t g_htt_rx;     /* HTT messages seen on CE1 (64-print cap) */
  * heartbeat: ce1 = completed CE1 descriptors, psk = PS-off re-sends. */
 static uint32_t g_ce1_done, g_ps_keep_sent;
 /* chain-622 CE1 stall detector.  Read-only by default: when CE1 stops
- * completing descriptors for 15k polls (~105 s) while the link is up, print
+ * completing descriptors for 800 polls (~3.4 s) while the link is up, print
  * one bounded snapshot of the ring state.  That single line separates the two
  * remaining candidates - the target stopped writing (rri1 frozen) versus the
  * host no longer seeing completed descriptors (rri1 moving, nbytes 0).
@@ -1345,7 +1345,7 @@ hif_service_ce1(void)
  * hif_service_ce1() should already maintain that invariant, so a non-zero
  * count here means a slot was dropped somewhere and the target ran out of
  * receive buffers.  Read-only when ce1kick=0; the caller only reaches this
- * after CE1 has already been silent for ~105 s. */
+ * after CE1 has already been silent for ~3.4 s. */
 static void
 hif_ce1_kick(void)
 {
@@ -5069,13 +5069,13 @@ wcn3990_hif_poll(void)
 				hif_post_buffers();
 			}
 		}
-		/* chain-622: bounded CE1 stall snapshot.  Fifteen thousand polls
-		 * (~105 s) without a single completed descriptor, while the link
-		 * is up, is not an idle gap any more - the data plane is wedged.
-		 * Print the ring state once per stall, at most three times, so
-		 * the capture stays small and the poll loop is untouched until
-		 * the stall has actually happened. */
-		if (g_link_up && g_polls - g_ce1_mark_polls >= 15000u) {
+		/* chain-622/623: bounded CE1 stall snapshot.  The stall lands at a
+		 * reproducible poll count (both chain-622 boots froze at
+		 * polls ~= 210000, ~15 min), so the detector must fire well
+		 * before the capture window ends.  800 polls (~3.4 s) without a
+		 * single completed descriptor is safe: every queued frame
+		 * produces a TX_COMPL on CE1, and the system keeps sending. */
+		if (g_link_up && g_polls - g_ce1_mark_polls >= 800u) {
 			if (g_ce1_done != g_ce1_mark) {
 				g_ce1_mark = g_ce1_done;
 				g_ce1_mark_polls = g_polls;
