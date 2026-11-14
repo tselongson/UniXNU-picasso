@@ -5,7 +5,7 @@
 Redmi K30 5G（picasso / SM7250）上运行 XNU（Darwin 23 / iPadOS 17.7.11）。
 目标是从 UEFI 引导走到挂载根卷、启动 `launchd`，并把外设（当前主攻 WCN3990 WiFi）做到可用。
 
-> **当前唯一权威状态源**：[`handoff/wifi-wcn3990-handoff-2026-11-14-v35.md`](handoff/wifi-wcn3990-handoff-2026-11-14-v35.md)（v35，2026-11-14 23:3x；en0 lladdr 与空口 STA MAC 不一致是根因，已修复并默认化，PC ping 6/6、`uni=41` 实机闭环；`pspoke`（chain-619）、`pskeep`（chain-621）均实机证伪；chain-622 拿到 CE1 的 `drri1`，证明停摆是**固件停止整个 target→host 方向**（CE1+CE2 一起停、`drri1==sw1`、`nb1=0`）而 TX 仍工作，下一刀是停摆时发 WMI 命令探活 + 主动 VDEV_DOWN/UP 重关联，见 §5.4）。
+> **当前唯一权威状态源**：[`handoff/wifi-wcn3990-handoff-2026-11-14-v35.md`](handoff/wifi-wcn3990-handoff-2026-11-14-v35.md)（v35，2026-11-15 05:5x；**WiFi 主线完整闭环**：① 单播双向打通（en0 lladdr 对齐空口 STA MAC，`wifix` 已默认化，PC ping 6/6→20/20）；② DNS 三键发布；③ 运行期 RX 停摆定位为「两阶段死亡」（信标流先死、数据路径 15-min 锚点死，环境依赖间歇性），自愈已布防——`STALL-GLOBAL` 信标流检测 + `VDEV_DOWN` 重 join（`recover` 默认开启，限 2 次）；④ 三次同族 CE3 SMMU PANIC 的病灶（peer-map-timeout auth 回退）已彻底删除；默认镜像 22 min 健康实证（309 心跳 0 冻结、采集后 ping 20/20、0 PANIC）。**残留**：recover 真停摆效果待验证、卷 I/O 挂死（黑屏圈）独立线未修、Safari 端到端与 Wi-Fi 详情待用户实测，见 §5.4/§5.6）。
 > 本文件与 `docs/*.md` 里的阶段状态是历史归档，冲突时以交接文档为准。
 > 最新逐轮事实：`logs/2026-11-14.md`（工作日志，追加不覆盖）。
 
