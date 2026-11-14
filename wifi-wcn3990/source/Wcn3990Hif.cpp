@@ -5144,7 +5144,7 @@ wcn3990_hif_poll(void)
 				g_mgmtev_mark = g_mgmt_events;
 				g_ce1_mark_polls = g_polls;
 				g_ce1_stall = 0;
-			} else if (g_ce1_stall < 3) {
+			} else if (g_ce1_stall < 6) {
 				uint32_t nb1 = g_dr_desc[1] ?
 				    (uint32_t)g_dr_desc[1][g_sw1 &
 				    (hif_shape[1].dst_n - 1u)].nbytes : 0xffffu;
@@ -5161,6 +5161,33 @@ wcn3990_hif_poll(void)
 				    g_dma ? (unsigned)s_rri[2] : 0u,
 				    g_dma ? (unsigned)g_dma->htt_alloc_idx : 0u,
 				    g_wr_rx_in_ord, g_wr_rx_frames);
+				/* chain-626 timing: the beacon stream froze at
+				 * polls=96000 (r0) / 127000 (r1) and never
+				 * came back, while data frames kept arriving
+				 * for another ~13 min - the AP is still
+				 * broadcasting, we just cannot see it any
+				 * more.  The link is unusable at this point,
+				 * and VDEV_START's response rides the same
+				 * CE2 delivery that beacons used, so rejoin
+				 * here instead of waiting for the datapath
+				 * to die at the ~15-min anchor.  Bounded to
+				 * 2 attempts. */
+				if (g_recover && g_recover_used < 2) {
+					g_recover_used++;
+					HIF_LOG("recover #%u: beacon stream "
+					    "froze (mgmtev=%u), VDEV_DOWN "
+					    "then rejoin (srri4=%u wr4=%u: "
+					    "tx still consumed)",
+					    g_recover_used, g_mgmt_events,
+					    g_dma ?
+					        (unsigned)(s_rri[4] &
+					        0xffffu) : 0u,
+					    g_wr4);
+					(void)hif_join_send_vdev_down();
+					g_recover_active = 1;
+					hif_join_reset("beacon stream froze: "
+					    "mgmt events stopped arriving");
+				}
 			}
 		}
 		if (g_link_up && g_recover && g_recover_used < 2 &&
