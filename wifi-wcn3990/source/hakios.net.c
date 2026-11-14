@@ -22,7 +22,6 @@
 #include <net/ethernet.h>
 #include <net/if.h>
 #include <net/if_ether.h>
-#include <net/if_var.h>
 #include <net/if_media.h>
 #include <net/if_types.h>
 #include <net/kpi_interface.h>
@@ -34,12 +33,6 @@
 #include <sys/hakios.net.h>
 #include <sys/sockio.h>
 #include <sys/systm.h>
-
-/* chain-616: ether_input() is not declared in the exported headers this
- * kernel build ships (net/if_ethersubr.h is absent), but the symbol is
- * linked into the kernel, so declare it here: it is the handler
- * ifnet_input() must find in ifp->if_input. */
-extern void ether_input(struct ifnet *ifp, struct mbuf *m);
 
 extern void HakiosWLANStart(const char *interface, const uint8_t *address);  /* drivers/wifi/hakios.wlan.cpp */
 
@@ -62,11 +55,13 @@ struct net_if {
 	} count;
 };
 static struct net_if net_ifs[HAKIOS_NET_UNITS];
-/* chain-616: netin=1 assigns ifp->if_input = ether_input.  With
- * IFNET_INIT_LEGACY nothing else ever sets it, so ifnet_input() had no
- * handler and every received frame was dropped before the stack -- the
- * reason the stack never answered ARP.  0 keeps the old behaviour so the
- * same image can A/B it. */
+/* chain-616: the ARP evidence says frames reach ifnet_input() and the
+ * stack still never answers, which is the shape of ifp->if_input being
+ * NULL (nothing sets it under IFNET_INIT_LEGACY).  This build keeps
+ * struct ifnet opaque (chain-616 CI: "incomplete definition of type
+ * struct __ifnet"), so the handler cannot be assigned from here yet;
+ * what this gate does is make ifnet_input()'s return value visible so
+ * the next round starts from a measurement instead of a guess. */
 static int g_net_in;
 
 static inline struct net_if *
@@ -230,9 +225,9 @@ hakios_net_input_unit(unsigned unit, const uint8_t *frame, size_t length)
 		 * frame never reached the stack (e.g. no if_input handler). */
 		if (n->count.received <= 8u ||
 		    (n->count.received & 63u) == 0u)
-			printf("net: in #%llu len=%llu rc=%d\n",
+			printf("net: in #%llu len=%llu rc=%d netin=%d\n",
 			    (unsigned long long)n->count.received,
-			    (unsigned long long)length, rc);
+			    (unsigned long long)length, rc, g_net_in);
 	}
 }
 
@@ -474,13 +469,6 @@ hakios_net_attach(const struct hakios_net_link *link)
 		n->link = NULL;
 		return false;
 	}
-	/* ifnet_input() delivers to ifp->if_input.  Report the state before
-	 * touching it, so "was it NULL" is evidence rather than an
-	 * assumption, then adopt ether_input when netin=1. */
-	printf("net: en%u if_input=%d netin=%d\n", unit,
-	    ifp->if_input != NULL, g_net_in);
-	if (g_net_in && ifp->if_input == NULL)
-		ifp->if_input = ether_input;
 	ifnet_set_lladdr(ifp, address, ETHER_ADDR_LEN);
 	bpfattach(ifp, DLT_EN10MB, ETHER_HDR_LEN);
 	if (net_fix & 2) {
