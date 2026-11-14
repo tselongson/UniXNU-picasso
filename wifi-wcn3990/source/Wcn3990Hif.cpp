@@ -620,6 +620,16 @@ static uint32_t g_htt_rx;     /* HTT messages seen on CE1 (64-print cap) */
  * CE1 has gone silent.  These two have no cap and are printed every
  * heartbeat: ce1 = completed CE1 descriptors, psk = PS-off re-sends. */
 static uint32_t g_ce1_done, g_ps_keep_sent;
+/* chain-622 CE1 stall detector.  Read-only by default: when CE1 stops
+ * completing descriptors for 15k polls (~105 s) while the link is up, print
+ * one bounded snapshot of the ring state.  That single line separates the two
+ * remaining candidates - the target stopped writing (rri1 frozen) versus the
+ * host no longer seeing completed descriptors (rri1 moving, nbytes 0).
+ * ce1kick=1 additionally refills the free slots exactly like Trogdor
+ * wc_rx_post() does, so the "buffer leak" hypothesis can be tested with no
+ * extra CI.  Default 0 keeps this build behaviourally identical to e20ca34. */
+static uint32_t g_ce1_mark, g_ce1_mark_polls, g_ce1_stall;
+static int g_ce1_kick;
 static uint8_t g_htt_seq;     /* HTC seq_no for the HTT endpoint (htc.h @5) */
 static int g_htt_ring_done;   /* RX_RING_CFG + AGGR_CFG already sent */
 static void hif_htt_setup_finish(void);
@@ -1316,6 +1326,39 @@ hif_service_ce1(void)
 		}
 		g_sw1 = (g_sw1 + 1) & (n - 1);
 	}
+}
+
+/* chain-622 ce1kick=1: refill every free CE1 destination slot up to sw1-1,
+ * exactly the loop Trogdor wc_rx_post() runs after each service pass
+ * (`free = ((d->sw - 1u) - d->write) & d->mask`).  The per-message repost in
+ * hif_service_ce1() should already maintain that invariant, so a non-zero
+ * count here means a slot was dropped somewhere and the target ran out of
+ * receive buffers.  Read-only when ce1kick=0; the caller only reaches this
+ * after CE1 has already been silent for ~105 s. */
+static void
+hif_ce1_kick(void)
+{
+	uint32_t n = hif_shape[1].dst_n;
+	uint32_t last, i, cnt = 0;
+
+	if (n == 0 || g_dr_desc[1] == NULL) return;
+	last = (g_sw1 + n - 1u) & (n - 1u);   /* sw1 - 1: keep one slot free */
+	for (i = g_post1; i != last && cnt < n; i = (i + 1u) & (n - 1u)) {
+		struct wcn_ce_desc_64 *w = &g_dr_desc[1][i];
+
+		w->addr = (g_buf_pa[1] + (uint64_t)i * hif_shape[1].buf_sz) &
+		    CE_DESC_ADDR_MASK;
+		w->nbytes = 0;
+		w->flags = 0;
+		w->toeplitz = 0;
+		cnt++;
+	}
+	if (cnt == 0) return;
+	g_post1 = last;
+	hif_mb();
+	hif_reg_write(1, CE1_SHADOW_DST_WR, g_post1);
+	HIF_LOG("CE1 kick: refilled %u slots (sw1=%u post1=%u last=%u ce1=%u)",
+	    cnt, g_sw1, g_post1, last, g_ce1_done);
 }
 
 static void
@@ -4950,7 +4993,8 @@ wcn3990_hif_poll(void)
 		HIF_LOG("heartbeat polls=%u stage=%d state=%d rx=%u beacons=%u "
 		    "desc0.nbytes=%u drri=%x htt=%u httidx=%u mgmt=%u mgmtev=%u "
 		    "join=%d ind=%u ord=%u msdu=%u eapol=%u bad=%u/%u "
-		    "uni=%u grp=%u ring=%u/%u srri4=%u wr4=%u psk=%u ce1=%u",
+		    "uni=%u grp=%u ring=%u/%u srri4=%u wr4=%u psk=%u ce1=%u "
+		    "drri1=%x sw1=%u po1=%u nb1=%u",
 		    g_polls, g_stage, (int)g_state, g_rx_packets, g_beacons,
 		    (unsigned)s_dst2[0].nbytes,
 		    (g_bases_programmed && g_dma) ? ((s_rri[2] >> 16) & 0xffffu) : 0,
@@ -4966,7 +5010,18 @@ wcn3990_hif_poll(void)
 		     * without any device interaction. */
 		    (g_bases_programmed && g_dma) ?
 		        ((*(volatile uint32_t *)&g_dma->rri[4]) & 0xffffu) : 0,
-		    g_wr4, g_ps_keep_sent, g_ce1_done);
+		    g_wr4, g_ps_keep_sent, g_ce1_done,
+		    /* chain-622: the target's CE1 destination write index.
+		     * Frozen here while ce1 is frozen => the target stopped
+		     * writing.  Still advancing => the host stopped seeing
+		     * completed descriptors.  nb1 is the length word of the
+		     * slot sw1 points at, i.e. exactly what the service loop
+		     * tests before it breaks. */
+		    g_dma ? (unsigned)s_rri[1] : 0u,
+		    g_sw1, g_post1,
+		    g_dr_desc[1] ?
+		        (unsigned)g_dr_desc[1][g_sw1 & (hif_shape[1].dst_n - 1u)].nbytes :
+		        0xffffu);
 		/* join=<n>: a compact status line while a join is running. */
 		if (g_join && g_join_state != HIF_JOIN_IDLE) {
 			HIF_LOG("JOIN: state=%d tries=%u bss=%u mgmt "
@@ -5001,6 +5056,35 @@ wcn3990_hif_poll(void)
 			} else if (g_stage == 2 && g_polls >= 6000) {
 				g_stage = 3;
 				hif_post_buffers();
+			}
+		}
+		/* chain-622: bounded CE1 stall snapshot.  Fifteen thousand polls
+		 * (~105 s) without a single completed descriptor, while the link
+		 * is up, is not an idle gap any more - the data plane is wedged.
+		 * Print the ring state once per stall, at most three times, so
+		 * the capture stays small and the poll loop is untouched until
+		 * the stall has actually happened. */
+		if (g_link_up && g_polls - g_ce1_mark_polls >= 15000u) {
+			if (g_ce1_done != g_ce1_mark) {
+				g_ce1_mark = g_ce1_done;
+				g_ce1_mark_polls = g_polls;
+				g_ce1_stall = 0;
+			} else if (g_ce1_stall < 3) {
+				uint32_t nb1 = g_dr_desc[1] ?
+				    (uint32_t)g_dr_desc[1][g_sw1 &
+				    (hif_shape[1].dst_n - 1u)].nbytes : 0xffffu;
+
+				g_ce1_stall++;
+				HIF_LOG("CE1 STALL #%u polls=%u ce1=%u drri1=%08x "
+				    "sw1=%u post1=%u nb1=%u rri2=%08x httidx=%u "
+				    "ord=%u msdu=%u",
+				    g_ce1_stall, g_polls, g_ce1_done,
+				    g_dma ? (unsigned)s_rri[1] : 0u,
+				    g_sw1, g_post1, nb1,
+				    g_dma ? (unsigned)s_rri[2] : 0u,
+				    g_dma ? (unsigned)g_dma->htt_alloc_idx : 0u,
+				    g_wr_rx_in_ord, g_wr_rx_frames);
+				if (g_ce1_kick) hif_ce1_kick();
 			}
 		}
 	}
@@ -5645,6 +5729,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("pskeep", &v, sizeof(v)) && v <= 1) {
 		g_ps_keep = (int)v;
 	}
+	v = 0;
+	if (PE_parse_boot_argn("ce1kick", &v, sizeof(v)) && v <= 1) {
+		g_ce1_kick = (int)v;
+	}
 	v = 1;
 	if (PE_parse_boot_argn("dhcp", &v, sizeof(v)) && v <= 1) {
 		g_dhcp = (int)v;
@@ -5773,6 +5861,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	g_sw1 = 0;
 	g_post1 = (hif_shape[1].dst_n > 0) ? (uint32_t)(hif_shape[1].dst_n - 1) : 0;
 	g_htt_rx = 0;
+	g_ce1_done = 0;
+	g_ce1_mark = 0;
+	g_ce1_mark_polls = 0;
+	g_ce1_stall = 0;
 	g_polls = 0;
 	g_rx_packets = 0;
 	g_beacons = 0;
