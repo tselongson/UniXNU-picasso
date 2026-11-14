@@ -630,6 +630,18 @@ static uint32_t g_ce1_done, g_ps_keep_sent;
  * extra CI.  Default 0 keeps this build behaviourally identical to e20ca34. */
 static uint32_t g_ce1_mark, g_ce1_mark_polls, g_ce1_stall;
 static int g_ce1_kick;
+/* chain-625: a real stall freezes BOTH ce1 (tx compl + rx in-ord) and msdu
+ * (frames actually delivered).  chain-624 proved that ce1 alone goes quiet
+ * during ordinary idle gaps too - 43 false stalls on the control arm - and
+ * that a false-stall rejoin panics, so both counters must agree. */
+static uint32_t g_msdu_mark;
+/* chain-625: recover-driven rejoin.  While set, the join state machine must
+ * NOT fall into "peer map timeout, sending auth anyway": the rejoin starts
+ * with VDEV_DOWN, and if the target is still wedged the peer map never
+ * comes; stacking auth retransmits on the ce3 mgmt slots then trips the
+ * same SMMU race that txguard fixed for ce4 (ESR be000411, chain-624).
+ * Cleared as soon as VDEV_UP goes out. */
+static int g_recover_active;
 /* chain-623 recover=1: when the stall detector fires, drop the session with
  * hif_join_reset() so wifiauto re-scans and rejoins through the already
  * device-proven path (VDEV_START -> peer -> auth/assoc -> keys -> VDEV_UP ->
@@ -1414,6 +1426,7 @@ hif_dump_regs(const char *why)
 #define WMI_SCAN_CHAN_LIST_CMDID      0x3003   /* WMI_TLV_SCAN_CHAN_LIST_CMDID */
 #define WMI_VDEV_UP_CMDID             0x5005   /* WMI_TLV_VDEV_UP_CMDID */
 #define WMI_VDEV_START_CMDID          0x5003   /* WMI_TLV_VDEV_START_CMDID */
+#define WMI_VDEV_DOWN_CMDID           0x5007   /* VDEV group: CREATE=0x5001, UP=0x5005 */
 #define WMI_SCAN_EVENTID              0x3001
 #define WMI_MGMT_RX_EVENTID           0x7001   /* WMI_GRP_MGMT  = 7 */
 #define WMI_CHAN_INFO_EVENTID         0x4002   /* WMI_GRP_PDEV  = 4 */
@@ -1493,6 +1506,9 @@ hif_dump_regs(const char *why)
 #define WMI_TLV_VDEV_CREATE_CMD       86      /* wmi-tlv.h enum wmi_tlv_tag */
 #define WMI_TLV_VDEV_UP_CMD           92
 #define WMI_TLV_VDEV_START_CMD        88      /* STRUCT_VDEV_START_REQUEST_CMD */
+/* chain-625: interpolated from our device-proven anchors - CREATE@250=86,
+ * UP@256=92 in wmi-tlv.h's tag enum, so DOWN@258 is 94. */
+#define WMI_TLV_VDEV_DOWN_CMD         94
 #define WMI_TLV_PDEV_SET_BASE_MACADDR_CMD 172 /* enum wmi_tlv_tag, master */
 /* wmi-tlv.c: WMI_TLV_ABI_VER0 / VER1 / VER_NS0 */
 #define WMI_TLV_ABI_VER0              0x01000000u
@@ -2765,6 +2781,7 @@ hif_join_rsn_prepare(const uint8_t *e)
  * (wpa=1, wpass=<passphrase>) so no secret lives in this source file. */
 static void hif_join_peer_param(uint32_t id, uint32_t value);
 static void hif_join_send_vdev_up(void);
+static int hif_join_send_vdev_down(void);
 
 #define WPA_EAPOL_FIXED 99u
 
@@ -3825,6 +3842,24 @@ hif_join_send_peer_assoc(void)
 	}
 }
 
+/* chain-625: WMI_TLV VDEV_DOWN (0x5007, tag 94), the exact shape of
+ * ath10k_wmi_tlv_op_gen_vdev_down() - one 4-byte {vdev_id}.  It must precede
+ * a recover rejoin: re-STARTing a vdev that is still UP gets no
+ * VDEV_START_RESPONSE, and the peer-map timeout that follows is what
+ * panicked chain-624. */
+static int
+hif_join_send_vdev_down(void)
+{
+	uint32_t vdev = 0;
+	uint8_t tlv[16];
+	uint8_t *p = tlv;
+
+	memset(tlv, 0, sizeof(tlv));
+	p = hif_put_tlv(p, WMI_TLV_VDEV_DOWN_CMD, 4u, &vdev);
+	HIF_LOG("JOIN: vdev down sent (0x5007)");
+	return hif_wmi_command(WMI_VDEV_DOWN_CMDID, tlv, (uint32_t)(p - tlv));
+}
+
 /* wlan-wip wj_send_vdev_up(): VDEV_UP with the associated AID and BSSID. */
 static void
 hif_join_send_vdev_up(void)
@@ -3843,6 +3878,10 @@ hif_join_send_vdev_up(void)
 	cmd.assoc_id = g_join_ap.aid;
 	memcpy(cmd.bssid, g_join_ap.b.bssid, 6);
 	p = hif_put_tlv(p, WMI_TLV_VDEV_UP_CMD, 16, &cmd);
+	/* chain-625: the recover-driven rejoin made it all the way to VDEV_UP,
+	 * so the target answered VDEV_START - the rx path came back.  From
+	 * here on the peer-map-timeout fallback is safe again. */
+	g_recover_active = 0;
 	HIF_LOG("JOIN: vdev up sent (aid=%u bssid=%02x:%02x:%02x:%02x:%02x:%02x)",
 	    g_join_ap.aid, (unsigned)g_join_ap.b.bssid[0],
 	    (unsigned)g_join_ap.b.bssid[1], (unsigned)g_join_ap.b.bssid[2],
@@ -4322,7 +4361,19 @@ hif_join_poll(void)
 			/* Diagnostic fallback: if this firmware never emits an HTT peer
 			 * map, still send auth once so a single boot answers whether
 			 * VDEV_START alone was enough.  The log line makes the two
-			 * cases distinguishable. */
+			 * cases distinguishable.
+			 * chain-625: NOT after a recover-driven rejoin.  There the
+			 * vdev was just torn down and re-STARTed; if the peer map
+			 * still never comes, the target is wedged for real, and
+			 * stacking auth frames on the ce3 mgmt slots trips the
+			 * SMMU race that panicked chain-624 (ESR be000411). */
+			if (g_recover_active) {
+				HIF_LOG("JOIN: peer map timeout after recover; "
+				    "rearming scan instead of auth");
+				hif_join_reset(
+				    "recover: no peer map, rearming scan");
+				return;
+			}
 			HIF_LOG("JOIN: peer map timeout, sending auth anyway "
 			    "(diagnostic)");
 			g_join_state = HIF_JOIN_AUTH_SENT;
@@ -5076,8 +5127,10 @@ wcn3990_hif_poll(void)
 		 * single completed descriptor is safe: every queued frame
 		 * produces a TX_COMPL on CE1, and the system keeps sending. */
 		if (g_link_up && g_polls - g_ce1_mark_polls >= 800u) {
-			if (g_ce1_done != g_ce1_mark) {
+			if (g_ce1_done != g_ce1_mark ||
+			    g_wr_rx_frames != g_msdu_mark) {
 				g_ce1_mark = g_ce1_done;
+				g_msdu_mark = g_wr_rx_frames;
 				g_ce1_mark_polls = g_polls;
 				g_ce1_stall = 0;
 			} else if (g_ce1_stall < 3) {
@@ -5098,15 +5151,23 @@ wcn3990_hif_poll(void)
 				if (g_ce1_kick) hif_ce1_kick();
 				if (g_recover && g_recover_used < 2) {
 					g_recover_used++;
-					HIF_LOG("recover #%u: rejoining "
-					    "after the rx stall (srri4=%u "
-					    "wr4=%u: the target still "
-					    "consumes tx, so it is alive)",
+					HIF_LOG("recover #%u: VDEV_DOWN then "
+					    "rejoin after the rx stall "
+					    "(srri4=%u wr4=%u: the target "
+					    "still consumes tx, so it is "
+					    "alive)",
 					    g_recover_used,
 					    g_dma ?
 					        (unsigned)(s_rri[4] & 0xffffu) :
 					        0u,
 					    g_wr4);
+					/* Without VDEV_DOWN the firmware keeps
+					 * the vdev started and never answers
+					 * the second VDEV_START: that is the
+					 * "peer map timeout" chain-624 died
+					 * from. */
+					(void)hif_join_send_vdev_down();
+					g_recover_active = 1;
 					hif_join_reset(
 					    "rx stalled: target->host went "
 					    "silent");
@@ -5896,6 +5957,8 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	g_ce1_mark_polls = 0;
 	g_ce1_stall = 0;
 	g_recover_used = 0;
+	g_msdu_mark = 0;
+	g_recover_active = 0;
 	g_polls = 0;
 	g_rx_packets = 0;
 	g_beacons = 0;
