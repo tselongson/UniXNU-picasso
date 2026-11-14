@@ -22,6 +22,8 @@
 #include <net/ethernet.h>
 #include <net/if.h>
 #include <net/if_ether.h>
+#include <net/if_ethersubr.h>
+#include <net/if_var.h>
 #include <net/if_media.h>
 #include <net/if_types.h>
 #include <net/kpi_interface.h>
@@ -55,6 +57,12 @@ struct net_if {
 	} count;
 };
 static struct net_if net_ifs[HAKIOS_NET_UNITS];
+/* chain-616: netin=1 assigns ifp->if_input = ether_input.  With
+ * IFNET_INIT_LEGACY nothing else ever sets it, so ifnet_input() had no
+ * handler and every received frame was dropped before the stack -- the
+ * reason the stack never answered ARP.  0 keeps the old behaviour so the
+ * same image can A/B it. */
+static int g_net_in;
 
 static inline struct net_if *
 net_if_of(ifnet_t ifp)
@@ -210,7 +218,17 @@ hakios_net_input_unit(unsigned unit, const uint8_t *frame, size_t length)
 	bpf_tap_in(n->ifp, DLT_EN10MB, packet, header, ETHER_HDR_LEN);
 	n->count.received++;
 	n->count.received_bytes += length;
-	ifnet_input(n->ifp, packet, &stats);
+	{
+		errno_t rc = ifnet_input(n->ifp, packet, &stats);
+
+		/* Bounded: the first 8 frames and every 64th.  rc != 0 means the
+		 * frame never reached the stack (e.g. no if_input handler). */
+		if (n->count.received <= 8u ||
+		    (n->count.received & 63u) == 0u)
+			printf("net: in #%llu len=%llu rc=%d\n",
+			    (unsigned long long)n->count.received,
+			    (unsigned long long)length, rc);
+	}
 }
 
 void
@@ -451,6 +469,13 @@ hakios_net_attach(const struct hakios_net_link *link)
 		n->link = NULL;
 		return false;
 	}
+	/* ifnet_input() delivers to ifp->if_input.  Report the state before
+	 * touching it, so "was it NULL" is evidence rather than an
+	 * assumption, then adopt ether_input when netin=1. */
+	printf("net: en%u if_input=%d netin=%d\n", unit,
+	    ifp->if_input != NULL, g_net_in);
+	if (g_net_in && ifp->if_input == NULL)
+		ifp->if_input = ether_input;
 	ifnet_set_lladdr(ifp, address, ETHER_ADDR_LEN);
 	bpfattach(ifp, DLT_EN10MB, ETHER_HDR_LEN);
 	if (net_fix & 2) {
@@ -483,5 +508,6 @@ hakios_net_init(void)
 	PE_parse_boot_argn("net_trace", &net_trace, sizeof(net_trace));
 	PE_parse_boot_argn("net_names", &net_names, sizeof(net_names));
 	PE_parse_boot_argn("netfix", &net_fix, sizeof(net_fix));
+	PE_parse_boot_argn("netin", &g_net_in, sizeof(g_net_in));
 	hakios_virtio_net_init();
 }
