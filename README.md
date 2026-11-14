@@ -1,5 +1,13 @@
 # UniXNU on Redmi K30 5G (picasso, SM7250)
 
+> **WiFi (WCN3990) porting — handoff & help-wanted entry point:**
+> [`docs/wifi-handoff/README.md`](docs/wifi-handoff/README.md) (中文).
+> It is the first thing to read for anyone taking over this port or filing a
+> question: current authoritative status ([`handoff/...-v35.md`](docs/wifi-handoff/handoff/wifi-wcn3990-handoff-2026-11-14-v35.md)),
+> 29 handoff documents, 16 daily project logs, the list of hypotheses already
+> falsified on device, and the operating rules for CI / single-variable A/B.
+> Credentials are redacted; do not commit `work/wifi-credentials.txt`.
+
 > **This branch builds an experimental iPhone X / iOS 16.7.16 (20H392) target.**
 > Firmware inputs, ADT identity and the owner-signed root policy have been updated.
 > XNU 10063 / Darwin 23 and its qualified native kexts are retained. iOS 16

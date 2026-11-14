@@ -6,3 +6,8 @@
 policy/verified-root-picasso/** text eol=lf
 policy/verified-root-picasso/**/*.bin binary
 policy/verified-root-picasso/*.bin binary
+
+# Published handoff documents and daily logs are generated from the local
+# workspace by work/publish-wifi-handoff.py, which writes LF.  Pin the newline
+# so a Windows checkout does not turn every re-publish into a whole-tree diff.
+docs/wifi-handoff/** text eol=lf
