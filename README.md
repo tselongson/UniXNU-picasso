@@ -1,5 +1,12 @@
 # UniXNU on Redmi K30 5G (picasso, SM7250)
 
+> **WiFi (WCN3990) porting — handoff, project logs & help-wanted entry point**
+> (active work is on the [`kd439-pool`](https://github.com/tselongson/UniXNU-picasso/tree/kd439-pool) branch):
+> **[`docs/wifi-handoff/README.md`](https://github.com/tselongson/UniXNU-picasso/blob/kd439-pool/docs/wifi-handoff/README.md)** (中文).
+> 29 handoff documents, 16 daily logs, current authoritative status (v35), the list of
+> hypotheses already falsified on device, and CI / single-variable A/B operating rules.
+> Credentials are redacted. This branch (`main`) is an older baseline; see the link above.
+
 > **Status: the XNU kernel boots through to the root-device wait.** The UEFI
 > firmware boots the UniXNU menu, and the xnu entry starts the kernel through
 > DarwinBoot. The kernel reaches the BSD layer, loads the AMFI / AppleImage4 /
