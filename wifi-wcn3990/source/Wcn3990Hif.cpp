@@ -630,6 +630,17 @@ static uint32_t g_ce1_done, g_ps_keep_sent;
  * extra CI.  Default 0 keeps this build behaviourally identical to e20ca34. */
 static uint32_t g_ce1_mark, g_ce1_mark_polls, g_ce1_stall;
 static int g_ce1_kick;
+/* chain-623 recover=1: when the stall detector fires, drop the session with
+ * hif_join_reset() so wifiauto re-scans and rejoins through the already
+ * device-proven path (VDEV_START -> peer -> auth/assoc -> keys -> VDEV_UP ->
+ * DHCP).  Upstream ath10k treats exactly this "rx stuck, tx still queued"
+ * state the same way: commit f78210dd4bea0 ("trigger hardware recovery upon
+ * rx failures", Tested-on WCN3990 hw1.0 WLAN.HL.3.2.2) restarts the hardware
+ * instead of leaving it inoperable.  Rejoining also doubles as the liveness
+ * probe: VDEV_START must be answered with 0x5002 on CE2, so a join that
+ * times out means the WMI task is gone too, not just the rx data path. */
+static int g_recover;
+static uint32_t g_recover_used;
 static uint8_t g_htt_seq;     /* HTC seq_no for the HTT endpoint (htc.h @5) */
 static int g_htt_ring_done;   /* RX_RING_CFG + AGGR_CFG already sent */
 static void hif_htt_setup_finish(void);
@@ -5085,6 +5096,21 @@ wcn3990_hif_poll(void)
 				    g_dma ? (unsigned)g_dma->htt_alloc_idx : 0u,
 				    g_wr_rx_in_ord, g_wr_rx_frames);
 				if (g_ce1_kick) hif_ce1_kick();
+				if (g_recover && g_recover_used < 2) {
+					g_recover_used++;
+					HIF_LOG("recover #%u: rejoining "
+					    "after the rx stall (srri4=%u "
+					    "wr4=%u: the target still "
+					    "consumes tx, so it is alive)",
+					    g_recover_used,
+					    g_dma ?
+					        (unsigned)(s_rri[4] & 0xffffu) :
+					        0u,
+					    g_wr4);
+					hif_join_reset(
+					    "rx stalled: target->host went "
+					    "silent");
+				}
 			}
 		}
 	}
@@ -5733,6 +5759,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("ce1kick", &v, sizeof(v)) && v <= 1) {
 		g_ce1_kick = (int)v;
 	}
+	v = 0;
+	if (PE_parse_boot_argn("recover", &v, sizeof(v)) && v <= 1) {
+		g_recover = (int)v;
+	}
 	v = 1;
 	if (PE_parse_boot_argn("dhcp", &v, sizeof(v)) && v <= 1) {
 		g_dhcp = (int)v;
@@ -5865,6 +5895,7 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	g_ce1_mark = 0;
 	g_ce1_mark_polls = 0;
 	g_ce1_stall = 0;
+	g_recover_used = 0;
 	g_polls = 0;
 	g_rx_packets = 0;
 	g_beacons = 0;
