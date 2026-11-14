@@ -707,6 +707,8 @@ static void *wifiui_dns_thread(void *unused)
 
 #include "picasso-astc-guard.m"
 #include "picasso-statusbar-metrics.m"
+#include "picasso-keyboard-size.m"
+#include "picasso-input-cache.m"
 
 static void picasso_statusbar_start(void)
 {
