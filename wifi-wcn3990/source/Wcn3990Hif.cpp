@@ -2546,10 +2546,14 @@ static uint32_t g_join_mgmt_tx, g_join_mgmt_ok, g_join_mgmt_fail;
 static int g_join_started;        /* 0 = pending, 1 = ok, 2 = refused */
 static int g_join_peer_mapped;
 static uint16_t g_join_peer_id;
-/* chain-614: keyfix=1 writes TKIP tx/rx MIC lengths into the key cmd.
- * The chain-613 rekey gate was falsified on device (rk1 valid run: PTK
- * re-installed, KEY_COMPLETE received, still no unicast) and removed. */
-static int g_key_fix;
+/* chain-615: pspoke=1 sends WMI_PEER_SET_PARAM(0xff, 1) right after
+ * VDEV_UP, exactly where ath10k_bss_assoc (mac.c:3179) and Trogdor
+ * (WlanRadio.c:4471) do it: WMI_PEER_DUMMY_VAR, the firmware's STA
+ * power-save workaround.  Without it a buggy PS state machine can make
+ * the AP buffer all unicast while broadcast still arrives at DTIM.
+ * The chain-613 rekey and chain-614 keyfix gates were both falsified on
+ * device and are gone. */
+static int g_ps_poke;
 static const uint8_t g_join_mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 /* The access point being joined (copied out of the BSS table). */
 static struct {
@@ -3137,12 +3141,13 @@ hif_wpa_send_key(int pairwise, unsigned index, const uint8_t *key,
 	/* body[6..19]: rx/tx sequence counters, all zero */
 	body[20] = key_len;
 	/* wmi.h:5077-5079: body[21]/[22] are key_txmic_len/key_rxmic_len.
-	 * ath10k mac.c:271-276 requires 8/8 for TKIP; the reference stack
-	 * sends pure CCMP and writes 0/0.  Our AP uses a 32-byte TKIP GTK. */
-	if (g_key_fix && cipher == 2u) {
+	 * ath10k mac.c:271-276 always writes 8/8 for TKIP (a 32-byte TKIP
+	 * GTK is 16 key + 8 tx mic + 8 rx mic); the reference stack never
+	 * saw TKIP because it only joins CCMP-group APs.  Unconditional:
+	 * chain-614 kf1 proved these two fields alone change nothing. */
+	if (cipher == 2u) {
 		body[21] = 8u;
 		body[22] = 8u;
-		HIF_LOG("WPA: TKIP mic lengths 8/8 (keyfix=1)");
 	}
 	p = hif_put_tlv(p, 0x60, 92, body);
 	p = hif_put_tlv(p, 0x11, (uint16_t)key_len, key);
@@ -3782,6 +3787,15 @@ hif_join_send_vdev_up(void)
 	    (unsigned)g_join_ap.b.bssid[3], (unsigned)g_join_ap.b.bssid[4],
 	    (unsigned)g_join_ap.b.bssid[5]);
 	(void)hif_wmi_command(WMI_VDEV_UP_CMDID, tlv, (uint32_t)(p - tlv));
+	/* ath10k_bss_assoc's last step (mac.c:3179) and Trogdor's
+	 * (WlanRadio.c:4471): poke the firmware's STA power-save state
+	 * machine.  WMI_PEER_DUMMY_VAR = 0xff (wmi.h:6336).  Placed here,
+	 * not in the assoc handler, so the deferred-VDEV_UP path gets it
+	 * too and the order peer_assoc -> vdev_up -> poke is preserved. */
+	if (g_ps_poke) {
+		HIF_LOG("JOIN: peer ps poke (param 0xff=1)");
+		hif_join_peer_param(0xff, 1);
+	}
 }
 
 static void
@@ -4000,8 +4014,8 @@ hif_join_peer_event(const uint8_t *p, uint32_t n)
 	    !memcmp(p + 4, g_join_ap.b.bssid, 6)) {
 		g_join_peer_mapped = 1;
 		g_join_peer_id = (uint16_t)(p[2] | (uint16_t)p[3] << 8);
-		HIF_LOG("JOIN: peer mapped id=%u keyed=%u keyfix=%d",
-		    (unsigned)g_join_peer_id, (unsigned)g_wpa_st.keyed, g_key_fix);
+		HIF_LOG("JOIN: peer mapped id=%u keyed=%u pspoke=%d",
+		    (unsigned)g_join_peer_id, (unsigned)g_wpa_st.keyed, g_ps_poke);
 	}
 }
 
@@ -5607,8 +5621,8 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_tx_guard = (int)v;
 	}
 	v = 0;
-	if (PE_parse_boot_argn("keyfix", &v, sizeof(v)) && v <= 1) {
-		g_key_fix = (int)v;
+	if (PE_parse_boot_argn("pspoke", &v, sizeof(v)) && v <= 1) {
+		g_ps_poke = (int)v;
 	}
 	v = 1;
 	if (PE_parse_boot_argn("dhcp", &v, sizeof(v)) && v <= 1) {
