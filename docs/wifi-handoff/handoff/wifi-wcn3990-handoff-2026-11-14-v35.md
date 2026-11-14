@@ -702,6 +702,33 @@ r0/r1 各 **1200 s**（越过 15-min 锚点）：**0 PANIC / 0 卷错误 / 0 STA
 **chain-628-final（CI `43634720827`）**：默认镜像（无 recover token）boot
 1200 s + 采集期/采集后 ping，验证默认行为后**留桌面**给白天实测。
 
+#### ★ chain-628 判决（04:3x，CI `43634720827`）：第三次同族 PANIC → auth 回退彻底删除
+
+默认镜像（`870bed2`，recover 已默认化、无 recover token）boot **~150 s 即
+PANIC**（35 个心跳，1200 s 窗截断；bc=10→2，**信标流从未建立**——环境性 join
+卡死）。现场取证：
+
+```
+disk5 I/O error 刷屏（卷线再现）
+JOIN: peer map timeout, sending auth anyway (diagnostic)   ← 正常 join 的老回退
+JOIN: MGMT_TX slot=0 → ce3 send desc 9 → auth retransmit 1
+PANIC: ESR be000411  smr7=0x800100c0  cb61_fsr=0x400       ← CE3 mgmt SMMU 竞态
+```
+
+**根因**：chain-625 的 auth 门控（`g_recover_active`）只保护 **recover 触发的
+重 join**；这次 recover 从未触发（`recover_calls=0`），是**正常 join** 卡在
+peer map timeout → 走了老回退 → auth 重传堆叠 → CE3 SMMU 竞态 → PANIC。
+625/626/627 没踩是因为正常 join 都按时拿到 peer map。
+
+**修复（`1676bd8`）**：**彻底删除** peer-map-timeout 的 auth 回退——它从未
+产生过一次成功 join，只在异常时生产 PANIC（624、628 两次）。现在任何 join 的
+peer map 超时都走 `hif_join_reset()`（rearm scan，设备已验证的 wifiauto 路径）。
+正常状态机内的 auth/assoc 重传（8 次上限 + reset 兜底）保留——那些只在
+peer map 已到、状态机正常推进时发生。
+
+**chain-628 重跑（CI `43637905520`）**：同一收尾链（默认镜像 1200 s +
+采集期/采集后 ping，完成留桌面）。
+
 **下一刀（两条一起做，一次上机即可分流）**：
 1. 停摆时**发一条 WMI 命令并等响应**（如 `WMI_GET_STATS`）：
    有响应 ⇒ 固件活着、只是 RX 路径挂起；无响应 ⇒ 固件已崩。
