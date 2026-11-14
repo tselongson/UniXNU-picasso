@@ -38,9 +38,16 @@
       k0(pskeep=0) 采集后 ping 20/20，k1(pskeep=1) 13/20 且 5 次超时；
       实时现场 psk=14→19 一直在重发 PS-off，ce1=204 仍冻结 27 个心跳周期
       ⇒ PS 方向关闭，默认值保持 0。k0 的 20/20 只是窗口内尚未停摆，不是修复。
-      ce1 无上限计数把阻塞收敛到「CE1 管道本身静默」
-      （CE2 rx/drri 仍推进、TX 仍发 IPv4、卷/PANIC 全 0）。
-  ── 下一刀：CE1 ring 状态探针（g_sw1/g_post1/nbytes/shadow DST_WR），纯诊断
+  ★★ chain-622 判决（23:2x，CI 43606329627 SUCCESS）：拿了决定性的 rri1。
+      `CE1 STALL #1 polls=210000 ce1=341 drri1=00150015 sw1=21 post1=20 nb1=0`
+      ⇒ 固件 CE1 写指针（21）与 host 读指针（21）**完全同步**、当前槽 nbytes=0
+      ⇒ **是固件停止写 CE1，不是 host 读不到已完成描述符**。
+      ★ 同时纠正 chain-621 的一个误判：停摆不是「CE1 单独静默」，而是
+      **整个 target→host 方向停止** —— `rx=3069 / beacons=2899 / mgmtev=2899`
+      与 `httidx=1262 / ord=239 / msdu=240` 一起在 `polls=189000`（约 810 s）
+      冻结，CE2 的 `drri=4` 也冻结；而 TX 仍正常入队（`WPA: tx frame rc=0`）。
+  ── 下一刀：停摆时发 WMI 命令看固件是否还响应 + 主动 VDEV_DOWN/UP 重关联，
+      既验证「固件 RX 路径挂起 vs 固件崩溃」，也可能成为运行期保活
   ⚠ 网络层已闭环，但「Safari 能开网页」未实测，不得宣称全部完成
 ```
 
@@ -531,9 +538,51 @@ TX_COMPL 等流量」，而是 **CE1 这条管道整体静默**。于是：
 - 仍未区分：固件不再往 CE1 写（`DST_WR` 状态机 / HTT RX buffer 计数）
   vs host 没读到已写的描述符（`g_sw1` 与 `nbytes`）。
 
-**下一刀（纯诊断，不改行为）**：心跳里加 `g_sw1` / `g_post1` /
-`g_dr_desc[1][g_sw1].nbytes` / shadow `CE1_SHADOW_DST_WR` 回读值，
-一次上机按 §5.4 的判据表分流。**在探针判决出来前不得改 CE1/固件，也不得宣称已修好。**
+#### ★★ chain-622 实机判决（23:2x，CI `43606329627` SUCCESS，commit `f524669`）
+
+只加**纯诊断**（心跳 `drri1/sw1/po1/nb1` + 有界 `CE1 STALL` 快照 + `ce1kick` 门控，
+默认零行为变化），两组各 **900 s**（停摆实测落在 4–14 分钟，400 s 窗口会漏）：
+
+```text
+CE1 STALL #1 polls=210000 ce1=341 drri1=00150015 sw1=21 post1=20 nb1=0 rri2=00040004 httidx=1262 ord=239 msdu=240
+```
+
+**`drri1` 高 16 位（固件 CE1 写指针）= 0x15 = 21，host `sw1` 也 = 21，`nb1=0`。**
+两者完全同步、当前槽没有数据 ⇒ **固件停止往 CE1 写，不是 host 读不到已完成描述符。**
+这一条把「host 侧 ring/可见性」整支排除掉了，`ce1kick` 也因此在 c0 组无事可做
+（`CE1 kick:` 0 次；c1 组 900 s 内未触发阈值，`ce1stall=0`）。
+
+**★ 同时纠正 chain-621 的一个判读错误**：停摆**不是**「CE1 单独静默、CE2/WMI 照常」。
+精确定位到 `polls=189000`（约 810 s，`rx` 3066→3069 只 +3 后冻结）后：
+
+```text
+rx=3069  beacons=2899  mgmtev=2899  httidx=1262  ord=239  msdu=240  drri(CE2)=4   ← 一起冻结
+[REAL DATA PLANE] IPv4 85 bytes over HTT TX_FRM
+WCN3990-HIF: WPA: tx frame 103 bytes slot=1/2/3 prefetch=52 rc=0                  ← TX 仍在入队
+```
+
+即 **整个 target→host 方向（CE1 + CE2）都停了，只有 host→target 的 TX 还在工作**。
+之前之所以觉得「CE2 正常」，是因为看的采样点还在停摆之前。
+
+**这一轮排除的候选**（都有实机或源码依据）：
+
+| 候选 | 依据 |
+|---|---|
+| HTT RX buffer 耗尽 / repost 漏槽 | `msdu=240` 与 `httidx` 增量 239 一一配对，`bad=0/0`，无泄漏 |
+| poll 循环提前 return | `stage=3` 全程不变；`g_ce_quiet=0` 且全 cap 无 `quiet heartbeat` |
+| `PICASSO_WAIT` 诊断导致 | 那是**每 2 分钟一次**的 UI 快照（`PICASSO_SNAPSHOT_PERIOD_S=120`，`snapshot 6 of 15`），纯读 |
+| deauth / beacon miss / 被 AP 踢 | 全 cap 无相关日志，`join=5` 全程不变 |
+| 卷 I/O 拖垮 | 两组卷错误 / PANIC / UFS failure 全 0 |
+| CE 寄存器配置 | `CE_DST_WM=0x50` 写 `[15:0]=dst_n`、CTRL1 清 bit17/18、`CE_STATUS` 写 `0x1f`，与 `snoc.c:256-263` + Trogdor `wc_power_up/wc_service` 一致 |
+| RX_IN_ORD 解析 | ath10k `htt.h:1104-1116` 精确布局（`info`@p[1]、`msdu_count`@p[6..7]、12 B 描述符@8）逐字节一致 |
+
+**下一刀（两条一起做，一次上机即可分流）**：
+1. 停摆时**发一条 WMI 命令并等响应**（如 `WMI_GET_STATS`）：
+   有响应 ⇒ 固件活着、只是 RX 路径挂起；无响应 ⇒ 固件已崩。
+2. 停摆时**主动 `VDEV_DOWN` → `VDEV_UP` → 重新关联**：能恢复就说明是可恢复的连接/固件状态，
+   同时也给出**运行期保活**的可行手段（用户能上网，代价是周期性短暂重连）。
+
+**在 (1)(2) 有判决前，不改 CE1/固件，也不得宣称已修好。**
 
 ### 5.5 交付边界（如实）
 - **已修并闭环**：WiFi 单播双向、ARP 被对端接受、PC ping 通、三层 IPv4 流量、

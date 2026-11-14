@@ -5,7 +5,7 @@
 Redmi K30 5G（picasso / SM7250）上运行 XNU（Darwin 23 / iPadOS 17.7.11）。
 目标是从 UEFI 引导走到挂载根卷、启动 `launchd`，并把外设（当前主攻 WCN3990 WiFi）做到可用。
 
-> **当前唯一权威状态源**：[`handoff/wifi-wcn3990-handoff-2026-11-14-v35.md`](handoff/wifi-wcn3990-handoff-2026-11-14-v35.md)（v35，2026-11-14 21:0x；en0 lladdr 与空口 STA MAC 不一致是根因，已修复并默认化，PC ping 6/6、`uni=41` 实机闭环；`pspoke` 已由 chain-619 干净 A/B 再次证伪；chain-621 判决 `pskeep` 同样证伪，现成 `ce1` 计数把阻塞收敛到「CE1 管道整体静默、CE2/WMI 与 TX 正常」，下一刀是 CE1 ring 状态探针，见 §5.4）。
+> **当前唯一权威状态源**：[`handoff/wifi-wcn3990-handoff-2026-11-14-v35.md`](handoff/wifi-wcn3990-handoff-2026-11-14-v35.md)（v35，2026-11-14 23:3x；en0 lladdr 与空口 STA MAC 不一致是根因，已修复并默认化，PC ping 6/6、`uni=41` 实机闭环；`pspoke`（chain-619）、`pskeep`（chain-621）均实机证伪；chain-622 拿到 CE1 的 `drri1`，证明停摆是**固件停止整个 target→host 方向**（CE1+CE2 一起停、`drri1==sw1`、`nb1=0`）而 TX 仍工作，下一刀是停摆时发 WMI 命令探活 + 主动 VDEV_DOWN/UP 重关联，见 §5.4）。
 > 本文件与 `docs/*.md` 里的阶段状态是历史归档，冲突时以交接文档为准。
 > 最新逐轮事实：`logs/2026-11-14.md`（工作日志，追加不覆盖）。
 

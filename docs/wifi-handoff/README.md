@@ -63,37 +63,51 @@ DNS 发布（三条 `dns set=1`）、开机进桌面可操作、键盘输入、*
 
 ---
 
-## 4. 当前阻塞：CE1 数据管道静默
+## 4. 当前阻塞：固件的 target→host 方向整体停止（不只是 CE1）
 
-`chain-621`（`pskeep=0/1` 等长 A/B，CI `43596531534`）之后对设备的实时串口取证：
+`chain-622`（CI `43606329627`，纯诊断，两组各 900 s）拿到了决定性的 `drri1`：
 
-```
-ce1=204        ← 完全冻结 27 个心跳周期（CE1 已完成的 HTT T2H 消息数）
-httidx=1146 ord=122 msdu=123 uni=58 grp=62   ← 全冻结
-rx=1267→1272  drri=34→39    ← CE2 / WMI 信标仍在推进
-[REAL DATA PLANE] IPv4 78/84 bytes over HTT TX_FRM  ← TX 还在发
-卷错误 / PANIC / UFS failure 全 0，UI 健康
+```text
+CE1 STALL #1 polls=210000 ce1=341 drri1=00150015 sw1=21 post1=20 nb1=0 rri2=00040004 httidx=1262 ord=239 msdu=240
 ```
 
-⇒ 固件活着、CE2 管理管道活着、TX 活着，**唯独 CE1（HTT T2H 数据/完成消息管道）整条静默**。
+`drri1` 高 16 位（**固件** CE1 写指针）= `0x15` = 21，host 的 `sw1` 也 = 21，`nb1`（该槽
+nbytes）= 0 ⇒ 两者完全同步、ring 里没有未读完成 ⇒ **是固件停止写 CE1，不是 host 读不到**。
+「host 侧 ring 状态 / 描述符可见性」整支可以排除。
 
-- 开机后前几分钟网络完全正常（PC ping 6/6），之后 CE1 静默、PC 侧 ARP 缓存过期后要不到应答。
-  采集后 ping 里大量「来自 192.168.101.4 的回复: 无法访问目标主机」是 PC 侧 ARP 失败，不是整机掉线。
-- `pspoke`（`WMI_PEER_SET_PARAM(0xff,1)`）在 chain-615 与 chain-619 **两次证伪**，且 chain-619
-  的 ps1 让 CE2 也停（有害），后续 A/B 必须从 cmdline 彻底删掉并断言。
-- `pskeep`（周期重发 `STA_POWERSAVE_MODE off`）在 chain-621 **证伪**：`psk=14→19` 一直在重发
-  仍然停摆，且 k1 采集后 13/20 比对照组 k0 的 20/20 更差。**PS 方向到此为止。**
-  ⚠ k0 的 20/20 只是判据窗口内尚未停摆，不是修复。
-- 已排除：`ring=1/1`（attention-driven drain 只命中一帧）、`ind=0`（RX_IND 从未出现）
-  ⇒ 全部 MSDU 走 `RX_IN_ORD + hif_wr_post`，不是两套消费者互相踩；TX 802.11 FC
-  `frame[1]=0x41`（PM bit=0）；CE1 `g_post1=dst_n-1` 是 `snoc.c ath10k_snoc_rx_post_pipe()`
-  的「留一槽」设计，语义正确；DMA 块是 **uncached alias**，缓存一致性不是原因。
+**并且纠正一个此前写错的判读**：停摆不是「CE1 单独静默、CE2/WMI 照常」。
+精确定位到 `polls=189000`（约 810 s，`rx` 3066→3069 只 +3 后冻结）：
 
-**下一刀（已设计，纯诊断不改行为）**：在心跳里打印 `g_sw1` / `g_post1` /
-`g_dr_desc[1][g_sw1].nbytes` / shadow `CE1_SHADOW_DST_WR` 回读值（`dst1[32]`）。
-判据一次分流：`nbytes != 0` 却没被消费 ⇒ 消费循环；`g_sw1`/`g_post1` 错位或 doorbell
-回读不对 ⇒ host repost / doorbell 状态机；全 0 且 shadow 正确 ⇒ 固件侧认为 HTT RX buffer 耗尽，
-查 `hif_wr_post` 与 `htt_alloc_idx`。**先取证据，不要猜改 CE/固件。**
+```text
+rx=3069  beacons=2899  mgmtev=2899  httidx=1262  ord=239  msdu=240  drri(CE2)=4   ← 一起冻结
+[REAL DATA PLANE] IPv4 85 bytes over HTT TX_FRM
+WCN3990-HIF: WPA: tx frame 103 bytes slot=1/2/3 prefetch=52 rc=0                  ← TX 仍在入队
+卷错误 / PANIC / NATIVE_UFS_FAILURE 全 0
+```
+
+⇒ **整个 target→host 方向（CE1 + CE2）都停了，只有 host→target 的 TX 还在工作。**
+之前之所以觉得「CE2 正常」，是因为采样点落在停摆之前。
+
+### 已被这一轮实机排除
+| 候选 | 依据 |
+|---|---|
+| HTT RX buffer 耗尽 / repost 漏槽 | `msdu=240` 与 `httidx` 增量 239 一一配对，`bad=0/0` |
+| poll 循环提前 return | `stage=3` 全程不变；`g_ce_quiet=0` 且全 cap 无 `quiet heartbeat` |
+| `PICASSO_WAIT` 诊断导致 | 那是每 2 分钟一次的 UI 快照（`PICASSO_SNAPSHOT_PERIOD_S=120`），纯读 |
+| deauth / beacon miss / 被 AP 踢 | 全 cap 无相关日志，`join=5` 全程不变 |
+| 卷 I/O 拖垮 | 两组卷错误 / PANIC / UFS failure 全 0 |
+| CE 寄存器配置 | `CE_DST_WM=0x50` 写 `[15:0]=dst_n`、CTRL1 清 bit17/18、`CE_STATUS` 写 `0x1f`，与 `snoc.c:256-263` + Trogdor `wc_power_up/wc_service` 一致 |
+| RX_IN_ORD 解析 | ath10k `htt.h:1104-1116`（`info`@p[1]、`msdu_count`@p[6..7]、12 B 描述符@8）逐字节一致 |
+| `pspoke` / `pskeep` | chain-619 / chain-621 两次独立 A/B 证伪，`pspoke` 还有害 |
+
+### 下一刀（一次上机分流两件事）
+1. 停摆时**发一条 WMI 命令并等响应**（如 `WMI_GET_STATS`）：
+   有响应 ⇒ 固件活着、只是 RX 路径挂起；无响应 ⇒ 固件已崩。
+2. 停摆时**主动 `VDEV_DOWN` → `VDEV_UP` → 重新关联**：
+   能恢复就说明是可恢复的连接/固件状态，同时也给出**运行期保活**的可行手段
+   （用户能上网，代价是周期性短暂重连）。
+
+**在 (1)(2) 有判决前，不改 CE1/固件，也不得宣称已修好。**
 
 ---
 
@@ -221,7 +235,13 @@ configd 重载；`prefsmon.c` 不监听 plist 文件变化；写 `resolv.conf` �
 4. 判据的实际数值，而不是「好像不通」；说明采集窗口多久、ping 是在采集期内还是之后发的；
 5. 你已经试过并排除的假设（对照 §5，能省掉大量重复提问）。
 
-**当前最需要帮助的具体问题**：`hif_service_ce1()` 的 CE1 dst ring 在运行若干分钟后
-完全静默（`ce1` 冻结），而 CE2/WMI 与 TX 正常；想确认是 host repost / shadow doorbell
-状态机，还是固件侧 HTT RX buffer 计数。有 WCN3990 / ath10k SNOC CE 运行期经验的同行
+**当前最需要帮助的具体问题**：WCN3990 固件在运行 4–14 分钟后**停止整个 target→host
+方向**（CE1 与 CE2 的 DRRI 都冻结，`drri1` 与 host 的 `sw1` 同步在 21、`nb1=0`），
+而 host→target 的 TX 仍在入队（`WPA: tx frame rc=0`）；卷/PANIC 全 0、无 deauth、
+`join=5` 不变、HTT RX buffer 无泄漏（`msdu` 与 `httidx` 增量一一配对）。
+已排除 `pspoke`/`pskeep`（PS 方向两次 A/B 证伪）、CE 寄存器配置、RX_IN_ORD 解析、
+poll 提前 return、`PICASSO_WAIT` 诊断干扰。**想请教：WCN3990 固件在什么条件下会
+整体停掉 RX 而保留 TX？是 IMPS/idle 状态机、还是 PD 内部 RX 路径 assert？**
+下一步我们会在停摆时发 WMI 命令探活 + 主动 `VDEV_DOWN/UP` 重关联。
+有 WCN3990 / ath10k SNOC 运行期经验的同行
 请直接看 v35 §5.4 与本文 §4。
