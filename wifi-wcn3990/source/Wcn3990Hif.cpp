@@ -615,7 +615,11 @@ static int g_htt_ring;        /* httring=1: send RX_RING_CFG + AGGR_CFG */
 static uint8_t g_htt_eid;
 static uint32_t g_wr4;        /* CE4 (HTT H2T) source ring write index */
 static uint32_t g_sw1, g_post1; /* CE1 (HTT T2H) dst ring software/posted */
-static uint32_t g_htt_rx;     /* HTT messages seen on CE1 */
+static uint32_t g_htt_rx;     /* HTT messages seen on CE1 (64-print cap) */
+/* chain-621 diagnostics: g_htt_rx stops at 64, so it cannot tell whether
+ * CE1 has gone silent.  These two have no cap and are printed every
+ * heartbeat: ce1 = completed CE1 descriptors, psk = PS-off re-sends. */
+static uint32_t g_ce1_done, g_ps_keep_sent;
 static uint8_t g_htt_seq;     /* HTC seq_no for the HTT endpoint (htc.h @5) */
 static int g_htt_ring_done;   /* RX_RING_CFG + AGGR_CFG already sent */
 static void hif_htt_setup_finish(void);
@@ -1230,6 +1234,7 @@ hif_service_ce1(void)
 		uint32_t nbytes = d->nbytes;
 
 		if (nbytes == 0) break;          /* not completed yet */
+		g_ce1_done++;                    /* chain-621: no 64-print cap */
 		hif_reg_write(1, CE_STATUS, 0x1u | 0x1eu);  /* CE is awake now */
 		if (nbytes > hif_shape[1].buf_sz) nbytes = hif_shape[1].buf_sz;
 		d->nbytes = 0;                   /* claim before reposting */
@@ -2554,6 +2559,9 @@ static uint16_t g_join_peer_id;
  * The chain-613 rekey and chain-614 keyfix gates were both falsified on
  * device and are gone. */
 static int g_ps_poke;
+/* chain-621 pskeep=1: Trogdor re-sends STA_POWERSAVE_MODE off on every
+ * wj_begin(); ours only sent it once from hif_join_once(). */
+static int g_ps_keep;
 static const uint8_t g_join_mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 /* The access point being joined (copied out of the BSS table). */
 static struct {
@@ -4930,10 +4938,19 @@ wcn3990_hif_poll(void)
 	 * deliberately cheap: no cache flushes and no CE register access until
 	 * the corresponding stage is entered. */
 	if ((g_polls % 1000) == 0) {
+		/* chain-621: keep the polling station awake.  Trogdor sends
+		 * STA_POWERSAVE_MODE off on EVERY begin (outside its once-block)
+		 * and ath10k sends PS_MODE_DISABLED after the vdev is started;
+		 * without a repeat the firmware appears to fall back into PS
+		 * and the AP buffers data MSDUs while beacons keep arriving. */
+		if (g_ps_keep && g_link_up && (g_polls % 5000u) == 0u) {
+			(void)hif_join_sta_powersave_mode(0);
+			g_ps_keep_sent++;
+		}
 		HIF_LOG("heartbeat polls=%u stage=%d state=%d rx=%u beacons=%u "
 		    "desc0.nbytes=%u drri=%x htt=%u httidx=%u mgmt=%u mgmtev=%u "
 		    "join=%d ind=%u ord=%u msdu=%u eapol=%u bad=%u/%u "
-		    "uni=%u grp=%u ring=%u/%u srri4=%u wr4=%u",
+		    "uni=%u grp=%u ring=%u/%u srri4=%u wr4=%u psk=%u ce1=%u",
 		    g_polls, g_stage, (int)g_state, g_rx_packets, g_beacons,
 		    (unsigned)s_dst2[0].nbytes,
 		    (g_bases_programmed && g_dma) ? ((s_rri[2] >> 16) & 0xffffu) : 0,
@@ -4949,7 +4966,7 @@ wcn3990_hif_poll(void)
 		     * without any device interaction. */
 		    (g_bases_programmed && g_dma) ?
 		        ((*(volatile uint32_t *)&g_dma->rri[4]) & 0xffffu) : 0,
-		    g_wr4);
+		    g_wr4, g_ps_keep_sent, g_ce1_done);
 		/* join=<n>: a compact status line while a join is running. */
 		if (g_join && g_join_state != HIF_JOIN_IDLE) {
 			HIF_LOG("JOIN: state=%d tries=%u bss=%u mgmt "
@@ -5623,6 +5640,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	v = 0;
 	if (PE_parse_boot_argn("pspoke", &v, sizeof(v)) && v <= 1) {
 		g_ps_poke = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("pskeep", &v, sizeof(v)) && v <= 1) {
+		g_ps_keep = (int)v;
 	}
 	v = 1;
 	if (PE_parse_boot_argn("dhcp", &v, sizeof(v)) && v <= 1) {
