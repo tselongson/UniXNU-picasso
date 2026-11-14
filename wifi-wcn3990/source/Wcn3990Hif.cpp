@@ -2528,6 +2528,13 @@ static uint32_t g_join_mgmt_tx, g_join_mgmt_ok, g_join_mgmt_fail;
 static int g_join_started;        /* 0 = pending, 1 = ok, 2 = refused */
 static int g_join_peer_mapped;
 static uint16_t g_join_peer_id;
+/* chain-613: a PEER_MAP that arrives AFTER the four-way handshake
+ * installed the PTK re-creates the firmware peer, leaving the pairwise
+ * key bound to the previous peer id.  Group traffic keeps working
+ * because the GTK is vdev-scoped -- exactly the "broadcast only"
+ * shape seen in chain-612.  rekey=1 re-installs the PTK once. */
+static int g_rekey;
+static int g_rekey_done;
 static const uint8_t g_join_mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 /* The access point being joined (copied out of the BSS table). */
 static struct {
@@ -3970,7 +3977,18 @@ hif_join_peer_event(const uint8_t *p, uint32_t n)
 	    !memcmp(p + 4, g_join_ap.b.bssid, 6)) {
 		g_join_peer_mapped = 1;
 		g_join_peer_id = (uint16_t)(p[2] | (uint16_t)p[3] << 8);
-		HIF_LOG("JOIN: peer mapped id=%u", (unsigned)g_join_peer_id);
+		HIF_LOG("JOIN: peer mapped id=%u keyed=%u rekey=%d",
+		    (unsigned)g_join_peer_id, (unsigned)g_wpa_st.keyed, g_rekey);
+		/* Firmware re-mapped the peer after the keys were installed:
+		 * the PTK still belongs to the old peer id.  Re-send it once.
+		 * hif_wpa_send_key() is safe from this CE1/HTT context -- the
+		 * EAPOL path already calls it from the same dispatcher. */
+		if (g_rekey && g_wpa_st.keyed && !g_rekey_done) {
+			g_rekey_done = 1;
+			HIF_LOG("WPA: rekey PTK after late PEER_MAP id=%u",
+			    (unsigned)g_join_peer_id);
+			hif_wpa_send_key(1, 0, g_wpa_st.ptk + 32, 16, 4);
+		}
 	}
 }
 
@@ -5573,6 +5591,10 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	v = 1;
 	if (PE_parse_boot_argn("txguard", &v, sizeof(v)) && v <= 1) {
 		g_tx_guard = (int)v;
+	}
+	v = 0;
+	if (PE_parse_boot_argn("rekey", &v, sizeof(v)) && v <= 1) {
+		g_rekey = (int)v;
 	}
 	v = 1;
 	if (PE_parse_boot_argn("dhcp", &v, sizeof(v)) && v <= 1) {
