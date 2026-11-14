@@ -638,12 +638,11 @@ static int g_ce1_kick;
  * during ordinary idle gaps too - 43 false stalls on the control arm - and
  * that a false-stall rejoin panics, so both counters must agree. */
 
-/* chain-625: recover-driven rejoin.  While set, the join state machine must
- * NOT fall into "peer map timeout, sending auth anyway": the rejoin starts
- * with VDEV_DOWN, and if the target is still wedged the peer map never
- * comes; stacking auth retransmits on the ce3 mgmt slots then trips the
- * same SMMU race that txguard fixed for ce4 (ESR be000411, chain-624).
- * Cleared as soon as VDEV_UP goes out. */
+/* chain-625: recover-driven rejoin.  chain-628 removed the "peer map
+ * timeout, sending auth anyway" fallback entirely: stacking auth frames on
+ * the ce3 mgmt slots trips the same SMMU race that txguard fixed for ce4
+ * (ESR be000411, chain-624 and chain-628 alike).  A missing peer map now
+ * always rearms the scan.  Cleared as soon as VDEV_UP goes out. */
 static int g_recover_active;
 /* chain-623 recover=1: when the stall detector fires, drop the session with
  * hif_join_reset() so wifiauto re-scans and rejoins through the already
@@ -4361,28 +4360,22 @@ hif_join_poll(void)
 			HIF_LOG("JOIN: auth sent (peer mapped)");
 			hif_join_send_auth();
 		} else if (g_polls - g_join_wait_at >= 3000) {
-			/* Diagnostic fallback: if this firmware never emits an HTT peer
-			 * map, still send auth once so a single boot answers whether
-			 * VDEV_START alone was enough.  The log line makes the two
-			 * cases distinguishable.
-			 * chain-625: NOT after a recover-driven rejoin.  There the
-			 * vdev was just torn down and re-STARTed; if the peer map
-			 * still never comes, the target is wedged for real, and
-			 * stacking auth frames on the ce3 mgmt slots trips the
-			 * SMMU race that panicked chain-624 (ESR be000411). */
-			if (g_recover_active) {
-				HIF_LOG("JOIN: peer map timeout after recover; "
-				    "rearming scan instead of auth");
-				hif_join_reset(
-				    "recover: no peer map, rearming scan");
-				return;
-			}
-			HIF_LOG("JOIN: peer map timeout, sending auth anyway "
-			    "(diagnostic)");
-			g_join_state = HIF_JOIN_AUTH_SENT;
-			g_join_tries = 0;
-			g_join_tx_at = g_join_wait_at = g_polls;
-			hif_join_send_auth();
+			/* chain-628: the diagnostic auth fallback is gone for
+			 * good.  It was added to answer whether VDEV_START
+			 * alone was enough - it never produced a single
+			 * successful join, and every time the peer map failed
+			 * to arrive it stacked auth retransmits on the ce3
+			 * mgmt slots and tripped the SMMU race that panicked
+			 * chain-624 AND chain-628 (ESR be000411,
+			 * smr7=0x800100c0, cb61_fsr=0x400).  chain-625 had
+			 * gated it to recover-driven rejoins only, but the
+			 * same race fired on an ordinary first join once the
+			 * beacon stream failed to come up.  A missing peer map
+			 * means the target is wedged or the radio is dead:
+			 * rearm the scan, the wifiauto path will retry. */
+			HIF_LOG("JOIN: peer map timeout; rearming scan");
+			hif_join_reset("no peer map, rearming scan");
+			return;
 		}
 		return;
 	}
