@@ -22,7 +22,6 @@
 #include <net/ethernet.h>
 #include <net/if.h>
 #include <net/if_ether.h>
-#include <net/if_ethersubr.h>
 #include <net/if_var.h>
 #include <net/if_media.h>
 #include <net/if_types.h>
@@ -35,6 +34,12 @@
 #include <sys/hakios.net.h>
 #include <sys/sockio.h>
 #include <sys/systm.h>
+
+/* chain-616: ether_input() is not declared in the exported headers this
+ * kernel build ships (net/if_ethersubr.h is absent), but the symbol is
+ * linked into the kernel, so declare it here: it is the handler
+ * ifnet_input() must find in ifp->if_input. */
+extern void ether_input(struct ifnet *ifp, struct mbuf *m);
 
 extern void HakiosWLANStart(const char *interface, const uint8_t *address);  /* drivers/wifi/hakios.wlan.cpp */
 
