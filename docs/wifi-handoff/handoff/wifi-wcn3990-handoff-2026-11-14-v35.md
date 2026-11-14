@@ -729,6 +729,25 @@ peer map 已到、状态机正常推进时发生。
 **chain-628 重跑（CI `43637905520`）**：同一收尾链（默认镜像 1200 s +
 采集期/采集后 ping，完成留桌面）。
 
+#### ★ chain-628 重跑判决（05:4x，CI `43637905520`，commit `1676bd8`）：主线完整闭环
+
+默认镜像（recover 默认化、auth 回退已删、无新 boot-arg）boot **1200 s 越过
+15-min 锚点**：
+
+```
+PANIC=0  UFSFAIL=0  dns_set=3  STALL-GLOBAL=0  recover_calls=0
+heartbeats=309 (~22 min)  bc 32→4761  beacon-stream frozen pairs=0
+PING during capture: 24 replies    PING AFTER capture: 20/20
+```
+
+**WiFi 主线至此完整闭环**：网络层（单播双向）、DNS 三键发布、自愈布防
+（recover 默认开启）、PANIC 病灶（auth 回退）删除、默认镜像 22 分钟健康实证。
+设备**留在桌面**等待用户白天实测 Safari / 设置 > Wi-Fi 详情。
+
+**残留（诚实记录）**：① recover 在真停摆中的实际效果待下次停摆验证（环境
+依赖，检测器已布防）；② 卷 I/O 挂死（黑屏静止圈）是独立线，未修，仍缺长时
+证据；③ Safari 端到端与 Wi-Fi 详情待用户实测；④ `wpass=` 仍是 boot-arg 明文。
+
 **下一刀（两条一起做，一次上机即可分流）**：
 1. 停摆时**发一条 WMI 命令并等响应**（如 `WMI_GET_STATS`）：
    有响应 ⇒ 固件活着、只是 RX 路径挂起；无响应 ⇒ 固件已崩。
