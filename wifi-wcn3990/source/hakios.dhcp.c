@@ -34,6 +34,7 @@
 #include <sys/socket.h>
 #include <sys/proc.h>
 #include <sys/sockio.h>
+#include <pexpert/pexpert.h>
 #include <net/if.h>
 #include <net/route.h>
 #include <netinet/in.h>
@@ -62,6 +63,18 @@ extern int rtrequest_scoped(int req, struct sockaddr *dst,
     struct sockaddr *gateway, struct sockaddr *netmask, int flags,
     struct rtentry **ret_nrt, unsigned int ifscope);
 extern proc_t current_proc(void);
+
+/* bsd/sys/sockio_private.h is not exported to drivers.  This is its exact
+ * definition; Apple's own tests/net_test_lib.c:ifnet_attach_ip() calls
+ * ioctl(s, SIOCPROTOATTACH, &ifr) to plumb PF_INET on a fresh interface.
+ * XNU does NOT plumb from ifnet_attach(): proto_plumb(PF_INET) is reached
+ * only from in_domifattach() (bsd/netinet/in.c:285) via SIOCAIFADDR or this
+ * ioctl.  Without it, ether_demux() has no ETHERTYPE_ARP/IP descriptor and
+ * DLIL drops every inbound frame ("packets not matching an attached
+ * protocol are dropped"). */
+#ifndef SIOCPROTOATTACH
+#define SIOCPROTOATTACH _IOWR('i', 80, struct ifreq)
+#endif
 
 /* The C++ side owns the radio. It wraps wcn3990_hif_net_tx() so this C file
  * can put a complete Ethernet frame on the air. */
@@ -356,8 +369,11 @@ dhcp_install(void)
 	struct sockaddr_in dst, gw, mask;
 	struct socket *so = NULL;
 	uint32_t ip4, mask4, bcast;
+	uint32_t wifix = 0;
 	int err, rterr = 0;
 	unsigned i;
+
+	(void)PE_parse_boot_argn("wifix", &wifix, sizeof(wifix));
 
 	ip4 = ((uint32_t)dhcp_yiaddr[0] << 24) | ((uint32_t)dhcp_yiaddr[1] << 16) |
 	    ((uint32_t)dhcp_yiaddr[2] << 8) | dhcp_yiaddr[3];
@@ -406,6 +422,24 @@ dhcp_install(void)
 	}
 
 	err = ifioctl(so, SIOCAIFADDR, (caddr_t)&ifra, current_proc());
+
+	/* wifix=2: make protocol registration explicit and observable.
+	 * SIOCAIFADDR also reaches in_domifattach(), but its return is
+	 * discarded inside in_control() ("(void) in_domifattach(ifp)") and a
+	 * failed proto_plumb() only reaches log(LOG_ERR), not the console.
+	 * This ioctl returns the real errno: 0/EEXIST=in plumbed, ENXIO=no
+	 * plumber registered, EPERM=not privileged.  It is idempotent. */
+	if (wifix >= 2) {
+		struct ifreq ifr;
+		int plumb;
+
+		bzero(&ifr, sizeof(ifr));
+		strlcpy(ifr.ifr_name, "en0", sizeof(ifr.ifr_name));
+		plumb = ifioctl(so, SIOCPROTOATTACH, (caddr_t)&ifr, current_proc());
+		printf("DHCP: plumb SIOCPROTOATTACH rc=%d (0/17=attached, 6=no plumber, 1=EPERM)\n",
+		    plumb);
+	}
+
 	if (err == 0 && dhcp_router[0] != 0) {
 		bzero(&dst, sizeof(dst));
 		bzero(&gw, sizeof(gw));

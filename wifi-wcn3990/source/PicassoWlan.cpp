@@ -3991,10 +3991,28 @@ static bool picasso_net_attached = false;
 static void
 picasso_wlan_net_attach(void)
 {
+	/* The radio's on-air identity is g_join_mac in Wcn3990Hif.cpp: it is
+	 * the WMI_PDEV_SET_BASE_MACADDR value (:4562), the 802.11 addr2/SA in
+	 * every transmitted frame (:3101, :3415), the "own" address in the PTK
+	 * derivation (:3237) and the DHCP chaddr (:4926).  en0 used to publish a
+	 * DIFFERENT lladdr (00:0a:f5:39:90:01), so ether_demux() compared each
+	 * unicast dhost against the wrong IF_LLADDR() and set M_PROMISC
+	 * (bsd/net/ether_if_module.c:474), which DLIL drops; ARP replies also
+	 * carried a MAC the firmware never listens on.  wifix=1 aligns en0 with
+	 * the STA address the firmware and the AP actually use. */
+	static const uint8_t radio_mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
+	uint32_t wifix = 0;
+
 	if (picasso_net_attached) {
 		return;
 	}
-	LOG("Attaching Darwin Wi-Fi network interface en0 (Picasso WCN3990)...");
+	(void)PE_parse_boot_argn("wifix", &wifix, sizeof(wifix));
+	if (wifix >= 1) {
+		memcpy(picasso_wlan_mac, radio_mac, 6);
+	}
+	LOG("Attaching Darwin Wi-Fi network interface en0 (Picasso WCN3990), wifix=%u lladdr=%02x:%02x:%02x:%02x:%02x:%02x",
+	    wifix, picasso_wlan_mac[0], picasso_wlan_mac[1], picasso_wlan_mac[2],
+	    picasso_wlan_mac[3], picasso_wlan_mac[4], picasso_wlan_mac[5]);
 	memcpy(picasso_net_link.address, picasso_wlan_mac, 6);
 	memcpy(picasso_sta_ops.address, picasso_wlan_mac, 6);
 	if (hakios_net_attach(&picasso_net_link)) {

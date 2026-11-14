@@ -26,6 +26,7 @@
 #include <net/if_types.h>
 #include <net/kpi_interface.h>
 #include <netinet/in.h>
+#include <sys/socket.h>
 #include <pexpert/pexpert.h>
 #include <sys/kern_event.h>
 #include <sys/kpi_mbuf.h>
@@ -394,6 +395,51 @@ net_thread(void *parameter, __unused wait_result_t result)
 			printf("net: en%u so far %llu frames sent (%llu bytes), %llu received (%llu bytes); dropped: %llu out, %llu in\n",
 			    n->unit, n->count.sent, n->count.sent_bytes, n->count.received, n->count.received_bytes,
 			    n->count.dropped_out, n->count.dropped_in);
+		}
+		/* chain-617: ifnet_input() only QUEUES the frame (Apple NKE docs:
+		 * "The packet is queued. Processing resumes on a different
+		 * thread").  rc=0 therefore says nothing about demux or ARP.
+		 * Comparing our hand-off count with the stack's own packets_in
+		 * separates "DLIL input thread stalled" (sheng/pong's
+		 * check_input()) from "frame reached dlil_input but no protocol
+		 * matched".  Bounded to one line every ~8 s. */
+		if (tick % 4096u == 0u) {
+			struct ifnet_stats_param st;
+			ifaddr_t *list = NULL;
+			char addr[40] = "none";
+
+			bzero(&st, sizeof(st));
+			(void)ifnet_stat(n->ifp, &st);
+			/* in_arpinput() answers a request only when the target IP
+			 * matches an in_ifaddr on the RECEIVING ifp.  Printing
+			 * en0's first AF_INET address makes "address installed
+			 * but on the wrong interface" directly observable. */
+			if (ifnet_get_address_list_family(n->ifp, &list, AF_INET) == 0 && list != NULL) {
+				if (list[0] != NULL) {
+					struct sockaddr_in a;
+					const uint8_t *b;
+
+					bzero(&a, sizeof(a));
+					if (ifaddr_address(list[0], (struct sockaddr *)(void *)&a, sizeof(a)) == 0) {
+						b = (const uint8_t *)&a.sin_addr;
+						snprintf(addr, sizeof(addr), "%u.%u.%u.%u", b[0], b[1], b[2], b[3]);
+					}
+				}
+				ifnet_free_address_list(list);
+			}
+			/* no_protocol is the stack's own counter for frames that
+			 * ether_demux() could not map to an attached protocol
+			 * family.  If it rises while recv rises, PF_INET/ARP was
+			 * never plumbed onto en0 and every inbound frame is
+			 * being dropped by DLIL -- that is the whole failure. */
+			printf("net: en%u in recv=%llu stack_in=%llu stack_out=%llu noproto=%llu err=%llu addr=%s drop=%llu/%llu\n",
+			    n->unit, (unsigned long long)n->count.received,
+			    (unsigned long long)st.packets_in,
+			    (unsigned long long)st.packets_out,
+			    (unsigned long long)st.no_protocol,
+			    (unsigned long long)st.errors_in, addr,
+			    (unsigned long long)n->count.dropped_in,
+			    (unsigned long long)n->count.dropped_out);
 		}
 		delay_for_interval(quiet < 100 ? poll_ms : poll_ms * 5, NSEC_PER_MSEC);
 	}
