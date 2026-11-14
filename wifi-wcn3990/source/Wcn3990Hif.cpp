@@ -5860,7 +5860,12 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("ce1kick", &v, sizeof(v)) && v <= 1) {
 		g_ce1_kick = (int)v;
 	}
-	v = 0;
+	/* chain-627: on by default.  In 20 min of healthy operation neither
+	 * arm tripped the detector once, and the rejoin path itself has run
+	 * panic-free since chain-625's VDEV_DOWN + auth-gate fixes.  The
+	 * cost of a false trip is a few seconds of reassociation; the cost
+	 * of a missed one is a dead radio at the ~15-min datapath anchor. */
+	v = 1;
 	if (PE_parse_boot_argn("recover", &v, sizeof(v)) && v <= 1) {
 		g_recover = (int)v;
 	}
