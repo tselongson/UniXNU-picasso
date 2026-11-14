@@ -884,6 +884,10 @@ static uint32_t g_htt_read;       /* RX_IND consumption cursor */
 static uint64_t g_htt_buf_pa;     /* physical base of htt_buf[0] */
 static uint32_t g_wr_rx_ind, g_wr_rx_in_ord, g_wr_rx_frames, g_wr_rx_eapol,
     g_wr_rx_bad, g_wr_rx_undone;
+/* chain-614: unbounded dst classification.  hif_rx_trace() only prints
+ * its first 64 frames, so a 400 s capture can silently hide unicast
+ * frames that arrive later.  These counters cover EVERY accepted frame. */
+static uint32_t g_rx_unicast, g_rx_group, g_rx_uni_logged;
 static void hif_wpa_handle_eapol(const uint8_t *e, uint32_t n);
 
 static uint8_t *
@@ -972,9 +976,23 @@ hif_rx_trace(const uint8_t *eth, uint32_t bytes, uint32_t decap,
 	size_t at = 0;
 	uint16_t type;
 
-	if (traced >= 64u || bytes < 14u) return;
-	traced++;
+	if (bytes < 14u) return;
 	type = (uint16_t)((eth[12] << 8) | eth[13]);
+	/* Count every accepted frame, even after the 64-line trace cap:
+	 * this is the verdict that cannot be blinded by the cap. */
+	if (eth[0] & 1u) g_rx_group++;
+	else g_rx_unicast++;
+	if (!(eth[0] & 1u) && g_rx_uni_logged < 8u) {
+		g_rx_uni_logged++;
+		HIF_LOG("RXU: #%u decap=%u bytes=%u type=%04x "
+		    "dst=%02x:%02x:%02x:%02x:%02x:%02x "
+		    "src=%02x:%02x:%02x:%02x:%02x:%02x",
+		    g_rx_uni_logged, decap, bytes, type,
+		    eth[0], eth[1], eth[2], eth[3], eth[4], eth[5],
+		    eth[6], eth[7], eth[8], eth[9], eth[10], eth[11]);
+	}
+	if (traced >= 64u) return;
+	traced++;
 	int n = snprintf(line, sizeof(line),
 	    "RX: #%u decap=%u bytes=%u type=%04x dst=%02x:%02x:%02x:%02x:%02x:%02x "
 	    "src=%02x:%02x:%02x:%02x:%02x:%02x",
@@ -2528,13 +2546,10 @@ static uint32_t g_join_mgmt_tx, g_join_mgmt_ok, g_join_mgmt_fail;
 static int g_join_started;        /* 0 = pending, 1 = ok, 2 = refused */
 static int g_join_peer_mapped;
 static uint16_t g_join_peer_id;
-/* chain-613: a PEER_MAP that arrives AFTER the four-way handshake
- * installed the PTK re-creates the firmware peer, leaving the pairwise
- * key bound to the previous peer id.  Group traffic keeps working
- * because the GTK is vdev-scoped -- exactly the "broadcast only"
- * shape seen in chain-612.  rekey=1 re-installs the PTK once. */
-static int g_rekey;
-static int g_rekey_done;
+/* chain-614: keyfix=1 writes TKIP tx/rx MIC lengths into the key cmd.
+ * The chain-613 rekey gate was falsified on device (rk1 valid run: PTK
+ * re-installed, KEY_COMPLETE received, still no unicast) and removed. */
+static int g_key_fix;
 static const uint8_t g_join_mac[6] = { 0x02, 0x00, 0x00, 0x00, 0x00, 0x01 };
 /* The access point being joined (copied out of the BSS table). */
 static struct {
@@ -3121,6 +3136,14 @@ hif_wpa_send_key(int pairwise, unsigned index, const uint8_t *key,
 	body[5] = cipher;                              /* 2 TKIP, 4 AES_CCM */
 	/* body[6..19]: rx/tx sequence counters, all zero */
 	body[20] = key_len;
+	/* wmi.h:5077-5079: body[21]/[22] are key_txmic_len/key_rxmic_len.
+	 * ath10k mac.c:271-276 requires 8/8 for TKIP; the reference stack
+	 * sends pure CCMP and writes 0/0.  Our AP uses a 32-byte TKIP GTK. */
+	if (g_key_fix && cipher == 2u) {
+		body[21] = 8u;
+		body[22] = 8u;
+		HIF_LOG("WPA: TKIP mic lengths 8/8 (keyfix=1)");
+	}
 	p = hif_put_tlv(p, 0x60, 92, body);
 	p = hif_put_tlv(p, 0x11, (uint16_t)key_len, key);
 	HIF_LOG("WPA: install %s key idx=%u len=%u cipher=%u",
@@ -3977,18 +4000,8 @@ hif_join_peer_event(const uint8_t *p, uint32_t n)
 	    !memcmp(p + 4, g_join_ap.b.bssid, 6)) {
 		g_join_peer_mapped = 1;
 		g_join_peer_id = (uint16_t)(p[2] | (uint16_t)p[3] << 8);
-		HIF_LOG("JOIN: peer mapped id=%u keyed=%u rekey=%d",
-		    (unsigned)g_join_peer_id, (unsigned)g_wpa_st.keyed, g_rekey);
-		/* Firmware re-mapped the peer after the keys were installed:
-		 * the PTK still belongs to the old peer id.  Re-send it once.
-		 * hif_wpa_send_key() is safe from this CE1/HTT context -- the
-		 * EAPOL path already calls it from the same dispatcher. */
-		if (g_rekey && g_wpa_st.keyed && !g_rekey_done) {
-			g_rekey_done = 1;
-			HIF_LOG("WPA: rekey PTK after late PEER_MAP id=%u",
-			    (unsigned)g_join_peer_id);
-			hif_wpa_send_key(1, 0, g_wpa_st.ptk + 32, 16, 4);
-		}
+		HIF_LOG("JOIN: peer mapped id=%u keyed=%u keyfix=%d",
+		    (unsigned)g_join_peer_id, (unsigned)g_wpa_st.keyed, g_key_fix);
 	}
 }
 
@@ -4906,7 +4919,7 @@ wcn3990_hif_poll(void)
 		HIF_LOG("heartbeat polls=%u stage=%d state=%d rx=%u beacons=%u "
 		    "desc0.nbytes=%u drri=%x htt=%u httidx=%u mgmt=%u mgmtev=%u "
 		    "join=%d ind=%u ord=%u msdu=%u eapol=%u bad=%u/%u "
-		    "ring=%u/%u srri4=%u wr4=%u",
+		    "uni=%u grp=%u ring=%u/%u srri4=%u wr4=%u",
 		    g_polls, g_stage, (int)g_state, g_rx_packets, g_beacons,
 		    (unsigned)s_dst2[0].nbytes,
 		    (g_bases_programmed && g_dma) ? ((s_rri[2] >> 16) & 0xffffu) : 0,
@@ -4914,6 +4927,7 @@ wcn3990_hif_poll(void)
 		    g_mgmt_events, g_join_state,
 		    g_wr_rx_ind, g_wr_rx_in_ord, g_wr_rx_frames, g_wr_rx_eapol,
 		    g_wr_rx_bad, g_wr_rx_undone,
+		    g_rx_unicast, g_rx_group,
 		    g_htt_ring_done_cnt, g_htt_ring_seen,
 		    /* CE4 source read index is the input to the txguard ring
 		     * check.  Printing it every heartbeat makes a stalled RRI
@@ -5593,8 +5607,8 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 		g_tx_guard = (int)v;
 	}
 	v = 0;
-	if (PE_parse_boot_argn("rekey", &v, sizeof(v)) && v <= 1) {
-		g_rekey = (int)v;
+	if (PE_parse_boot_argn("keyfix", &v, sizeof(v)) && v <= 1) {
+		g_key_fix = (int)v;
 	}
 	v = 1;
 	if (PE_parse_boot_argn("dhcp", &v, sizeof(v)) && v <= 1) {
