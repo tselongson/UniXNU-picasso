@@ -940,6 +940,16 @@ hif_wr_bad(uint32_t reason, const uint8_t *buf, uint32_t attention,
     uint32_t start, uint32_t len, uint32_t decap)
 {
 	g_wr_rx_bad++;
+	/* Always trace the first rejections: a TCP handshake that never
+	 * completes is either "no reply arrived" or "reply rejected here",
+	 * and only this line can tell the two apart.  Bounded, never floods. */
+	if (g_wr_rx_bad <= 16u) {
+		HIF_LOG("DP: reject #%u r=%u attn=%08x start=%08x len=%u decap=%u "
+		    "frame=%02x%02x%02x%02x%02x%02x%02x%02x",
+		    g_wr_rx_bad, reason, attention, start, len, decap,
+		    buf[360], buf[361], buf[362], buf[363],
+		    buf[364], buf[365], buf[366], buf[367]);
+	}
 	if (!g_dp_diag || g_dp_bad_logged >= 12u) return;
 	g_dp_bad_logged++;
 	HIF_LOG("DP: bad r=%u attn=%08x start=%08x len=%u decap=%u "
@@ -948,6 +958,72 @@ hif_wr_bad(uint32_t reason, const uint8_t *buf, uint32_t attention,
 	    buf[360], buf[361], buf[362], buf[363],
 	    buf[364], buf[365], buf[366], buf[367]);
 	hif_dump_hex("DP: bad", buf + 360, 32);
+}
+
+/* Accepted-frame trace: the first 64 data frames with their L3/L4 tuple.
+ * Answers the only question the EAPOL-era logs cannot: does the SYN-ACK /
+ * ARP reply reach this driver at all, and with which addresses and flags. */
+static void
+hif_rx_trace(const uint8_t *eth, uint32_t bytes, uint32_t decap,
+    uint32_t attention)
+{
+	static uint32_t traced;
+	char line[192];
+	size_t at = 0;
+	uint16_t type;
+
+	if (traced >= 64u || bytes < 14u) return;
+	traced++;
+	type = (uint16_t)((eth[12] << 8) | eth[13]);
+	int n = snprintf(line, sizeof(line),
+	    "RX: #%u decap=%u bytes=%u type=%04x dst=%02x:%02x:%02x:%02x:%02x:%02x "
+	    "src=%02x:%02x:%02x:%02x:%02x:%02x",
+	    traced, decap, bytes, type,
+	    eth[0], eth[1], eth[2], eth[3], eth[4], eth[5],
+	    eth[6], eth[7], eth[8], eth[9], eth[10], eth[11]);
+	if (n < 0) return;
+	at = (size_t)n < sizeof(line) - 1u ? (size_t)n : sizeof(line) - 1u;
+	if (type == 0x0800 && bytes >= 34u) {
+		const uint8_t *ip = eth + 14;
+		uint32_t ihl = (uint32_t)(ip[0] & 0x0fu) * 4u;
+		if (ihl >= 20u && ihl <= 60u && bytes >= 14u + ihl) {
+			n = snprintf(line + at, sizeof(line) - at,
+			    " ip=%u.%u.%u.%u>%u.%u.%u.%u proto=%u",
+			    ip[12], ip[13], ip[14], ip[15],
+			    ip[16], ip[17], ip[18], ip[19], ip[9]);
+			if (n > 0)
+				at = (size_t)n + at < sizeof(line) - 1u ?
+				    at + (size_t)n : sizeof(line) - 1u;
+			if (ip[9] == 6 && bytes >= 14u + ihl + 20u) {
+				const uint8_t *tcp = ip + ihl;
+				n = snprintf(line + at, sizeof(line) - at,
+				    " tcp %u>%u fl=%02x",
+				    (unsigned)((tcp[0] << 8) | tcp[1]),
+				    (unsigned)((tcp[2] << 8) | tcp[3]), tcp[13]);
+				if (n > 0)
+					at = (size_t)n + at < sizeof(line) - 1u ?
+					    at + (size_t)n : sizeof(line) - 1u;
+			} else if (ip[9] == 17 && bytes >= 14u + ihl + 8u) {
+				const uint8_t *udp = ip + ihl;
+				n = snprintf(line + at, sizeof(line) - at,
+				    " udp %u>%u",
+				    (unsigned)((udp[0] << 8) | udp[1]),
+				    (unsigned)((udp[2] << 8) | udp[3]));
+				if (n > 0)
+					at = (size_t)n + at < sizeof(line) - 1u ?
+					    at + (size_t)n : sizeof(line) - 1u;
+			}
+		}
+	} else if (type == 0x0806 && bytes >= 42u) {
+		const uint8_t *arp = eth + 14;
+		n = snprintf(line + at, sizeof(line) - at,
+		    " arp op=%u %u.%u.%u.%u>%u.%u.%u.%u",
+		    (unsigned)((arp[6] << 8) | arp[7]),
+		    arp[14], arp[15], arp[16], arp[17],
+		    arp[24], arp[25], arp[26], arp[27]);
+	}
+	line[sizeof(line) - 1u] = '\0';
+	HIF_LOG("%s", line);
 }
 
 static void
@@ -1035,6 +1111,7 @@ hif_wr_msdu(uint8_t *buf, uint32_t len)
 	/* Real data plane: hakios_net_input() copies the Ethernet frame into
 	 * an mbuf, so the DMA buffer can be reposted immediately afterwards. */
 	if (g_net_path && g_link_up) {
+		hif_rx_trace(eth, bytes, decap, attention);
 		if (g_dhcp) hakios_dhcp_input(eth, bytes);
 		hakios_net_input(eth, bytes);
 		return;
