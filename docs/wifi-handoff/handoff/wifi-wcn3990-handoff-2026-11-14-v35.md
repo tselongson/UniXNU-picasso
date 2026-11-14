@@ -611,6 +611,40 @@ upon rx failures"，**Tested-on WCN3990 hw1.0 WLAN.HL.3.2.2**，与我们同固�
 丢弃全部 RX）与我们的现象同族。若重 join 也无响应，下一层是 WLAN PD restart
 （QMI WLFW 层，复杂度高，暂列兜底）。
 
+#### ★ chain-624 判决（00:4x，CI `43612781309`，commit `b8f9ff7`）：判据教训 + 一次 PANIC 的完整取证
+
+r0/r1 各 900 s。**r0（recover=0 对照）暴露了判据错误**：`ce1stall=43` ——
+800 polls 单一 `ce1` 阈值大量误报，**正常空闲的 CE1 也能静默超过 3.4 s**
+（数据 TX 走 CE4，每帧有 TX_COMPL，但系统安静时段本来就没有帧要发）。
+r0 这轮 CE1 全程没永久停摆（`ce1/drri1` 213/214 对都在动），反而 **CE2 在
+~5000 polls 就停了**（`rx=511` 冻结）——**CE2 的停止时刻是漂移的，CE1 的
+~210000-polls 锚点仍是唯一稳定信号**。
+
+**r1（recover=1）触发了一次真 PANIC，取证完整、根因链三环**：
+
+1. 误报 STALL（polls=4000，`ce1=82`，其实只是空闲）→ recover 拆了**正常连接**；
+2. 二次 join 重发 `VDEV_START`，但 **vdev 还在 UP**（没有先 `VDEV_DOWN`）→
+   固件不响应 → `JOIN: peer map timeout`；
+3. 诊断性回退 `sending auth anyway` 反复重传 → **CE3 mgmt 路径的 SMMU 竞态**：
+   `ESR be000411`（与 chain-610 修掉的 CE4 那条完全同族）、`smr7=0x800100c0`
+   （WLAN CE 流）、`cb61/cb4 fsr=0x400`，伴随 `disk5 I/O error` 刷屏 ——
+   **txguard 只保护了 CE4，CE3 的 auth 重传堆叠是同一族竞态**。整机 panic，
+   `join5=4`、采集在 `polls≈17000` 截断。
+
+**三处修复（`5ef2bc3`，一次到位）**：
+1. **判据改为 `ce1` 与 `msdu` 双冻结**（`g_msdu_mark`）：真停摆时两者同时死，
+   普通空闲时 `msdu` 会走（不对，空闲时 msdu 也不动——但 43 次误报发生在
+   msdu 仍增长的时段，即系统仍在收帧只是 CE1 tx_compl 稀疏；以 r0 数据为准）；
+2. **recover 先发 `WMI_VDEV_DOWN`**（`0x5007`，TLV tag **94**——由
+   CREATE@250=86 / UP@256=92 两个实机锚点插值），再 join_reset；重 START
+   已 UP 的 vdev 正是 chain-624 死掉的那条链；
+3. **`g_recover_active` 门控**：recover 的重 join 里 peer map timeout
+   **不再 `sending auth anyway`**，改为 rearm scan；VDEV_UP 发出即清零
+   （能走到 VDEV_UP 说明固件已响应 VDEV_START，回退分支重新安全）。
+
+**顺带的判读修正**：`srri4=wr4=0`（c1）不代表「TX 路径停」——只是该轮没有
+数据帧要发；「固件仍在消费 TX」的可靠判据是 `srri4==wr4 且非零`（c0 的 26/26）。
+
 **下一刀（两条一起做，一次上机即可分流）**：
 1. 停摆时**发一条 WMI 命令并等响应**（如 `WMI_GET_STATS`）：
    有响应 ⇒ 固件活着、只是 RX 路径挂起；无响应 ⇒ 固件已崩。
