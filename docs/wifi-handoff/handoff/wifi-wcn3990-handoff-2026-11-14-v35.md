@@ -576,6 +576,41 @@ WCN3990-HIF: WPA: tx frame 103 bytes slot=1/2/3 prefetch=52 rc=0                
 | CE 寄存器配置 | `CE_DST_WM=0x50` 写 `[15:0]=dst_n`、CTRL1 清 bit17/18、`CE_STATUS` 写 `0x1f`，与 `snoc.c:256-263` + Trogdor `wc_power_up/wc_service` 一致 |
 | RX_IN_ORD 解析 | ath10k `htt.h:1104-1116` 精确布局（`info`@p[1]、`msdu_count`@p[6..7]、12 B 描述符@8）逐字节一致 |
 
+#### ★ 23:4x chain-622 数据的第二次判读（修正与定锚）
+
+更仔细地分离两组的冻结时刻后，还有三个此前没写清的事实：
+
+1. **c0 里 CE2 先停、CE1 后停**：CE2 的 `drri` 冻结在 `polls=189000`（812 s），
+   CE1 的 `ce1/drri1` 却一直动到 `polls=211000`（907 s，341→344、drri1 21→24，
+   期间只有 3 条消息——TX_COMPL）。所以 c0 的图景是「**WMI 事件先停，数据路径
+   苟延残喘 22 s 后也停**」，而不是我此前写的「189000 全停」。
+2. **c1 里 CE1 单独停、CE2 全程活**：`drri(CE2)` 一直循环推进（5→14→24→33→2→12）
+   到采集结束（`polls=214000`），只有 `ce1/httidx/ord/msdu` 在 line 14192 冻结
+   （`ce1=419 drri1=20002`）。`ce1stall=0` 是因为冻结点落在采集末尾，
+   剩余时间不足 15000 polls 的检查间隔。
+3. **★ CE1 的停摆时刻两轮 boot 几乎相同**：c0 在 `polls=211000`、c1 在
+   `~210000`（line 14192 对应约 210000）—— 以 ~4.3 ms/poll 计，两次都是
+   **~15 分钟**。两次独立 boot 落在同一个 poll 计数上，说明这是一个
+   **以时间/计数为锚点的可复现事件**（固件内部定时器、空闲超时或周期性
+   状态机），不是流量相关的随机故障。这直接决定了恢复窗口的设计：
+   检测阈值必须远小于 15 分钟，recover 才能在采集窗内真正触发。
+
+**因此 chain-623 的 15000 polls（~105 s）检测阈值在 900 s 采集里大概率赶不上
+末段停摆——已把阈值改为 800 polls（~3.4 s，commit `b8f9ff7`/`2d9697e`，镜像
+CI `43612781309` 取的是 `b8f9ff7`，与 `2d9697e` 仅差一行注释文字）。**
+3.4 s 安全：每个入队帧都会在 CE1 上产生 TX_COMPL，且系统持续发包。
+
+**chain-623/624 的恢复设计（`recover=0|1`，commit `f15776d`）**：STALL 时调
+`hif_join_reset("rx stalled: target->host went silent")`（**限 2 次**），
+由 wifiauto 自动重 scan → 重 join → keys → VDEV_UP → DHCP，全程复用已实机
+验证的状态机。重 join 同时就是**探活**：VDEV_START 必须在 CE2 上得到 0x5002
+响应，join 超时即证明 WMI 任务也挂了。上游 ath10k 对这种「rx stuck 而 tx 仍
+入队」的状态也是同一处理——commit `f78210dd4bea0`（"trigger hardware recovery
+upon rx failures"，**Tested-on WCN3990 hw1.0 WLAN.HL.3.2.2**，与我们同固件族）
+触发硬件重启而不是让设备瘫痪；其触发条件（`rx_confused`：MSDU_DONE 失败后
+丢弃全部 RX）与我们的现象同族。若重 join 也无响应，下一层是 WLAN PD restart
+（QMI WLFW 层，复杂度高，暂列兜底）。
+
 **下一刀（两条一起做，一次上机即可分流）**：
 1. 停摆时**发一条 WMI 命令并等响应**（如 `WMI_GET_STATS`）：
    有响应 ⇒ 固件活着、只是 RX 路径挂起；无响应 ⇒ 固件已崩。
