@@ -170,13 +170,33 @@ owns its CE configuration and the host may program the registers above.
 
 ## 5. Not yet sourced / known gaps
 
-* Association and the data path: `WMI_VDEV_CREATE`/`VDEV_START`/`PEER_CREATE`/
-  `PEER_ASSOC` and the HTT data pipes (CE4/CE5/CE1) are **not** implemented.
-  `PicassoWlan.cpp::picasso_wlan_transmit()` still forges DHCP/ARP locally.
-* MSI setup from WLFW (`wlfw_msi_cfg`) is not used: this HIF is polled.
+Status as of 2026-11-15 (v41).  This section used to say the data path was
+"**not** implemented"; that is no longer true and the stale claim misled two
+rounds of debugging, so it is replaced by what the hardware actually does now.
+
+Implemented and verified on device (see `handoff/README.md` -> v41):
+
+* Association: `WMI_VDEV_CREATE` / `VDEV_START` / `PEER_CREATE` /
+  `PEER_ASSOC`, WPA2-PSK four-way handshake with real EAPOL frames.
+* Data path: HTT pipes CE4 (TX_FRM) / CE5 (TX completion) / CE1 (T2H), real
+  802.3 frames on the air in both directions, `RX_IN_ORD` and `RX_IND`
+  deaggregation, `wifix` lladdr alignment with the firmware's STA address.
+* Addresses: in-kernel DHCPv4 client (`hakios.dhcp.c`) — real DISCOVER/OFFER/
+  REQUEST/ACK, `DHCP: bound inet … router …`, then DNS published to
+  `/private/var/run/resolv.conf` and the resolver signalled.
+  `picasso_wlan_transmit()` no longer forges DHCP/ARP locally.
+
+Still open:
+
+* **RX liveness / recovery** — the only remaining functional gap.  Two shapes
+  (whole RX freezes; or RX alive but the AP's own downlink never arrives) are
+  documented in `diagnostic-charter.md` §0 and in the v41 handoff.
+* MSI setup from WLFW (`wlfw_msi_cfg`) is still not used: this HIF is polled
+  by design, and every timeout budget in the driver is expressed in polls.
 * `struct ath10k_hw_params.shadow_reg_support` is declared but never
-  initialised in `hw.c`; whether a given kernel writes 0x3c or the shadow
-  window must be confirmed on hardware. Our driver writes both.
-* The `rri_on_ddr` path (`ce_rri_low/high` at 0x24C004/8) is not used; we
-  detect completion from `desc->nbytes` exactly like
+  initialised in `hw.c`; on this target the always-on shadow window excludes
+  `CE_CURRENT_DRRI`, so DRRI must never be read while the target idles
+  (an un-clocked access raises SError).  Our driver writes both.
+* The `rri_on_ddr` path (`ce_rri_low/high` at 0x24C004/8) is not used;
+  completion is detected from `desc->nbytes` exactly like
   `_ath10k_ce_completed_recv_next_nolock_64()`.
