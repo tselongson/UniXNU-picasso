@@ -653,7 +653,14 @@ static int g_recover_active;
  * instead of leaving it inoperable.  Rejoining also doubles as the liveness
  * probe: VDEV_START must be answered with 0x5002 on CE2, so a join that
  * times out means the WMI task is gone too, not just the rx data path. */
-static int g_recover;
+/* chain-630: the "default on" commit 870bed2 only changed the local v to 1,
+ * but g_recover is assigned ONLY when PE_parse_boot_argn("recover") succeeds.
+ * A daily-use boot carries no recover token, so the static zero below meant
+ * the self-healing rejoin was never armed at all: chain-630 u0/u1 both printed
+ * RX STALL-GLOBAL 6 times with zero "recover #" lines and 0/20 pings.
+ * Declare the default explicitly, exactly like g_tx_guard = 1.  recover=0
+ * still overrides it through the boot-arg parse below. */
+static int g_recover = 1;
 static uint32_t g_recover_used;
 static uint8_t g_htt_seq;     /* HTC seq_no for the HTT endpoint (htc.h @5) */
 static int g_htt_ring_done;   /* RX_RING_CFG + AGGR_CFG already sent */
@@ -5862,6 +5869,8 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	if (PE_parse_boot_argn("recover", &v, sizeof(v)) && v <= 1) {
 		g_recover = (int)v;
 	}
+	IOLog("WCN3990-HIF: recover_enabled=%d (default 1, recover=0 disables)\n",
+	    g_recover);
 	v = 1;
 	if (PE_parse_boot_argn("dhcp", &v, sizeof(v)) && v <= 1) {
 		g_dhcp = (int)v;
