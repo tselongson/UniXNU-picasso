@@ -1098,6 +1098,19 @@ static unsigned q_srv_count, g_rx_msgs, g_tx_msgs, q_resumes;
 /* last QRTR message, so the one-line tick shows where the modem went quiet */
 static uint32_t g_last_dport, g_last_len, g_last_ms, g_last_qmi, g_last_src_port;
 static unsigned g_tftp_wrq, pdr_rx_logs, g_pdr_tries;
+
+/* chain-633: WCN3990 subsystem (wlan_pd) restart recovery.
+ * Linux commit 0e622f67e041 does restart-work on every FW_READY after the
+ * first one; before this change wlfw_probed stayed true forever, so a Q6
+ * re-announcement of WLFW on a new QRTR port left the host with a dead radio.
+ * pdr=1 enables the recovery; pdr=0 keeps today's behaviour (single var).
+ * The counters are unbounded (cheap) but the logs are bounded to 8 lines. */
+static unsigned g_wlfw_up_count, g_pd_restart_count, g_pd_recovery_used;
+static int g_pd_recovery = -1;          /* -1 = boot-arg not parsed yet */
+static bool g_pd_recovery_active;
+extern "C" uint32_t picasso_wlan_smp2p_bits(void);
+extern "C" unsigned rpmhVoteCryptoPath(void);
+extern "C" void wcn3990_hif_pd_restart(void);
 extern "C" uint64_t sweet_log_total_g;
 extern "C" unsigned sweet_log_seq_g, sweet_log_fails_g;
 extern "C" unsigned sweet_log_started_g;
@@ -1403,10 +1416,52 @@ qrtr_rx(const uint8_t *p, uint32_t len)
 			pdr_instance = (c->b >> 8) & 0xff;   /* version in the low byte */
 		}
 		if (c->a == QMI_SVC_WLFW) {
+			uint32_t pd_old_port = wlfw_port;
 			LOG("t=%u ms: *** WLFW service 0x45 up: inst %x node %u port %x ***", g_ms, c->b, c->c, c->d);
 			wlfw_node = c->c;
 			wlfw_port = c->d;
 			wlfw_probe = true;
+			g_wlfw_up_count++;
+			/* A second announcement is the modem saying wlan_pd restarted
+			 * (SSR / PDR).  Print it in BOTH arms: until now this event
+			 * had to be inferred from a port change in the log. */
+			if (g_wlfw_up_count > 1) {
+				g_pd_restart_count++;
+				if (g_pd_restart_count <= 8u) {
+					LOG("t=%u ms: *** WLAN PD RESTART #%u old_port=%x "
+					    "new_port=%x smp2p=%08x smp2p_seen=%d ***",
+					    g_ms, g_pd_restart_count, pd_old_port, c->d,
+					    picasso_wlan_smp2p_bits(), g_pd_recovery);
+				}
+				if (g_pd_recovery < 0) {
+					uint32_t pd_v = 0;
+					(void)PE_parse_boot_argn("pdr", &pd_v, sizeof(pd_v));
+					g_pd_recovery = (int)pd_v;
+				}
+				if (g_pd_recovery && g_pd_recovery_used < 3u) {
+					g_pd_recovery_used++;
+					g_pd_recovery_active = true;
+					/* Restart-work only (0e622f67e041): re-run the
+					 * QMI/WLFW handshake, keep MSA ownership and the
+					 * already-programmed CE/SMMU hardware state. */
+					wlfw_probed = false;
+					wlfw_state = 0;
+					wlfw_tries = 0;
+					wlfw_last = 0;
+					wlfw_ready = false;
+					wlfw_msa_ready_seen = false;
+					wlfw_bdf_file = NULL;
+					/* wlfw_assigned stays true: hyp_assign() already
+					 * gave the MSA to the WLAN VM; re-assigning a live
+					 * range is neither needed nor safe here. */
+					{
+						unsigned pd_voted = rpmhVoteCryptoPath();
+						LOG("t=%u ms: WLAN PD RECOVERY #%u: "
+						    "re-voted %u bcm(s), WLFW state reset",
+						    g_ms, g_pd_recovery_used, pd_voted);
+					}
+				}
+			}
 		}
 		break;
 	case QRTR_TYPE_DATA:
@@ -4143,8 +4198,22 @@ wlfw_rx(const uint8_t *d, uint32_t len)
 		if (wlfw_state > 9) {
 			LOG("t=%u ms: *** WLFW MISSION MODE ATTACH COMPLETE! WLAN RADIO IS ACTIVE! ***", g_ms);
 			wlfw_state = 0;
-			picasso_wlan_ce_init();
-			picasso_wlan_net_attach();
+			if (g_pd_recovery_active) {
+				/* 0e622f67e041: "All the subsequent FW_READY
+				 * indication ... we only need to do the restart
+				 * work".  The CE registers, SMMU context and the
+				 * BDF are already in place from the first bring-up;
+				 * re-running picasso_wlan_ce_init() would reset
+				 * g_polls and re-stage the rings under the live
+				 * poller.  Just re-arm the scan/join. */
+				g_pd_recovery_active = false;
+				LOG("t=%u ms: WLAN PD RECOVERY: handshake done, "
+				    "restart-work only (no CE re-init)", g_ms);
+				wcn3990_hif_pd_restart();
+			} else {
+				picasso_wlan_ce_init();
+				picasso_wlan_net_attach();
+			}
 		} else {
 			wlfw_step();
 		}

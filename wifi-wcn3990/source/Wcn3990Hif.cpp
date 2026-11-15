@@ -6055,3 +6055,15 @@ wcn3990_hif_init(volatile uint8_t *ce_va, uint64_t ce_pa)
 	}
 }
 
+
+/* chain-633: called from PicassoWlan.cpp when the Q6 restarts wlan_pd and
+ * the WLFW handshake has been re-run.  Reuse the already-proven recover
+ * path (chain-625/628) instead of inventing a second join state machine:
+ * withdraw the link, re-arm wifiauto's scan/join gates, keep a 10 s
+ * backoff so the freshly restarted target has time to settle. */
+extern "C" void
+wcn3990_hif_pd_restart(void)
+{
+	HIF_LOG("PD RESTART: re-arming scan/join after wlan_pd restart");
+	hif_join_reset("wlan_pd restarted");
+}
