@@ -680,11 +680,14 @@ static uint32_t g_recover_used;
  * No recovery path may itself be blocked by the flush: PD recovery and
  * wcn3990_hif_pd_restart() clear it. */
 static int g_pdr_mode = -1;           /* pdr= level, parsed lazily */
+static int g_link_ever;               /* one association completed at least once */
 static uint32_t g_fwdead_ev;          /* last mgmt-event value seen */
 static uint32_t g_fwdead_cnt;         /* consecutive heartbeats unchanged */
 static int g_fw_dead;                 /* target declared dead: no CE writes */
 static uint32_t g_fw_dead_polls;      /* poll at which it was declared */
 static uint32_t g_fw_dead_drops;      /* bounded refusal log */
+static uint32_t g_fw_probe_next;      /* next allowed probe write while dead */
+static uint32_t g_fw_probe_used;      /* bounded probes (false-positive escape) */
 static uint32_t g_fw_reset_used;      /* bounded escalation */
 extern "C" void picasso_wlan_request_pd_restart(void);
 
@@ -826,14 +829,34 @@ hif_ce_send(uint32_t ce, uint8_t *buf, uint32_t len)
 	 * rings at all (Linux 0e622f67e041: after FW_DOWN every direct
 	 * hardware access must be avoided).  This is the exact write that
 	 * produced the data abort at FAR_EL1=0x16ee4c000 in chain-633 pd0.
-	 * Bounded log; PD recovery / hif_pd_restart() clears the flag. */
+	 *
+	 * chain-634 fd0 proved a false positive is possible (firmware declared
+	 * dead at polls=4000 before the first association, when mgmtev is
+	 * legitimately flat), so the flush must never be a one-way door: while
+	 * dead, allow one WMI (CE3) probe every 5 s, at most 3 in total.  If the
+	 * target is really alive the probe's answer makes mgmtev move and the
+	 * detector clears the flag; if it is really dead the bounded probes stop
+	 * and nothing else is ever written.  smp2p bit1 (firmware's own
+	 * early-crash report) suppresses the probes entirely. */
 	if (g_fw_dead) {
-		if (g_fw_dead_drops < 8u) {
-			g_fw_dead_drops++;
-			HIF_LOG("FW_DEAD: CE%u write refused len=%u "
-			    "(target stopped answering)", ce, len);
+		uint32_t smp = picasso_wlan_smp2p_bits();
+		int probe = (ce == 3) && !(smp & 0x2u) &&
+		    g_fw_probe_used < 3u && g_polls >= g_fw_probe_next;
+
+		if (probe) {
+			g_fw_probe_used++;
+			g_fw_probe_next = g_polls + 5000u;
+			HIF_LOG("FW_DEAD: CE3 probe %u len=%u smp2p=%08x",
+			    g_fw_probe_used, len, smp);
+		} else {
+			if (g_fw_dead_drops < 8u) {
+				g_fw_dead_drops++;
+				HIF_LOG("FW_DEAD: CE%u write refused len=%u "
+				    "(target stopped answering)",
+				    ce, len);
+			}
+			return -1;
 		}
-		return -1;
 	}
 
 	switch (ce) {
@@ -3503,6 +3526,7 @@ hif_wpa_handle_eapol(const uint8_t *e, uint32_t n)
 		}
 		g_wpa_st.keyed = 1;
 		g_link_up = 1;
+		g_link_ever = 1;
 		/* The radio is on air.  configd waits for KEV_DL_LINK_ON before it
 		 * builds the IPv4 service and runs DHCP; autojoin ran with 22 MSDUs
 		 * delivered into the stack yet no SIOCSIFADDR ever appeared.
@@ -4629,6 +4653,7 @@ hif_join_resp(const uint8_t *f, uint32_t n)
 			hif_join_peer_param(3, 1);  /* PEER_AUTHORIZE */
 			/* An open network is on the air with no key handshake. */
 			g_link_up = 1;
+			g_link_ever = 1;
 			hakios_net_link_state(true);
 			hakios_apple80211_event(3, 1);
 			HIF_LOG("JOIN: open AP authorized, link up");
@@ -5117,7 +5142,7 @@ wcn3990_hif_poll(void)
 		 * and not scanning means the WMI task is gone even if the host can
 		 * still see descriptors.  Recovery clears it (events resume, or
 		 * wcn3990_hif_pd_restart() after a PD restart). */
-		if (g_stage >= 3 && g_wifi_auto && !g_scan_active) {
+		if (g_stage >= 3 && g_wifi_auto && !g_scan_active && g_link_ever) {
 			if (g_mgmt_events == g_fwdead_ev) {
 				if (g_fwdead_cnt < 64u) g_fwdead_cnt++;
 			} else {
@@ -6177,10 +6202,12 @@ wcn3990_hif_pd_restart(void)
 	 * the detector too, otherwise the first heartbeat after recovery would
 	 * immediately re-declare the target dead. */
 	if (g_fw_dead)
-		HIF_LOG("PD RESTART: lifting FW_DEAD flush (drops=%u)",
-		    g_fw_dead_drops);
+		HIF_LOG("PD RESTART: lifting FW_DEAD flush (drops=%u probes=%u)",
+		    g_fw_dead_drops, g_fw_probe_used);
 	g_fw_dead = 0;
 	g_fw_dead_drops = 0;
 	g_fwdead_cnt = 0;
+	g_fw_probe_used = 0;
+	g_fw_probe_next = 0;
 	hif_join_reset("wlan_pd restarted");
 }
