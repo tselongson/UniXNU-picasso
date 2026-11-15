@@ -911,6 +911,10 @@ static bool gRootBringupTrace = false;
 #define NATIVE_UFS_TRACE(...) do { if (gRootDiagnosticEnabled || gRootBringupTrace) IOLog(__VA_ARGS__); } while (0)
 #include "RootQueue.h"
 #define NATIVE_UFS_READ_TRACE(...) IOLog(__VA_ARGS__)
+// Poison / recovery events are deliberately unconditional: the legacy
+// quarantine path is silent on the console, which is why the frozen-device
+// signature could not be attributed for several rounds (see v35 5.6).
+#define UFS_RECOVERY_LOG(...) IOLog(__VA_ARGS__)
 #include "RootCommands.h"
 #undef NATIVE_UFS_READ_TRACE
 #undef NATIVE_UFS_TRACE
@@ -2531,6 +2535,10 @@ bool NativeUfs::start (IOService *provider)
   unsigned diagnostic = 0;
   PE_parse_boot_argn ("native-ufs-diagnostics", &diagnostic, sizeof (diagnostic));
   gRootDiagnosticEnabled = diagnostic == 1;
+  unsigned ufsRecovery = 0;
+  PE_parse_boot_argn ("ufsrec", &ufsRecovery, sizeof (ufsRecovery));
+  gUfsRecovery = ufsRecovery == 1;
+  IOLog ("NATIVE_UFS_START ufsrec=%u diagnostics=%u\n", gUfsRecovery, diagnostic);
   if (probe == 2) {
     inspect ();
   }

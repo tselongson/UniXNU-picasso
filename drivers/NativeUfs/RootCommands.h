@@ -9,6 +9,80 @@
 #endif
 #include "PollPause.h"
 
+// ---------------------------------------------------------------------------
+// Runtime transport recovery.
+//
+// Legacy behaviour: the first command that does not complete sets
+// gHost.poisoned = true / gHost.ready = false and is NEVER cleared anywhere.
+// Every later I/O returns kIOReturnNotReady without touching the controller
+// and, because recordTransport() only reports the FIRST failure and
+// NATIVE_UFS_TRACE is gated by gRootDiagnosticEnabled, without producing a
+// single byte on the serial console.  That is exactly the frozen-device
+// signature (disk3 "device is not ready", apfs "got err 16", 150k read
+// errors, 0 PANIC, 0 NATIVE_UFS_FAILURE, WiFi heartbeat still running).
+//
+// JEDEC UFSHCI JESD223C 5.4.4 (UTRLCLR, offset 5Ch): writing 0 to a slot bit
+// makes the host controller free that request slot's resources immediately
+// and clear the matching UTRLDBR bit; writing 1 means "no change".  Linux
+// ufshcd_utrl_clear() writes ~mask, and ufshcd_err_handler() performs host
+// reset / link recovery / DID_REQUEUE on a timeout instead of permanently
+// quarantining the adapter.  We own exactly one slot (0).
+//
+// ufsrec=0 keeps the legacy path as the A/B control; ufsrec=1 attempts the
+// recovery for Timeout / doorbell-busy only.  Fatal controller status and
+// response-protocol errors still quarantine the adapter.
+#ifndef UFS_RECOVERY_LOG
+#define UFS_RECOVERY_LOG(...) do { } while (0)
+#endif
+static int gUfsRecovery = 0;
+static uint32_t gUfsPoisonEvents = 0;
+static uint32_t gUfsRecoverAttempts = 0;
+static uint32_t gUfsRecoverOk = 0;
+static uint32_t gUfsPoisonLogged = 0;
+
+static void ufsPoisonNote (const char *why, uint32_t db, uint32_t is,
+                           uint32_t polls, uint32_t ocs)
+{
+  // The host harnesses define UFS_RECOVERY_LOG as a no-op; keep the signature
+  // (and these references) so -Werror -Wunused-parameter still passes there.
+  (void) why; (void) db; (void) is; (void) polls; (void) ocs;
+  ++gUfsPoisonEvents;
+  if (gUfsPoisonLogged >= 8u) return;
+  ++gUfsPoisonLogged;
+  UFS_RECOVERY_LOG ("UFS_POISON #%u why=%s db=%08x is=%08x polls=%u ocs=%02x "
+                    "timeout_us=%u lba=%llx result=%08x rec=%d attempts=%u ok=%u\n",
+                    gUfsPoisonEvents, why, db, is, polls, ocs,
+                    gRootDiagnostic.timeoutUs,
+                    static_cast<unsigned long long> (gRootDiagnostic.lba),
+                    gRootDiagnostic.result, gUfsRecovery,
+                    gUfsRecoverAttempts, gUfsRecoverOk);
+}
+
+static bool hostRecoverSlot0 (const char *why)
+{
+  (void) why;
+  ++gUfsRecoverAttempts;
+  if (!gHost.hc) return false;
+  // UTRLCLR is only legal while the request list is running (JESD223C 5.4.4).
+  if (!(read32 (gHost.hc, 0x60) & 1u)) return false;
+  hostWrite (0x5c, ~1u);
+  for (unsigned i = 0; i < 1000u; ++i) {
+    if (!(read32 (gHost.hc, 0x58) & 1u)) break;
+    IODelay (10);
+  }
+  uint32_t db = read32 (gHost.hc, 0x58);
+  uint32_t is = read32 (gHost.hc, 0x20);
+  if ((db & 1u) || (is & kUfsFatalStatus)) return false;
+  gHost.poisoned = false;
+  gHost.ready = true;
+  ++gUfsRecoverOk;
+  if (gUfsRecoverOk <= 8u)
+    UFS_RECOVERY_LOG ("UFS_RECOVER #%u why=%s db=%08x is=%08x rsr=%x poison=%u\n",
+                      gUfsRecoverOk, why, db, is,
+                      read32 (gHost.hc, 0x60), gUfsPoisonEvents);
+  return true;
+}
+
 struct HardwareTransferPort {
   uint64_t deadline, lastClock;
   uint32_t tracePoll;
@@ -76,11 +150,17 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   uint32_t interrupt = read32 (gHost.hc, 0x20);
   NATIVE_UFS_TRACE ("NATIVE_UFS_SUBMIT begin db=%x is=%x\n", doorbell, interrupt);
   if (doorbell != 0) {
+    ufsPoisonNote ("submit_doorbell", doorbell, interrupt, 0, 15);
+    // A still-set doorbell is a slot the controller has not released, not a
+    // dead adapter.  Release it and let the upper layer retry this I/O.
+    if (gUfsRecovery && hostRecoverSlot0 ("submit_doorbell"))
+      return kIOReturnBusy;
     gHost.poisoned = true;
     gHost.ready = false;
     return recordTransport (kIOReturnBusy, *ocs);
   }
   if (interrupt & kUfsFatalStatus) {
+    ufsPoisonNote ("submit_fatal", doorbell, interrupt, 0, 15);
     gHost.poisoned = true;
     gHost.ready = false;
     return recordTransport (kIOReturnIOError, *ocs);
@@ -147,8 +227,16 @@ static IOReturn hostSubmit (uint32_t direction, uint32_t dataBytes, uint32_t tim
   gRootDiagnostic.lastTick = port.lastClock;
   *ocs = state.ocs;
   if (end != UfsTransferEnd::Completed) {
+    ufsPoisonNote (end == UfsTransferEnd::Timeout ? "poll_timeout" : "poll_fatal",
+                   state.doorbellLast, state.interruptLast, state.polls, state.ocs);
     // No cancel/reset/retry: the controller may still own the buffer, even
-    // with DB=0. Keep it allocated and prohibit all subsequent CPU writes.
+    // with DB=0.  Keep it allocated and prohibit all subsequent CPU writes.
+    // With ufsrec=1, UTRLCLR explicitly frees slot 0 first (JESD223C 5.4.4),
+    // so the buffer is no longer owned and a retry is safe.  Fatal controller
+    // status is never recovered from.
+    if (gUfsRecovery && end == UfsTransferEnd::Timeout &&
+        hostRecoverSlot0 ("poll_timeout"))
+      return kIOReturnBusy;
     gHost.poisoned = true;
     gHost.ready = false;
     return recordTransport (end == UfsTransferEnd::Timeout ? kIOReturnTimeout : kIOReturnIOError, *ocs);
@@ -178,14 +266,22 @@ static bool hostClearUcd (void)
   // Check before touching the command/response area, not just before ringing.
   uint32_t doorbell = read32 (gHost.hc, 0x58);
   if (doorbell != 0) {
-    gHost.poisoned = true;
-    gHost.ready = false;
-    recordTransport (kIOReturnBusy, 15);
-    NATIVE_UFS_TRACE ("NATIVE_UFS_UCD clear=failed reason=busy db=%x\n", doorbell);
-    return false;
+    ufsPoisonNote ("clear_doorbell", doorbell, read32 (gHost.hc, 0x20), 0, 15);
+    if (gUfsRecovery && hostRecoverSlot0 ("clear_doorbell")) {
+      // Slot 0 released: the controller no longer owns the UCD, so clearing
+      // and rebuilding it below is safe.
+      doorbell = read32 (gHost.hc, 0x58);
+    } else {
+      gHost.poisoned = true;
+      gHost.ready = false;
+      recordTransport (kIOReturnBusy, 15);
+      NATIVE_UFS_TRACE ("NATIVE_UFS_UCD clear=failed reason=busy db=%x\n", doorbell);
+      return false;
+    }
   }
   uint32_t interrupt = read32 (gHost.hc, 0x20);
   if (interrupt & kUfsFatalStatus) {
+    ufsPoisonNote ("clear_fatal", doorbell, interrupt, 0, 15);
     gHost.poisoned = true;
     gHost.ready = false;
     recordTransport (kIOReturnIOError, 15);
@@ -202,6 +298,8 @@ static bool hostClearUcd (void)
 
 static IOReturn hostProtocolError (uint32_t reason)
 {
+  ufsPoisonNote ("protocol", read32 (gHost.hc, 0x58),
+                 read32 (gHost.hc, 0x20), 0, gRootDiagnostic.ocs);
   gRootDiagnostic.protocol = reason;
   gHost.ready = false;
   gHost.poisoned = true;
