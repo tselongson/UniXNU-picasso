@@ -748,6 +748,39 @@ PING during capture: 24 replies    PING AFTER capture: 20/20
 依赖，检测器已布防）；② 卷 I/O 挂死（黑屏静止圈）是独立线，未修，仍缺长时
 证据；③ Safari 端到端与 Wi-Fi 详情待用户实测；④ `wpass=` 仍是 boot-arg 明文。
 
+#### ★ 2026-11-15 10:17 用户实测复现：卷 I/O 挂死（§5.6 独立线）现场与收尾
+
+设备 06:00（chain-628 完成后）留桌面，用户 10:17 报「一碰又出现转圈圈」。
+实时取证（4753 行，`work/629-frozen-evidence/status-frozen-1017.txt`）：
+
+```
+disk5 tx_enter() failed ×2228        （Data 卷 EIO 刷屏）
+disk3 device is not ready ×714       （System 卷）
+disk3 got err 16，num read errs 累计 150,620+   ← 15 万次读错误
+launchd.log: fopen(...): 5           （launchd 自己写日志都失败）
+ino_shrink_size_prepare: disk5s1 cannot enter tx
+PANIC=0  NATIVE_UFS_FAILURE=0  STALL-GLOBAL=0  recover=0
+heartbeat polls= 14 条               ← WiFi 心跳还在打
+```
+
+**判读**：
+1. 这就是 §5.6 的**卷 I/O 挂死独立线**，与 WiFi 主线**零关联**（WiFi 修复
+   后的检测器/自愈全程 0 触发、心跳正常）。
+2. 采集 6 s 内 `num read errs` 只 +8 ⇒ 低速率持续失败；15 万次 ÷ 4.3 小时
+   ≈ 每秒 10 次 ⇒ **disk3 从很早（可能开机起）就在持续失败**，不是突发。
+   挂死时刻未知但早于「一碰」——一碰只是把已冻结的 UI 显性化
+   （触摸 → SpringBoard 处理 → 读 System 卷失败 → 弹出静止加载圈）。
+3. 恢复路径实测：普通 `reboot` 命令**无效**（卷挂死太深，reboot 自身的
+   同步也失败）；`reboot-fastboot`（arm reason + PSHOLD）→ `fastboot reboot`
+   有效，设备已恢复启动。
+
+**下一棒（卷 I/O 线，唯一待办）**：开机即挂长时被动串口采集（≥4 h），
+观察 `disk3 num read errs` 与 `disk5 tx_enter` 的**首次出现时刻**与当时
+上下文（什么操作/什么进程在读），以及 NativeUfs 层有没有更早的痕迹
+（`NATIVE_UFS_TRANSFER_STALL` 等）。历史取证（v32/v34）：挂死后 0 PANIC、
+CPU 几乎全闲、SpringBoard/backboardd 消失、「再启动一次即恢复」；
+SMMU/WiFi DMA 链已被 txguard 排除（chain-610）。
+
 **下一刀（两条一起做，一次上机即可分流）**：
 1. 停摆时**发一条 WMI 命令并等响应**（如 `WMI_GET_STATS`）：
    有响应 ⇒ 固件活着、只是 RX 路径挂起；无响应 ⇒ 固件已崩。
