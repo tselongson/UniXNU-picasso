@@ -693,6 +693,32 @@ static uint32_t g_fw_dead_drops;      /* bounded refusal log */
 static uint32_t g_fw_probe_next;      /* next allowed probe write while dead */
 static uint32_t g_fw_probe_used;      /* bounded probes (false-positive escape) */
 static uint32_t g_fw_reset_used;      /* bounded escalation */
+
+/* ---- v41: RX-death supervisor -------------------------------------------
+ * chain-640's full boot log pinned the real failure shape, and it is not the
+ * AP and not DNS:
+ *   polls=25000  net: en0 addr=192.168.101.18   (DHCP bound, so the target's
+ *                                                unicast downlink works)
+ *   polls=40000  rx=806 beacons=631 mgmtev=630  (healthy)
+ *   polls=41000  rx=810 beacons=635 mgmtev=634  (frozen: whole RX path dead)
+ *   RX STALL-GLOBAL #1 -> "recover #1" -> VDEV_DOWN -> KEV_DL_LINK_OFF
+ *   -> addr=none, DHCP reset -> START_SCAN that never completes, because
+ *      scan results ride the same dead CE2 delivery.
+ * Two consequences made that state unrecoverable:
+ *   1. the 0.8 s (0.47 s real) window fired on the FIRST silent window, so a
+ *      single missed beacon tore down a working link and its IP;
+ *   2. g_scan_active then suppresses the FW_DEAD detector, so the pdr=2
+ *      escalation - the only recovery that re-initialises the target's RX
+ *      path - was never reached.  The device sat link-down forever, which is
+ *      exactly "Safari never loads a page".
+ * This supervisor watches TOTAL RX progress (mgmt events + delivered MSDUs)
+ * with no link and no scan gate, and asks Q6 for a wlan_pd restart.  It never
+ * touches the link itself, so the IP/DHCP state survives a transient gap. */
+static uint32_t g_rxsl_mark;          /* poll of the last RX progress */
+static uint32_t g_rxsl_ev;            /* mgmt-event count then */
+static uint32_t g_rxsl_msdu;          /* delivered-MSDUs count then */
+static uint32_t g_rxsl_used;          /* bounded PD-restart requests */
+
 extern "C" void picasso_wlan_request_pd_restart(void);
 
 static void
@@ -5275,6 +5301,46 @@ wcn3990_hif_poll(void)
 		 *     is the CE1-only shape, and VDEV_DOWN + rejoin is safe and
 		 *     effective there (the WMI task answered VDEV_START in
 		 *     every join since chain-625's g_recover_active gate). */
+		/* v41 RX supervisor (see the state block for the chain-640
+		 * evidence).  Deliberately before the 0.8 s watchdog and with
+		 * no g_link_up / g_scan_active gate: the failure it exists for
+		 * tears the link down first and then hangs in a scan whose
+		 * results can never arrive. */
+		if (g_stage >= 3 && g_link_ever) {
+			if (g_mgmt_events != g_rxsl_ev ||
+			    g_wr_rx_frames != g_rxsl_msdu) {
+				g_rxsl_ev = g_mgmt_events;
+				g_rxsl_msdu = g_wr_rx_frames;
+				g_rxsl_mark = g_polls;
+				g_rxsl_used = 0;
+			} else if (g_polls - g_rxsl_mark >= 5000u) {
+				uint32_t silent = g_polls - g_rxsl_mark;
+
+				g_rxsl_mark = g_polls;
+				if (g_rxsl_used < 4u) {
+					g_rxsl_used++;
+					if (g_pdr_mode < 0) {
+						uint32_t pdv = 0;
+						(void)PE_parse_boot_argn("pdr",
+						    &pdv, sizeof(pdv));
+						g_pdr_mode = (int)pdv;
+					}
+					HIF_LOG("RX DEAD #%u: no mgmt/data "
+					    "for %u polls (mgmtev=%u msdu=%u "
+					    "scan=%d link=%d join=%d pdr=%d)",
+					    g_rxsl_used, silent,
+					    g_mgmt_events, g_wr_rx_frames,
+					    (int)g_scan_active, g_link_up,
+					    (int)g_join_state, g_pdr_mode);
+					if (g_pdr_mode >= 2) {
+						picasso_wlan_request_pd_restart();
+						HIF_LOG("RX DEAD: asked Q6 to "
+						    "restart wlan_pd (pdr=%d)",
+						    g_pdr_mode);
+					}
+				}
+			}
+		}
 		if (g_link_up && g_polls - g_ce1_mark_polls >= 800u) {
 			if (g_mgmt_events != g_mgmtev_mark) {
 				g_mgmtev_mark = g_mgmt_events;
@@ -5286,6 +5352,7 @@ wcn3990_hif_poll(void)
 				    (hif_shape[1].dst_n - 1u)].nbytes : 0xffffu;
 
 				g_ce1_stall++;
+				if (g_ce1_stall == 1 || g_ce1_stall == 4)
 				HIF_LOG("RX STALL-GLOBAL #%u polls=%u "
 				    "mgmtev=%u ce1=%u drri1=%08x sw1=%u "
 				    "post1=%u nb1=%u rri2=%08x httidx=%u "
@@ -5308,7 +5375,15 @@ wcn3990_hif_poll(void)
 				 * here instead of waiting for the datapath
 				 * to die at the ~15-min anchor.  Bounded to
 				 * 2 attempts. */
-				if (g_recover && g_recover_used < 2) {
+				/* v41: act only after ~2.3 s of total silence, and
+				 * never when pdr>=2 - there the RX supervisor owns
+				 * the escalation and asks Q6 for a wlan_pd restart.
+				 * The VDEV_DOWN+rejoin below cannot work once CE2
+				 * is dead (VDEV_START's reply rides it), and its
+				 * START_SCAN sets g_scan_active, which suppresses
+				 * FW_DEAD and with it the only way back. */
+				if (g_ce1_stall >= 4 && g_pdr_mode < 2 &&
+				    g_recover && g_recover_used < 2) {
 					g_recover_used++;
 					HIF_LOG("recover #%u: beacon stream "
 					    "froze (mgmtev=%u), VDEV_DOWN "
