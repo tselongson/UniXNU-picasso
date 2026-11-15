@@ -679,6 +679,10 @@ static uint32_t g_recover_used;
  *     after 25 s without recovery.
  * No recovery path may itself be blocked by the flush: PD recovery and
  * wcn3990_hif_pd_restart() clear it. */
+/* Declared here because the v40 crash flush inside hif_ce_send() needs the
+ * poll counter long before the HIF state block below defines it. */
+static uint32_t g_polls;
+
 static int g_pdr_mode = -1;           /* pdr= level, parsed lazily */
 static int g_link_ever;               /* one association completed at least once */
 static uint32_t g_fwdead_ev;          /* last mgmt-event value seen */
@@ -1740,7 +1744,6 @@ static bool g_init_sent;
 static uint8_t g_wmi_eid = 1;
 static uint8_t g_tx_seq;
 static uint16_t g_credit_count, g_credit_size;
-static uint32_t g_polls;
 static uint32_t g_rx_packets;
 static bool g_scan_active;
 static uint32_t g_scan_polls;
