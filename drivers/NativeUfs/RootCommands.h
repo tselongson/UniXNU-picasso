@@ -34,11 +34,28 @@
 #ifndef UFS_RECOVERY_LOG
 #define UFS_RECOVERY_LOG(...) do { } while (0)
 #endif
+/* ufsrec=0 legacy quarantine, 1 UTRLCLR + Busy to APFS, 2 UTRLCLR +
+ * in-driver requeue (Linux DID_REQUEUE equivalent).  Reusing the existing
+ * token keeps the 995 B boot-args budget and gives an exact one-character
+ * single-variable A/B against ufsrec=1. */
 static int gUfsRecovery = 0;
 static uint32_t gUfsPoisonEvents = 0;
 static uint32_t gUfsRecoverAttempts = 0;
 static uint32_t gUfsRecoverOk = 0;
 static uint32_t gUfsPoisonLogged = 0;
+static uint32_t gUfsRequeueAttempts = 0;
+static uint32_t gUfsRequeueOk = 0;
+
+static void ufsRequeueNote (unsigned attempt, uint64_t lba, uint32_t ocs)
+{
+  (void) attempt; (void) lba; (void) ocs;
+  ++gUfsRequeueAttempts;
+  if (gUfsRequeueAttempts > 12u) return;
+  UFS_RECOVERY_LOG ("UFS_REQUEUE #%u lba=%llx ocs=%02x attempts=%u ok=%u\n",
+                    gUfsRequeueAttempts,
+                    static_cast<unsigned long long> (lba), ocs,
+                    gUfsRequeueAttempts, gUfsRequeueOk);
+}
 
 static void ufsPoisonNote (const char *why, uint32_t db, uint32_t is,
                            uint32_t polls, uint32_t ocs)
@@ -360,6 +377,23 @@ static IOReturn hostScsiDir (uint8_t lun, const uint8_t *cdb, unsigned cdbLength
   }
   uint32_t ocs = 0xf;
   IOReturn status = hostSubmit (direction ? direction : 0U, dataBytes, timeoutUs, &ocs);
+  /* ufsrec=2: UTRLCLR has already released slot 0 (chain-630 proved 8/8
+   * recoveries), but handing kIOReturnBusy to APFS made the media read fail
+   * -> xpcproxy could not exec -> EXC_CORPSE storm -> whole UI frozen
+   * (14:35 live capture: UFS_RECOVER 5/5, then NATIVE_UFS_READ result=
+   * e00002d5).  Linux answers a timed-out command with DID_REQUEUE, i.e.
+   * the driver resubmits it, never a Busy to the block layer.  The UPIU,
+   * UTRD and data buffer are still intact, so hostSubmit() is idempotent.
+   * Only a clean recovery (poisoned cleared) is requeued; fatal/protocol
+   * errors still quarantine. */
+  for (unsigned retry = 0;
+       gUfsRecovery >= 2 && status == kIOReturnBusy && !gHost.poisoned &&
+       retry < 3u; ++retry) {
+    ufsRequeueNote (retry + 1u, gRootDiagnostic.lba, ocs);
+    ocs = 0xf;
+    status = hostSubmit (direction ? direction : 0U, dataBytes, timeoutUs, &ocs);
+  }
+  if (gUfsRequeueAttempts && status == kIOReturnSuccess) ++gUfsRequeueOk;
   if (status != kIOReturnSuccess) return status;
   status = hostResponseHeader (0x21, lun, 0);
   if (status != kIOReturnSuccess) return status;

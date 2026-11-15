@@ -2537,7 +2537,10 @@ bool NativeUfs::start (IOService *provider)
   gRootDiagnosticEnabled = diagnostic == 1;
   unsigned ufsRecovery = 0;
   PE_parse_boot_argn ("ufsrec", &ufsRecovery, sizeof (ufsRecovery));
-  gUfsRecovery = ufsRecovery == 1;
+  /* 0 = legacy quarantine, 1 = UTRLCLR + Busy, 2 = UTRLCLR + in-driver
+   * requeue.  Keeping the same token means the 995 B cmdline stays exactly
+   * one character different between the A/B arms. */
+  gUfsRecovery = ufsRecovery <= 2 ? (int) ufsRecovery : 0;
   IOLog ("NATIVE_UFS_START ufsrec=%u diagnostics=%u\n", gUfsRecovery, diagnostic);
   if (probe == 2) {
     inspect ();

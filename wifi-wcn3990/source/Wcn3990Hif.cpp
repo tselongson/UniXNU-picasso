@@ -1659,6 +1659,7 @@ static uint32_t g_polls;
 static uint32_t g_rx_packets;
 static bool g_scan_active;
 static uint32_t g_scan_polls;
+static uint32_t g_scan_wd_fired;   /* bounded scan watchdog (ath10k scan.timeout) */
 static uint32_t g_smp2p_last;
 static int g_smp2p_seen;
 static uint32_t g_beacons;
@@ -5248,6 +5249,38 @@ wcn3990_hif_poll(void)
 	if (g_join) hif_join_poll();
 	if (g_scan_active) {
 		g_scan_polls++;
+		/* Linux ath10k arms scan.timeout for every scan and calls
+		 * ath10k_scan_reset() when the firmware never delivers the
+		 * scan-completed event: "it is desired to clean up scan state
+		 * anyway ... users won't be able to scan anymore".  We have no
+		 * work queue, so do the same on the 1 ms poll: a scan with no
+		 * WMI_SCAN_EVENTID for 20000 polls (~20 s) is dead.  Clearing
+		 * g_scan_active is essential because wifiauto's 10 s rescan
+		 * requires !g_scan_active; leaving it set froze the radio at
+		 * scan[885960] with smp2p=0 and join=0 in the 14:18 freeze.
+		 * Bounded logging and a 10 s backoff keep it from spinning. */
+		if (g_scan_polls >= 20000u) {
+			if (g_scan_wd_fired < 8u) {
+				uint32_t smp_wd = picasso_wlan_smp2p_bits();
+				HIF_LOG("SCAN WD #%u polls=%u smp2p=%08x "
+				    "srri3=%u drri2=%u link=%d join=%d "
+				    "mgmtev=%u",
+				    g_scan_wd_fired + 1u, g_scan_polls, smp_wd,
+				    g_dma ? (s_rri[3] & 0xffffu) : 0u,
+				    g_dma ? ((s_rri[2] >> 16) & 0xffffu) : 0u,
+				    g_link_up, (int)g_join_state, g_mgmt_events);
+			}
+			g_scan_wd_fired++;
+			g_scan_active = false;
+			g_scan_polls = 0;
+			/* Re-arm the same gates hif_join_reset() uses so the
+			 * existing wifiauto rescan/join path runs again. */
+			g_join_req.pending = 1;
+			g_autoscan_sent = 0;
+			g_last_rescan_at = g_polls;
+			/* Do NOT return: the CE receive loop below must still run this
+			 * tick, otherwise a wedged scan would also stop servicing RX. */
+		}
 		/* Record what the target does with the scan command before the
 		 * machine can die: the CE3 source read index says whether it
 		 * fetched START_SCAN at all, the CE2 destination index whether
