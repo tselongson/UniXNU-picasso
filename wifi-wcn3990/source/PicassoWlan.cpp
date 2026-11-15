@@ -1444,13 +1444,14 @@ qrtr_rx(const uint8_t *p, uint32_t len)
 					/* Restart-work only (0e622f67e041): re-run the
 					 * QMI/WLFW handshake, keep MSA ownership and the
 					 * already-programmed CE/SMMU hardware state. */
+					/* Only wlfw_probed needs clearing here: the main
+					 * loop's next tick calls wlfw_start(), which already
+					 * resets wlfw_state / tries / last / ready /
+					 * msa_ready_seen / BDF file / offset / segment.
+					 * Those variables are declared further down, so
+					 * touching them here would not even compile. */
+					wlfw_probe = true;
 					wlfw_probed = false;
-					wlfw_state = 0;
-					wlfw_tries = 0;
-					wlfw_last = 0;
-					wlfw_ready = false;
-					wlfw_msa_ready_seen = false;
-					wlfw_bdf_file = NULL;
 					/* wlfw_assigned stays true: hyp_assign() already
 					 * gave the MSA to the WLAN VM; re-assigning a live
 					 * range is neither needed nor safe here. */
