@@ -662,6 +662,54 @@ static int g_recover_active;
  * still overrides it through the boot-arg parse below. */
 static int g_recover = 1;
 static uint32_t g_recover_used;
+
+/* ---- firmware-death detector, crash flush and escalation (v40) -----------
+ * v38 §6.3 proved the panic is not in the recovery code: the last driver line
+ * before ESR/FAR is "ce3 send", i.e. the host still wrote WMI into a target
+ * that had already stopped answering.  Linux 0e622f67e041 states that after
+ * FW_DOWN "all the direct hardware register access should be avoided".
+ * Three gates, all cheap and only active once the target is really dead:
+ *   - FW_DEAD detector: g_mgmt_events frozen for 3 heartbeats (3 s) while
+ *     brought up and not scanning.  mgmtev rises with every beacon in a
+ *     healthy link, so 3 s of silence is unambiguous.
+ *   - crash flush (unconditional): hif_ce_send() refuses writes while dead,
+ *     which removes the data-abort path that resets the whole SoC.
+ *   - escalation by pdr= level: 0/1 unchanged, 2 = also ask Q6 to restart
+ *     wlan_pd (the v38 6.4b "no PD restart" branch), 3 = also PSCI reset
+ *     after 25 s without recovery.
+ * No recovery path may itself be blocked by the flush: PD recovery and
+ * wcn3990_hif_pd_restart() clear it. */
+static int g_pdr_mode = -1;           /* pdr= level, parsed lazily */
+static uint32_t g_fwdead_ev;          /* last mgmt-event value seen */
+static uint32_t g_fwdead_cnt;         /* consecutive heartbeats unchanged */
+static int g_fw_dead;                 /* target declared dead: no CE writes */
+static uint32_t g_fw_dead_polls;      /* poll at which it was declared */
+static uint32_t g_fw_dead_drops;      /* bounded refusal log */
+static uint32_t g_fw_reset_used;      /* bounded escalation */
+extern "C" void picasso_wlan_request_pd_restart(void);
+
+static void
+hif_system_reset(void)
+{
+	/* Self-contained PSCI SYSTEM_RESET (the console patch uses the same
+	 * SMC on this device); never rely on the weak empty
+	 * picasso_usb_reboot_fastboot() in HakiosCompat.cpp. */
+	register uint64_t x0 __asm__("x0") = 0x84000009ull;
+	register uint64_t x1 __asm__("x1") = 0;
+	register uint64_t x2 __asm__("x2") = 0;
+	register uint64_t x3 __asm__("x3") = 0;
+
+	__asm__ volatile ("dsb sy" ::: "memory");
+	__asm__ volatile ("msr daifset, #0xf" ::: "memory");
+	__asm__ volatile ("smc #0" : "+r" (x0)
+	    : "r" (x1), "r" (x2), "r" (x3)
+	    : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11",
+	      "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+	for (;;) {
+		__asm__ volatile ("wfe" ::: "memory");
+	}
+}
+
 static uint8_t g_htt_seq;     /* HTC seq_no for the HTT endpoint (htc.h @5) */
 static int g_htt_ring_done;   /* RX_RING_CFG + AGGR_CFG already sent */
 static void hif_htt_setup_finish(void);
@@ -773,6 +821,20 @@ hif_ce_send(uint32_t ce, uint8_t *buf, uint32_t len)
 	uint64_t pa;
 
 	if (!g_regs_live || g_stage < 3 || len == 0 || len > CE_BUF_BYTES) return -1;
+
+	/* crash flush: the target stopped answering, so do not touch its CE
+	 * rings at all (Linux 0e622f67e041: after FW_DOWN every direct
+	 * hardware access must be avoided).  This is the exact write that
+	 * produced the data abort at FAR_EL1=0x16ee4c000 in chain-633 pd0.
+	 * Bounded log; PD recovery / hif_pd_restart() clears the flag. */
+	if (g_fw_dead) {
+		if (g_fw_dead_drops < 8u) {
+			g_fw_dead_drops++;
+			HIF_LOG("FW_DEAD: CE%u write refused len=%u "
+			    "(target stopped answering)", ce, len);
+		}
+		return -1;
+	}
 
 	switch (ce) {
 	case 0:  ring = s_src0; entries = hif_shape[0].src_n; wr = &g_wr0; break;
@@ -5050,6 +5112,51 @@ wcn3990_hif_poll(void)
 	 * deliberately cheap: no cache flushes and no CE register access until
 	 * the corresponding stage is entered. */
 	if ((g_polls % 1000) == 0) {
+		/* v40 FW_DEAD detector: mgmtev rises with every beacon on a healthy
+		 * link, so three heartbeats (~3 s) with no change while brought up
+		 * and not scanning means the WMI task is gone even if the host can
+		 * still see descriptors.  Recovery clears it (events resume, or
+		 * wcn3990_hif_pd_restart() after a PD restart). */
+		if (g_stage >= 3 && g_wifi_auto && !g_scan_active) {
+			if (g_mgmt_events == g_fwdead_ev) {
+				if (g_fwdead_cnt < 64u) g_fwdead_cnt++;
+			} else {
+				if (g_fw_dead)
+					HIF_LOG("FW_DEAD: clear, mgmt events "
+					    "resumed (%u)", g_mgmt_events);
+				g_fwdead_ev = g_mgmt_events;
+				g_fwdead_cnt = 0;
+				g_fw_dead = 0;
+			}
+			if (!g_fw_dead && g_fwdead_cnt >= 3u) {
+				g_fw_dead = 1;
+				g_fw_dead_polls = g_polls;
+				if (g_pdr_mode < 0) {
+					uint32_t pdv = 0;
+					(void)PE_parse_boot_argn("pdr", &pdv,
+					    sizeof(pdv));
+					g_pdr_mode = (int)pdv;
+				}
+				HIF_LOG("FW_DEAD #1: mgmt events frozen at %u "
+				    "polls=%u smp2p=%08x link=%d join=%d pdr=%d",
+				    g_mgmt_events, g_polls,
+				    picasso_wlan_smp2p_bits(), g_link_up,
+				    (int)g_join_state, g_pdr_mode);
+				if (g_pdr_mode >= 2) {
+					picasso_wlan_request_pd_restart();
+					HIF_LOG("FW_DEAD: asked Q6 to restart "
+					    "wlan_pd (pdr=%d)", g_pdr_mode);
+				}
+			}
+			if (g_fw_dead && g_pdr_mode >= 3 && g_fw_reset_used < 1u &&
+			    g_polls - g_fw_dead_polls >= 25000u) {
+				g_fw_reset_used++;
+				HIF_LOG("FW_DEAD: no recovery in %u polls, "
+				    "PSCI SYSTEM_RESET",
+				    g_polls - g_fw_dead_polls);
+				hif_system_reset();
+			}
+		}
 		/* chain-621: keep the polling station awake.  Trogdor sends
 		 * STA_POWERSAVE_MODE off on EVERY begin (outside its once-block)
 		 * and ath10k sends PS_MODE_DISABLED after the vdev is started;
@@ -6065,5 +6172,15 @@ extern "C" void
 wcn3990_hif_pd_restart(void)
 {
 	HIF_LOG("PD RESTART: re-arming scan/join after wlan_pd restart");
+	/* The target is alive again (a second WLFW service-up announced it),
+	 * so lift the crash flush before the new handshake needs WMI.  Clear
+	 * the detector too, otherwise the first heartbeat after recovery would
+	 * immediately re-declare the target dead. */
+	if (g_fw_dead)
+		HIF_LOG("PD RESTART: lifting FW_DEAD flush (drops=%u)",
+		    g_fw_dead_drops);
+	g_fw_dead = 0;
+	g_fw_dead_drops = 0;
+	g_fwdead_cnt = 0;
 	hif_join_reset("wlan_pd restarted");
 }

@@ -4275,6 +4275,26 @@ pdr_register(void)
 	}
 }
 
+/* v40: Wcn3990Hif.cpp calls this when the firmware stopped answering but Q6
+ * has not restarted wlan_pd by itself (v38 6.4b measured exactly that second
+ * branch: pd1 died with no PD restart at all, so the passive pdr=1 recovery
+ * never got a chance to run).  Re-arm the one-shot gate that the qrtr tick
+ * uses and let the next tick send PDR restart_pd "msm/modem/wlan_pd"; Q6 then
+ * re-announces WLFW and the existing pdr= recovery path re-runs the
+ * handshake.  Bounded to 3 requests so a dead modem cannot be hammered. */
+extern "C" void
+picasso_wlan_request_pd_restart(void)
+{
+	static unsigned requests;
+
+	if (requests >= 3u) return;
+	requests++;
+	pdr_restart_want = 1;
+	pdr_restarted = false;
+	LOG("t=%u ms: host requests wlan_pd restart #%u (firmware dead)",
+	    g_ms, requests);
+}
+
 /* servreg-notif 0x24: ask the notifier to restart a PD. An AP-initiated
  * restart is the only way to make the modem start wlan_pd when its own
  * bring-up did not happen (service_notif_pd_restart() on the vendor side). */
