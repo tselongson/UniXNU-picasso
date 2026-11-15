@@ -5,6 +5,36 @@ results.  It is the rule set for every further experiment, derived from
 UniXNU's official porting docs, the Pong and WCN7860 device repositories,
 and HakiOS's verification notes.
 
+## 0. Current state (2026-11-15 23:1x, v41) — read this before §2
+
+The authoritative write-up is
+`handoff/wifi-wcn3990-handoff-2026-11-15-v41.md`.  What matters for every
+future experiment in this driver:
+
+- The data plane is up: join, WPA2, unicast both ways, DHCP binding
+  (`DHCP: bound inet 192.168.101.18 router 192.168.101.1`) and DNS
+  publication all appear in real boot logs.  **"Cannot open a web page" is
+  therefore not a DNS or AP problem** — the earlier rounds that chased
+  resolver configuration were wrong, and `pkg-config`-level checks cannot
+  show it.
+- The remaining defect is **runtime liveness of the receive path**, and it
+  has two shapes that must not be conflated:
+
+  | shape | evidence | state |
+  |---|---|---|
+  | **A. whole RX stops** | `rx` / `beacons` / `mgmtev` freeze together (`RX STALL-GLOBAL`), `nb1=0` and `post1=sw1-1` prove buffers were still posted, `srri4` still advancing proves TX was alive | target only; `7750b02` asks Q6 for a `wlan_pd` restart instead of tearing the link down |
+  | **B. RX alive, no downlink from the AP's own stack** | beacons keep arriving for 32 min, `uni` only rises when the PC pings, DNS queries leave (ACKed at L2) and nothing comes back, never a frame > 100 B | **unresolved** |
+
+- The rule this replaces: a driver that reports `join=5` is not a working
+  network.  The verdict is **"after it breaks, does it come back by
+  itself"**, and the only acceptable proof is the log chain
+  `RX DEAD -> asked Q6 to restart wlan_pd -> WLAN PD RESTART -> rejoin ->
+  DHCP: bound` with no `addr=none` in between.
+- Consequence for instrumentation: never gate a liveness detector on
+  `g_link_up` or `g_scan_active`.  In shape A both are exactly what the
+  failure leaves behind (`link=0`, `scan=1`), so any such gate silences the
+  detector precisely when it is needed.
+
 ## 1. What counts as a result
 
 - UniXNU `porting/network`: **"Firmware startup and successful scanning are
@@ -42,7 +72,26 @@ Consequences for this port:
 4. Every experiment needs a control that differs by one variable, and a
    170 s capture so a late event is not mistaken for "never happened".
 
-## 2. Current symptom (builds 526-530, identical across j1/j2/e/d)
+## 2. Current symptom (2026-11-10 20:45, chain-573 in flight)
+
+Sections 2-4 were written for builds 526-530 and are kept below as a record
+of the reasoning; the **current** state is in
+`handoff/wifi-wcn3990-handoff-2026-11-10.md` (v6).  Summary:
+
+- scan / auth / assoc / VDEV_UP are all verified checkpoints.  The
+  VDEV_UP SError (un-clocked CE register reads in the 1 ms poll) was fixed
+  in `62572ba` and verified on device (chain-564/n1, 0 PANIC over 220 s).
+- chain-572 proved the zero-datapath cause with a four-way single-variable
+  split: WMI INIT `cfg[6] ast_skid_limit` was 0; with 16 the target emits
+  HTT peer map (type 3), WMI `PEER_ASSOC_CONF (0x6006)`,
+  `RX_IN_ORD_PADDR_IND (type 0x12)` and real EAPOL frames.
+  `initfix=0/1` had none of it, `initfix=3/7` passed.
+- The remaining defect is that `hif_wr_msdu()` folded the native-WiFi
+  Ethernet frame at `frame+0` instead of the reference `frame+18`, so the
+  EAPOL payload was read 18 bytes early and M1 was discarded; the AP
+  deauthed with reason 6.  `804f651` adds `rxfix` to A/B this.
+
+Historical symptom (builds 526-530, now resolved):
 
 ```
 STARTED(1) -> FOREIGN_CHANNEL(8) x39 -> FOREIGN_CHANNEL_EXIT(256) x39
@@ -52,61 +101,55 @@ panic=0  smp2p bit1=0
 mgmtev=0  mgmt drops=0  beacons=0  httidx=0  rx=169
 ```
 
-The scan engine completes, but the host receives **zero 802.11 frames**.
-`WMI_MGMT_RX_EVENTID (0x7001)` is never seen; the whole set of WMI event ids
-in the log is `{0x3, 0x4009, 0x4022, 0x3a001, 0x401f, 0x4002}`.
-`0x3a001` is a regdomain-class event (payload contains "US"), not a frame.
+That was `fw_idx_init_val = 0` (host posting no buffers).  Verified by
+chain-531 A/B: `scanfix=63` / posted=1023 produced 10+ HEARD BEACON with
+real SSIDs.  See §3 below for the original reasoning, which held up.
 
-CHAN_INFO parsed from the existing log: 40 events, freq 2412..5825 MHz,
-noise floor -101..-117 dBm, err_code=0.  The radio is tuning and measuring
-each channel; this is not a "radio did not tune" failure.
+## 3. Original hypothesis (526-530), confirmed by chain-531
 
-Excluded by single-variable boots: our MGMT_RX parser (chain-527), wrong
-event id, another CE pipe carrying the frames, vdev state
-(`vdstart=1` still mgmtev=0; `vdevup=1` panics with both 14B and 16B TLVs),
-the three 6-byte `wmi_mac_addr` ABI errors (chain-529, A/B identical), and
-HTC credit handling.
-
-## 3. Why it happens (working hypothesis, three independent sources)
-
-`Wcn3990Hif.cpp:hif_htt_rx_ring_cfg()` fills 2047 RX buffer addresses but
-then sets `g_dma->htt_alloc_idx = 0` and sends `fw_idx_init_val = 0`.  That
-word is the `fw_idx_shadow_reg_paddr` handed to the target: it tells the
-firmware how many buffers the host has posted.  **We tell it zero.**
+`hif_htt_rx_ring_cfg()` filled the RX ring but sent `fw_idx_init_val = 0`,
+telling the target that no buffers were posted.
 
 - Linux `htt_rx.c:__ath10k_htt_rx_ring_fill_n()` advances
   `*alloc_idx.vaddr` as it posts buffers; `htt_tx.c:938` reads that same
   word and sends it as `fw_idx_init_val`.
 - trogdor (`SC7180 + the same WCN3990`) writes `posted = WS_RX_FILL = 1023`
-  into the index page and puts `1023` in `values[3]` of RX_RING_CFG, before
-  START_SCAN.
-- WCN7860 (`PeachWmi.c:peach_wmi_start_management`) allocates
-  `MGMT_RX_STORAGE`, posts 127 management buffers and configures a dedicated
-  HTT ring; only then does `mgm_rx_received` become non-zero.
+  into the index page and puts `1023` in `values[3]` of RX_RING_CFG.
+- WCN7860 (`PeachWmi.c`) posts 127 management buffers before any
+  `mgm_rx_received` becomes non-zero.
 
-We also send only one of trogdor's three HTT H2T messages: RX_RING_CFG.
-Missing: FRAG_DESC_BANK_CFG (6) and AGGR_CFG (5).  `httidx=0` (the firmware
-never writing the HTT ring) is consistent with "the target believes no
-receive resource exists".
+Two later corrections to this section, both from on-device A/B:
 
-The WCN7860 driver is a different chip family (ath12k / MHI), so its code is
-not portable here; the portable part is the **mechanism**: management frames
-need host-posted receive buffers and a configured ring before the firmware
-will deliver them.  The same conclusion is available from Linux and from
-trogdor, which is the same WCN3990.
+1. `alloc_idx` is the **host refill pointer**, not target progress
+   (`htt_rx.c:151/209`, `htt_tx.c:940`).  `hif_service_htt_ring()` used it
+   as a write index and therefore ran only once; `be91f28` fixed the drain
+   to be attention-driven.  chain-571 then showed the target wrote zero
+   MSDUs anyway, so this was a real bug but **not** the zero-datapath cause.
+2. The four-way `initfix` split (chain-572) found the actual remaining
+   cause: `ast_skid_limit=0` in WMI INIT.  This is exactly the
+   "WMI INIT words where Linux and trogdor disagree with us" that §4
+   below proposed checking - that suggestion was correct and is now done.
 
-## 4. Verification rule for the next experiment
+## 4. Verification rule for the current experiment (chain-573)
 
-One build, one new boot-arg bit, two 170 s boots:
+One build, one new boot-arg bit, two 220 s boots (HIF starts at ~t+94 s):
 
-- control: `scanfix=31` (current best configuration)
-- test:    `scanfix=63` (+ HTT receive resources posted correctly)
+- control: `rxfix=0` (old fold, reproduces 572's garbage EAPOL headers)
+- test:    `rxfix=1` (wlan-wip `frame+18` fold)
+- both:    `initfix=3 dpfix=5 wpa=1 joinsel=4 scanfix=127 httring=7`
 
-Pass condition is **not** "no panic" and **not** "COMPLETED".  It is
-`mgmtev > 0` plus at least one parsed beacon with an SSID/BSSID.  If
-`mgmtev` stays 0, the next split is FRAG_DESC_BANK_CFG and AGGR_CFG as
-separate bits, then the WMI INIT words where Linux and trogdor disagree
-with us (`ast_skid_limit 16`, `num_wds_entries 2`).
+Pass condition is **not** "no panic", **not** "an EAPOL frame was counted"
+(572 already counted four), and **not** "COMPLETED".  It is the WPA
+state-machine plaintext: `WPA: msg1 seen`, `msg2 sent`, then `msg3` /
+`msg4` / `keys installed` / `peer authorized`.  `WPA: MIC mismatch -
+wrong passphrase` is an informative checkpoint, not a code failure, since
+`joinsel=4` picks an arbitrary visible 2.4 GHz AP and the passphrase in
+`wpass=` is not yet tied to a confirmed SSID.
+
+If `msg1 seen` never appears, compare the EAPOL log's
+`ver/type/len/desc/info` against `wr_msdu()` byte-for-byte; the remaining
+suspects are the rx_desc offsets (`buf+36` in `hif_wr_msdu` vs `buf+28`
+in `hif_wr_rx_ind`) and the `decap` field position.
 
 ## 5. CE register access rules (authoritative, WCN3990 SNOC)
 
@@ -147,6 +190,8 @@ heartbeat/scan/quiet diagnostics read DDR RRI.  Stage-2/3 init and
 `hif_dump_regs()` still touch CE registers (the engine is awake there);
 that is intentional and matches Linux.
 
-**Device verification pending** — the 1 ms poll loop no longer performs an
-un-clocked access after VDEV_UP, but this is a build/code result, not a
-device result.  A/B against the previous image is required.
+**Verified on device 2026-11-10** — chain-564/n1 ran the fixed poll loop
+with `assoc resp status=0 -> vdev up sent -> 0 PANIC` across a full 220 s
+capture; chain-570/571/572/573 all kept 0 PANIC with VDEV_UP reached.
+The SError that blocked builds 535-560 is gone.  The rule above remains
+authoritative: do not reintroduce CE-body register reads into the 1 ms loop.
