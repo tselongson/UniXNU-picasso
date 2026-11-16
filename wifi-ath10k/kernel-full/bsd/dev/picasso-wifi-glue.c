@@ -19,7 +19,7 @@
 #include <sys/systm.h>
 #include <sys/types.h>
 #include <kern/locks.h>
-#include <vm/vm_param.h>
+#include <mach/vm_param.h>
 
 int
 hakios_is_raphael(void)
