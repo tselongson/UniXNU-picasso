@@ -9,7 +9,7 @@ import shlex
 import shutil
 import subprocess
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[0]  # wifi-ath10k/ (picasso adaptation)
 B = ROOT / 'xnu-deps/build/ath10k'
 W = ROOT / 'wifi/lx'
 CACHE = B / 'cache'
