@@ -223,6 +223,31 @@ jobs:
           python3 -c "import struct; d=open('wifi-ath10k/prebuilt/ath10k.o','rb').read(4); assert d==b'\xcf\xfa\xed\xfe', 'not arm64 Mach-O'"
           ls -l wifi-ath10k/prebuilt/ath10k.o
 
+      - name: Add raphael BDF boot argument (route 2)
+        if: ${{ inputs.raphael_wifi }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          board = Path('board.toml')
+          text = board.read_text()
+          # raphael's icnss_board_data() refuses to probe without wifi_bdf=bdwlan.bin.
+          # The stock kernel_args is 996 bytes; swap out only the four repeat-gesture
+          # automation knobs (keep offline-hid-input / sheng-touch* / picasso-buttons).
+          for token in ('offline-hid-auto-home=5', 'offline-hid-swipe-delay=8',
+                        'offline-hid-auto-home-count=8', 'offline-hid-swipe=8'):
+              line = f'  "{token}",\n'
+              if line not in text:
+                  raise SystemExit(f'missing boot arg to remove: {token}')
+              text = text.replace(line, '', 1)
+          marker = '  "wifi=1",\n'
+          if marker not in text:
+              raise SystemExit('missing wifi=1 boot arg anchor')
+          text = text.replace(marker, marker + '  "wifi_bdf=bdwlan.bin",\n', 1)
+          board.write_text(text)
+          print('raphael boot args: added wifi_bdf=bdwlan.bin, removed 4 repeat-gesture knobs')
+          PY
+
       - name: Build kernel + payload
         env:
           GITHUB_TOKEN: ${{ github.token }}
