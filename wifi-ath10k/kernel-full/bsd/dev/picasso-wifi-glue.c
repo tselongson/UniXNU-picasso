@@ -17,6 +17,9 @@
  */
 #include <stdarg.h>
 #include <sys/systm.h>
+#include <sys/types.h>
+#include <kern/locks.h>
+#include <vm/vm_param.h>
 
 int
 hakios_is_raphael(void)
@@ -34,4 +37,22 @@ hakios_tl(const char *format, ...)
 	vsnprintf(line, sizeof(line), format, list);
 	va_end(list);
 	printf("LX: %s\n", line);
+}
+
+/* raphael's patched XNU supplied these globals/functions to its hakios.*.c
+ * files; picasso's XNU does not. Provide safe equivalents so the raphael WiFi
+ * stack links. The locks only serialize raphael's own accesses; the loader /
+ * memdev helpers are trace/fallback paths not used by the main data path. */
+static LCK_GRP_DECLARE(lx_glue_lock_group, "raphael-wifi-glue");
+LCK_MTX_DECLARE(hakios_rsc_lock, &lx_glue_lock_group);
+LCK_MTX_DECLARE(hakios_aop_mailbox_lock, &lx_glue_lock_group);
+LCK_MTX_DECLARE(hakios_smem_alloc_lock, &lx_glue_lock_group);
+LCK_MTX_DECLARE(hakios_smmu_lock, &lx_glue_lock_group);
+
+void loader_log_putc(char c) { printf("%c", c); }
+void loader_return(void) { }
+dev_t mdevlookup(int devid) { (void)devid; return (dev_t)-1; }
+int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size)
+{
+	(void)dev; (void)base; (void)size; return -1;
 }
