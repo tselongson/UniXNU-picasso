@@ -18,6 +18,7 @@
 #include <stdarg.h>
 #include <sys/systm.h>
 #include <sys/types.h>
+#include <sys/sysctl.h>
 #include <kern/locks.h>
 #include <mach/vm_param.h>
 
@@ -56,3 +57,27 @@ int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size)
 {
 	(void)dev; (void)base; (void)size; return -1;
 }
+
+/* More raphael-patch symbols referenced by the WiFi files. */
+void hakios_spmi_lock(void) { }
+void hakios_spmi_unlock(void) { }
+int hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst,
+                              uint64_t len, uint64_t *bytes)
+{
+	(void)name; (void)offset; (void)dst; (void)len;
+	if (bytes) *bytes = 0;
+	return -1;
+}
+void hakios_virtio_net_init(void) { }  /* QEMU-only, not on picasso */
+
+/* The parent sysctl node _kern_hakios that raphael's patched XNU provided.
+ * mpss.c registers cellular_* sysctls under it via SYSCTL_INT. */
+SYSCTL_DECL(_kern_hakios);
+SYSCTL_NODE(_kern, OID_AUTO, hakios, CTLFLAG_RD, 0, "hakios");
+
+/* bsd_init.c's existing hook calls this to start the WiFi stack. In the
+ * raphael build it starts raphael's self-contained wifi=1 bring-up instead of
+ * the self-developed stack. The display module also probes WiFi presence. */
+extern void hakios_wifi_init(void);
+void picasso_wlan_deferred_start(void) { hakios_wifi_init(); }
+void native_wlan_probe(void) { }
