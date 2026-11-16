@@ -581,6 +581,7 @@ out:
  * ("cx.lvl"/"mss.lvl" at 0x180); PicassoWlan.cpp's sweet_rpmh_arc_level() forwards
  * here. Same request hakios_mpss_rails(384) makes for both, one resource at a
  * time. */
+bool mpssProxyTcs1(void); /* defined below; TCS1 proxy vote for wlan_rails=2 */
 extern "C" int
 hakios_wlan_arc_level(const char *res, unsigned level)
 {
@@ -594,6 +595,19 @@ hakios_wlan_arc_level(const char *res, unsigned level)
         if (!surveyed && PE_parse_boot_argn("wlan_rails_probe", &probe, sizeof(probe)) && probe) {
             surveyed = true;
             surveyTcs();
+        }
+    }
+
+    /* wlan_rails=2: raphael-style proxy vote over TCS1, once.  Avoids the
+     * TCS0 rpmhWrite below, whose direct ACTIVE-TCS programming is documented
+     * (:378-384) to displace the display's CX vote and freeze the panel. */
+    {
+        uint32_t mode = 0;
+        PE_parse_boot_argn("wlan_rails", &mode, sizeof(mode));
+        if (mode >= 2) {
+            static bool proxyDone = false;
+            if (!proxyDone) { proxyDone = true; return mpssProxyTcs1() ? 0 : -1; }
+            return 0;
         }
     }
 
@@ -654,6 +668,27 @@ bool icnssPower(bool on)
     printf("PICASSO_WLAN qmp: ICNSS power %s: TCS1 %s, QDSS %s\n",
         on ? "on" : "off", done ? "ok" : "FAILED", clockDone ? "ok" : "FAILED");
     return done && clockDone;
+}
+
+/* MPSS proxy vote, copied from raphael mpss_proxy() :1091-1126.
+ * raphael casts cx.lvl/mss.lvl at 384 (TURBO) and xo.lvl at 3, all through
+ * the same TCS1 batch -- NOT through the TCS0 rpmhWrite that freezes the
+ * panel.  Used when wlan_rails=2 so the whole rail/proxy path stays on TCS1. */
+bool mpssProxyTcs1(void)
+{
+    static const char *const names[3] = { "cx.lvl", "mss.lvl", "xo.lvl" };
+    uint32_t addresses[3] = { 0, 0, 0 }, values[3] = { 0, 0, 3 };
+    for (unsigned i = 0; i < 2; i++) {
+        int pos = railPosition(names[i], 384, &addresses[i]);
+        if (pos < 0 || !addresses[i]) {
+            printf("PICASSO_WLAN qmp: MPSS has no TURBO position for %s\n", names[i]);
+            return false;
+        }
+        values[i] = static_cast<uint32_t>(pos);
+    }
+    if (railPosition(names[2], 0, &addresses[2]) < 0 || !addresses[2]) return false;
+    printf("PICASSO_WLAN qmp: MPSS proxy TCS1: cx=%u mss=%u xo=%u\n", values[0], values[1], values[2]);
+    return wifiRpmhWriteTcs1(addresses, values, 3);
 }
 
 /* PicassoWlan.cpp's sweet_rpmh_vreg_enable() stub forwards here.  Gated:
