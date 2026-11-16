@@ -8,12 +8,32 @@ name: Compose Boot Image (FD + kernel + payload)
 #
 # Produces boot.img ready for "fastboot boot" (or "fastboot flash boot" when the
 # payload is sized to fit the boot partition).
+# iPhone userland is experimental; successful composition is not runtime qualification.
+# Pure host regressions run separately in host-checks.yml.
 
 on:
   workflow_dispatch:
+    inputs:
+      fast:
+        description: Skip optional artifact checks for device iteration
+        type: boolean
+        default: false
+      create_data_seed:
+        description: Create the first 20 GiB seed if none is reusable (changes Data identity)
+        type: boolean
+        default: false
+      build_userdata:
+        description: Also build and upload the userdata root image (sparse, for fastboot flash userdata)
+        type: boolean
+        default: false
+      raphael_wifi:
+        description: Route 2 - build raphael's complete ath10k WiFi stack (replaces self-developed stack)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: picasso-bootimg-${{ github.ref }}
@@ -28,7 +48,7 @@ jobs:
         shell: bash
         working-directory: device
     steps:
-      - name: Check out the picasso device repo (test branch, carries uefi/)
+      - name: Check out the picasso device repo
         uses: actions/checkout@v4
         with:
           path: device
@@ -38,34 +58,71 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Check iPhone X inputs and retained kernel backend
+        run: |
+          python3 scripts/check-picasso-target.py --require-build-inputs \
+            --output out/picasso/logs/target-readiness.json --github-env "$GITHUB_ENV"
+
       - name: Verify firmware volume and DTB are present
         run: |
           test -s uefi/SILICIUM_UEFI.fd || { echo "uefi/SILICIUM_UEFI.fd missing"; exit 1; }
-          test -s uefi/mu-silicium/Resources/DTBs/picasso.dtb || { echo "picasso.dtb missing"; exit 1; }
+          test -s uefi/mu-silicium/Resources/DTBs/picasso-topology.dtb || { echo "picasso-topology.dtb missing"; exit 1; }
           test -s uefi/mu-silicium/BootShim/BootShim.S || { echo "BootShim.S missing"; exit 1; }
           test -s uefi/mu-silicium/Resources/Scripts/mkbootimg.py || { echo "mkbootimg.py missing"; exit 1; }
-          ls -l uefi/SILICIUM_UEFI.fd uefi/mu-silicium/Resources/DTBs/picasso.dtb
+          ls -l uefi/SILICIUM_UEFI.fd uefi/mu-silicium/Resources/DTBs/picasso-topology.dtb
 
       - name: Prepare the isolated upstream source
         run: |
           TREE=$(python3 ./unixnu --prepare)
           echo "UNIXNU_TREE=$TREE" >> "$GITHUB_ENV"
 
+      - name: Restore the kernel compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/xnu-ccache
+          key: xnu-ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: xnu-ccache-${{ runner.os }}-
+
       - name: Install host tools and check the SDK
         run: |
           # lld is a separate Homebrew formula now; the llvm bottle no longer
           # ships ld.lld, which the entry-probe patcher needs.
-          brew install cmake ninja unifdef llvm lld mtools dtc
+          brew install cmake ninja unifdef llvm lld mtools dtc ccache
+          # Kernel compiles go through ccache with the SDK's own clang (not the Homebrew llvm
+          # added to PATH below); MakeInc.cmd keeps CC/CXX that come from the environment.
+          mkdir -p "$RUNNER_TEMP/ccache-bin"
+          for tool in clang clang++; do
+            # scripts/ci-ccache-clang.py drops XNU's -MJ (ccache refuses it) except for the one record read later.
+            printf '#!/bin/sh\nexec python3 -I "%s" "%s" "$@"\n' "$GITHUB_WORKSPACE/device/scripts/ci-ccache-clang.py" "$(xcrun -sdk iphoneos -find "$tool")" > "$RUNNER_TEMP/ccache-bin/$tool"
+            chmod +x "$RUNNER_TEMP/ccache-bin/$tool"
+          done
           echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
 
+      - name: Build the SpringBoard inject library
+        run: |
+          mkdir -p out/picasso
+          python3 scripts/build-picasso-sb-inject.py \
+            package/picasso-springboard/picasso-springboard-probe.m out/picasso/libpicasso-sb.dylib
+
+      - name: Prepare authenticated stock touch firmware
+        run: |
+          python3 scripts/fetch-picasso-touch-firmware.py --output out/picasso/novatek/firmware.bin
+          echo "NOVATEK_TOUCH_FW=$PWD/out/picasso/novatek/firmware.bin" >> "$GITHUB_ENV"
+
+      - name: Prepare exact stock Adreno 620 firmware
+        run: |
+          python3 scripts/fetch-picasso-gpu-firmware.py --output out/picasso/gpu-firmware
+          echo "ADRENO620_FW_DIR=$PWD/out/picasso/gpu-firmware" >> "$GITHUB_ENV"
+          cp out/picasso/gpu-firmware/firmware.json out/picasso/logs/gpu-firmware.json
+
       - name: Download the target IPSW
         run: |
           mkdir -p out/ipsw
-          IPSW=out/ipsw/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw
+          IPSW="out/ipsw/$PICASSO_IPSW_FILE"
           HOST=updates.cdn-apple.com
-          URL="https://$HOST/2025SpringFCS/fullrestores/122-77166/DCA6CFE8-90E9-4B92-880D-3DE171798E40/iPad_Pro_HFR_17.7.11_21H461_Restore.ipsw"
+          URL="$PICASSO_IPSW_URL"
           if [ ! -s "$IPSW" ]; then
             if ! curl --fail --retry 3 --retry-all-errors --connect-timeout 30 -o "$IPSW" "$URL"; then
               IP=$(curl -s -H 'accept: application/dns-json' "https://cloudflare-dns.com/dns-query?name=$HOST&type=A" \
@@ -75,64 +132,263 @@ jobs:
                 --resolve "$HOST:443:$IP" -o "$IPSW" "$URL"
             fi
           fi
+          python3 scripts/check-picasso-target.py --ipsw "$IPSW"
           ls -lh "$IPSW"
           echo "UNIXNU_IPSW=$PWD/$IPSW" >> "$GITHUB_ENV"
+
+      # The root volume the ADT's root-matching UUID selects comes from the
+      # unchanged OS/SystemOS windows of the target IPSW (docs/guide/userdata).
+      # Built here, converted to Android sparse (fastboot's streaming path),
+      # and uploaded once; flashing it is a manual, deliberate step.
+      - name: Build the userdata root image
+        if: ${{ inputs.build_userdata }}
+        run: |
+          python3 ./unixnu build userdata --ipsw "$UNIXNU_IPSW"
+          find out -name 'userdata-root*.img' -o -name 'userdata-root*.json' | xargs ls -l
+          python3 scripts/make-android-sparse.py out/picasso/userdata/userdata-root.img out/picasso/userdata/userdata-root.sparse.img
+          ls -lh out/picasso/userdata/userdata-root.sparse.img
+
+      - name: Upload the userdata root image
+        if: ${{ inputs.build_userdata }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: picasso-userdata-${{ github.run_number }}
+          path: device/out/picasso/userdata/userdata-root.sparse.img
+          retention-days: 7
+          # The sparse image is almost all zero blocks; the default deflate
+          # level ships a ~200 MB artifact instead of a 7.4 GB stored one.
+          if-no-files-found: error
+
+      # The original static and System trust caches are extracted from the pinned
+      # IPSW here rather than committed; board.toml pins the accepted bundle hash.
+      - name: Bundle the original trust caches
+        run: |
+          mkdir -p out/picasso/logs
+          python3 ./unixnu ipsw fetch OS Cryptex1,SystemOS StaticTrustCache Cryptex1,SystemTrustCache 2>&1 | tee out/picasso/logs/actions-ipsw.log
+          python3 scripts/prepare-original-trust.py --tree "$UNIXNU_TREE" --inputs "out/ipsw/$PICASSO_IPSW_BUILD" --output out/picasso/original-static-system.bundle 2>&1 | tee out/picasso/logs/actions-trust.log
+          python3 scripts/prepare-picasso-ui-trust.py --original out/picasso/original-static-system.bundle \
+            --library out/picasso/libpicasso-sb.dylib --output out/picasso/ui-trust.bundle \
+            2>&1 | tee out/picasso/logs/actions-ui-trust.log
+          cp out/picasso/ui-trust.json out/picasso/logs/ui-trust.json
+
+      - name: Verify native macOS root disks against the signed policy
+        if: ${{ !inputs.fast }}
+        run: |
+          sudo "$(command -v python3)" scripts/check-picasso-root-inputs.py \
+            --inputs "out/ipsw/$PICASSO_IPSW_BUILD" \
+            --output out/picasso/logs/root-inputs.json
+
+      - name: Prepare the retained Darwin 23 native kext donor
+        run: |
+          python3 scripts/prepare-picasso-kernelcache.py --tree "$UNIXNU_TREE" \
+            --output "out/ipsw/$PICASSO_BACKEND_BUILD" 2>&1 | tee out/picasso/logs/actions-kernel-donor.log
+          cp "out/ipsw/$PICASSO_BACKEND_BUILD/report.json" out/picasso/logs/kernel-donor.json
+          echo "UNIXNU_KERNELCACHE=$PWD/out/ipsw/$PICASSO_BACKEND_BUILD/kernelcache.decompressed" >> "$GITHUB_ENV"
+
+      - name: Reuse persistent Data seed (new seed requires explicit input)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CREATE_DATA_SEED: ${{ inputs.create_data_seed }}
+        run: |
+          python3 ./unixnu defconfig picasso_defconfig
+          SEED_ARGS=()
+          if [ "$CREATE_DATA_SEED" = true ]; then SEED_ARGS+=(--allow-new-seed); fi
+          python3 scripts/picasso_linux_inputs.py reuse-optional --tree "$UNIXNU_TREE" \
+            --output out/picasso/persistent-inputs "${SEED_ARGS[@]}"
+          if [ -s out/picasso/persistent-inputs/reuse.json ]; then
+            echo "PICASSO_LINUX_INPUTS=$PWD/out/picasso/persistent-inputs" >> "$GITHUB_ENV"
+            # Use the signed library bound to the reused Setup seed, then rebuild
+            # its precise trust bundle. No new APFS formatting or Setup mutation.
+            python3 scripts/prepare-picasso-ui-trust.py --original out/picasso/original-static-system.bundle \
+              --library out/picasso/libpicasso-sb.dylib --output out/picasso/ui-trust.bundle
+            cp out/picasso/ui-trust.json out/picasso/logs/ui-trust.json
+          else
+            sudo "$(command -v python3)" scripts/prepare-picasso-ram-data.py \
+              --tree "$UNIXNU_TREE" --source "out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER" \
+              --output out/picasso/ram-data --config out/picasso/.config \
+              2>&1 | tee out/picasso/logs/actions-ram-data.log
+          fi
+
+      - name: Compile raphael ath10k.o (route 2)
+        if: ${{ inputs.raphael_wifi }}
+        working-directory: device/wifi-ath10k
+        env:
+          CC: ${{ runner.temp }}/unixnu-linux/llvm/bin/clang
+          ATH10K_TARGET: arm64-apple-ios16.5
+          ATH10K_NO_SAE: "1"
+        run: |
+          set -o pipefail
+          command -v rg >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep; }
+          NM=""
+          for c in "$RUNNER_TEMP/unixnu-linux/llvm/bin/llvm-nm" \
+                   "$RUNNER_TEMP/unixnu-linux/CommandLineTools/usr/bin/nm" "$(command -v nm)"; do
+            if [ -x "$c" ]; then NM="$c"; break; fi
+          done
+          test -n "$NM" || { echo "no nm found"; exit 1; }
+          export ATH10K_NM="$NM"
+          python3 mk-ath10k-picasso.py 2>&1 | tee compile.log
+          test -s xnu-deps/build/ath10k/out/ath10k.o
+          ls -l xnu-deps/build/ath10k/out/ath10k.o
 
       - name: Build kernel + payload
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          XNU_RAPHAEL_WIFI: ${{ inputs.raphael_wifi && '1' || '0' }}
           UNIXNU_UNIQUE_CHIP_ID: "41a551c0dec0de01"
+          CC: ${{ runner.temp }}/ccache-bin/clang
+          CXX: ${{ runner.temp }}/ccache-bin/clang++
+          CCACHE_DIR: ${{ runner.temp }}/xnu-ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_MAXSIZE: 3G
+          CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime,pch_defines,file_stat_matches
+          CCACHE_LOGFILE: ${{ runner.temp }}/ccache.log
         run: |
-          python3 ./unixnu defconfig picasso_defconfig
           python3 ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily
           mkdir -p out/picasso/logs
-          python3 ./unixnu build kernel payload -j 3 2>&1 | tee out/picasso/logs/actions-build.log
+          python3 ./unixnu build kernel payload -j 3 --skip-setup --trust-cache out/picasso/ui-trust.bundle --data-ramdisk out/picasso/ram-data/data.dbrdisk 2>&1 | tee out/picasso/logs/actions-build.log
+          ccache -sv || true
+          # Which options and inputs ccache refuses (the stats only count them).
+          grep -hE "unsupported|Multiple input|multiple source" "$RUNNER_TEMP/ccache.log" 2>/dev/null | sed -E 's/^\[[^]]*\] //' | sort | uniq -c | sort -rn | head -20 || true
 
-      - name: Report kernel/payload sizes
+      - name: Verify Data seed, compiled UUID and payload handoff
+        if: ${{ !inputs.fast }}
         run: |
-          ls -l out/picasso/kernel/kernel.macho out/picasso/payload/payload.img
-          python3 - <<'EOF'
-          import struct
+          python3 scripts/check-picasso-data-artifacts.py --tree out/picasso/tree --work out/picasso \
+            --output out/picasso/logs/data-artifacts.json
+
+      - name: Check runtime memory and swap boundaries
+        if: ${{ !inputs.fast }}
+        run: |
+          python3 scripts/check-picasso-runtime-memory.py --xnu out/picasso/tree/.cache/xnu-work --output out/picasso/host-checks/runtime-memory
+          cp out/picasso/host-checks/runtime-memory/results.json out/picasso/logs/runtime-memory-host.json
+
+      - name: Check display policy against the payload ADT
+        if: ${{ !inputs.fast }}
+        run: |
+          python3 scripts/check-picasso-display-policy.py \
+            --adt out/picasso/logs/data-artifacts.files/EFI/UniXNU/Payloads/kernel.macho.adt \
+            --output out/picasso/host-checks/display-policy-payload
+          cp out/picasso/host-checks/display-policy-payload/results.json out/picasso/logs/display-policy-payload.json
+
+      - name: Check iOS 16 registered-port contracts
+        if: ${{ !inputs.fast }}
+        run: |
+          python3 scripts/check-picasso-mach-ports.py --xnu out/picasso/tree/.cache/xnu-work \
+            --output out/picasso/host-checks/mach-ports
+          cp out/picasso/host-checks/mach-ports/results.json out/picasso/logs/mach-ports-host-check.json
+
+      - name: Check bounded framebuffer method diagnostics
+        if: ${{ !inputs.fast }}
+        run: |
+          python3 scripts/check-picasso-fb-method-trace.py --xnu out/picasso/tree/.cache/xnu-work \
+            --output out/picasso/host-checks/fb-method-trace
+          cp out/picasso/host-checks/fb-method-trace/results.json out/picasso/logs/fb-method-trace.json
+
+      - name: Check iOS 16 framebuffer and IOSurface adapters
+        if: ${{ !inputs.fast }}
+        run: |
+          python3 scripts/check-picasso-ios16-surface-abi.py --xnu out/picasso/tree/.cache/xnu-work \
+            --output out/picasso/host-checks/ios16-surface-abi
+          cp out/picasso/host-checks/ios16-surface-abi/results.json out/picasso/logs/ios16-surface-abi.json
+
+      - name: Check native counter microtime conversion
+        if: ${{ !inputs.fast }}
+        run: |
+          python3 scripts/check-picasso-microtime.py --xnu out/picasso/tree/.cache/xnu-work \
+            --output out/picasso/host-checks/microtime
+          cp out/picasso/host-checks/microtime/results.json out/picasso/logs/microtime-host-check.json
+
+      - name: Verify software AES provider against the original class ABI
+        if: ${{ !inputs.fast }}
+        run: |
+          python3 scripts/check-picasso-aes-artifacts.py --tree out/picasso/tree --work out/picasso \
+            --kernelcache "$UNIXNU_KERNELCACHE" --output out/picasso/logs/aes-artifacts.json
+
+      - name: Verify watchdog service policy against the linked native driver
+        if: ${{ !inputs.fast }}
+        run: |
+          python3 scripts/check-picasso-watchdog-policy.py --verify \
+            --kernelcache "$UNIXNU_KERNELCACHE" --candidate out/picasso/kernel/kernel.macho \
+            --native-prelink-dir "$UNIXNU_TREE/kits/XnuPrelink" \
+            --output out/picasso/logs/watchdog-policy.json
+
+      - name: Verify CPU GOP display against the original class ABI
+        if: ${{ !inputs.fast }}
+        run: |
+          python3 scripts/check-picasso-display-artifacts.py --tree out/picasso/tree --work out/picasso \
+            --kernelcache "$UNIXNU_KERNELCACHE" --output out/picasso/logs/display-artifacts.json
+
+      - name: Verify original Sandbox and IOSurface in the prelinked kernel
+        if: ${{ !inputs.fast }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json
           from pathlib import Path
-          k = Path('out/picasso/kernel/kernel.macho')
-          if k.is_file():
-              d = k.read_bytes()
-              print('kernel.macho', len(d), 'bytes')
-              # Count segments and report the file size of each one.
-              ncmds = struct.unpack_from('<I', d, 16)[0]
-              off = 32
-              for _ in range(ncmds):
-                  cmd, size = struct.unpack_from('<II', d, off)
-                  if cmd == 0x19:
-                      name = d[off+8:off+24].rstrip(b'\0').decode('latin1', 'replace')
-                      vmaddr, vmsize, fileoff, filesize = struct.unpack_from('<QQQQ', d, off+24)
-                      print(f'  seg {name:20s} filesize={filesize}')
-                  off += size
-          p = Path('out/picasso/payload/payload.img')
-          if p.is_file():
-              print('payload.img', p.stat().st_size, 'bytes')
-          EOF
+          kernel = Path('out/picasso/kernel/kernel.macho')
+          plan = json.loads(kernel.with_suffix('.json').read_text())
+          if hashlib.sha256(kernel.read_bytes()).hexdigest() != plan['candidate_sha256']:
+              raise SystemExit('Prelink report does not match kernel.macho')
+          for component in ('com.apple.security.sandbox', 'com.apple.kext.AppleMatch', 'com.apple.iokit.IOSurface', 'com.apple.iokit.IOGPUFamily'):
+              if component not in plan['components']:
+                  raise SystemExit(f'Missing required original component: {component}')
+              start = plan['module_entrypoints'][component]['start_va']
+              if not any(e['module'] == component and e['segment'] == '__TEXT_EXEC'
+                         and e['va'] <= start < e['va'] + e['size'] for e in plan['extents']):
+                  raise SystemExit(f'Missing executable module entry: {component}')
+              print(f'Prelink includes {component}, start={start:#x}')
+          PY
+
+      - name: Export audited iOS16 inputs for Linux builds
+        run: |
+          python3 scripts/picasso_linux_inputs.py export --tree "$UNIXNU_TREE"
 
       - name: Compose boot image (BootShim + repo FD + payload as ramdisk)
         run: |
           python3 ./unixnu bootimg \
             --uefi "$GITHUB_WORKSPACE/device/uefi/mu-silicium" \
             --fd "$GITHUB_WORKSPACE/device/uefi/SILICIUM_UEFI.fd" \
-            --dtb "$GITHUB_WORKSPACE/device/uefi/mu-silicium/Resources/DTBs/picasso.dtb" \
+            --dtb "$GITHUB_WORKSPACE/device/uefi/mu-silicium/Resources/DTBs/picasso-topology.dtb" \
             --ramdisk "$GITHUB_WORKSPACE/device/out/picasso/payload/payload.img" \
             -o "$GITHUB_WORKSPACE/device/out/picasso/boot/boot.img" \
             2>&1 | tee out/picasso/logs/bootimg.log
           ls -lh out/picasso/boot/boot.img
 
-      - name: Upload boot image + kernel + payload + logs
+      # A few MiB of packed seeds must outlive the disposable kernel artifacts.
+      # If all copies become unavailable, reuse fails instead of formatting APFS.
+      - name: Retain the exact Data seed independently
+        uses: actions/upload-artifact@v4
+        with:
+          name: picasso-data-seed-${{ github.run_number }}
+          path: device/out/picasso/linux-inputs/**
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload boot image, diagnostic kernel, reports and reusable inputs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: picasso-bootimg-${{ github.run_number }}
+          include-hidden-files: true
+          # Keep the diagnostic kernel and exact reusable seeds. Raw audit Data
+          # copies (.cdr), extracted payload trees and object files stay on runner.
           path: |
             device/out/picasso/boot/**
-            device/out/picasso/kernel/**
-            device/out/picasso/payload/**
-            device/out/picasso/logs/**
+            device/out/picasso/kernel/kernel.macho
+            device/out/picasso/kernel/*.json
+            device/out/picasso/kernel/SHA256SUMS
+            device/out/picasso/payload/*.json
+            device/out/picasso/logs/**/*.log
+            device/out/picasso/logs/**/*.json
+            device/out/picasso/logs/**/*.txt
+            device/out/picasso/host-checks/**/*.json
+            device/out/picasso/host-checks/**/*.log
+            device/out/picasso/tree/build/**/*.json
+            device/out/picasso/tree/build/**/*.log
+            device/out/picasso/novatek/*.json
+            device/out/picasso/ram-data/*.json
+            device/out/picasso/linux-inputs/**
+            device/out/picasso/.config
+            !device/out/picasso/logs/**/*.files/**
+            !device/out/picasso/logs/**/*.cdr
           if-no-files-found: warn
           retention-days: 7
