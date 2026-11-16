@@ -31,6 +31,9 @@ template<class T, class U> static T __atomic_fetch_add(T *p, U amount, int) {
 static unsigned snapshots, calls, locks;
 static std::unordered_map<void *, size_t> allocations;
 static int diagnostic(const char *, ...) { return 0; }
+/* The replayed IOUserClient helper reads a kernel boot arg; the host fixture
+ * has no PEpert, so report "not set" and let the default path be exercised. */
+static bool PE_parse_boot_argn(const char *, void *, unsigned long) { return false; }
 #define printf diagnostic
 #define bzero(p, n) memset(p, 0, n)
 static void *IOMallocZeroData(size_t n) {
