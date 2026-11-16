@@ -684,6 +684,16 @@ fi
 if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ]; then
   EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_SOURCE_CORECRYPTO14=1"
 fi
+# Route 2: rebuild raphael's WiFi archive from CURRENT sources whenever the
+# compile record exists (i.e. any pass after bootstrap). Do not gate on
+# BOOTSTRAP: a cached/stale libRaphaelWifi.a lacks our latest glue stubs and
+# causes undefined symbols at link. Rebuilding is cheap (objects are ccache'd).
+if [ "${XNU_RAPHAEL_WIFI:-0}" = 1 ]; then
+  RECORD=build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json
+  if [ -f "$RECORD" ]; then
+    python3 scripts/build-raphael-wifi.py
+  fi
+fi
 if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
   CRYPTO_ARCHIVE=$ROOT/build/corecrypto-2023/libcorecrypto_kernel_noasm-namespaced.a
   test -f "$CRYPTO_ARCHIVE"
@@ -896,11 +906,6 @@ PY_BINDINGS
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ADRENO620_ARCHIVE"
   fi
   if [ "${XNU_RAPHAEL_WIFI:-0}" = 1 ]; then
-    # This block runs only on the non-bootstrap pass: the compile record and
-    # all other archives exist now. Build raphael's archive before force_load
-    # tests for it. (On a fresh tree the bootstrap pass already ran above and
-    # skipped this whole block, which is expected.)
-    python3 scripts/build-raphael-wifi.py
     # Route 2: raphael's kernel glue + ath10k driver, mutually exclusive with
     # the self-developed libNativeWlan.a (both would register en0 / wlfw_*).
     RWIFI_ARCHIVE=$ROOT/build/raphael-wifi/libRaphaelWifi.a
