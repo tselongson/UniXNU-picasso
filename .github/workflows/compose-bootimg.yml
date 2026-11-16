@@ -263,7 +263,7 @@ jobs:
             echo "raphael: pass 2 - relink with raphael stack ($RWIFI_A)"
             # XNU_RAPHAEL_WIFI stays 0 so the baseline's own force_load block
             # (which expects the archive inside the tree) does not double-add.
-            XNU_RAPHAEL_WIFI=0 python3 ./unixnu build "${BUILD_ARGS[@]}" 2>&1 | tee out/picasso/logs/actions-build.log
+            XNU_BOOTSTRAP=0 XNU_RAPHAEL_WIFI=0 python3 ./unixnu build "${BUILD_ARGS[@]}" 2>&1 | tee out/picasso/logs/actions-build.log
           else
             python3 ./unixnu build "${BUILD_ARGS[@]}" 2>&1 | tee out/picasso/logs/actions-build.log
           fi
