@@ -136,7 +136,7 @@ def driver_build():
         '-include', str(W / 'include/lx_prelude.h'), '-include', str(W / 'ath10k/include/ath10k_prelude.h'),
         '-DCONFIG_ATH10K_SNOC', '-DCONFIG_ATH10K_DEBUG', '-DLX_HAVE_SAE', '-DKBUILD_MODNAME="ath10k"',
         f'-DLX_HAKIOS_LX_H="{ROOT}/xnu/files/bsd/sys/hakios.lx.h"', f'-DLX_HAKIOS_QMI_H="{ROOT}/xnu/files/bsd/sys/hakios.qmi.h"']
-    flags += [f'-I{p}' for p in [W / 'ath10k/include', W / 'include', W / 'src', W / 'sae', gen, s,
+    flags += [f'-I{p}' for p in [W / 'ath10k/include', W / 'include', W / 'src', W / 'sae', ROOT / 'xnu/files/bsd', ROOT / 'xnu/files/bsd/sys', gen, s,
               s / 'contrib/ck/include', s / 'compat/linuxkpi/common/include', s / 'compat/linuxkpi/dummy/include',
               linux / 'ath10k', linux]]
     files = [linux / 'ath10k' / f'{n}.c' for n in
