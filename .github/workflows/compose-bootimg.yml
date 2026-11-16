@@ -271,6 +271,26 @@ jobs:
           # Which options and inputs ccache refuses (the stats only count them).
           grep -hE "unsupported|Multiple input|multiple source" "$RUNNER_TEMP/ccache.log" 2>/dev/null | sed -E 's/^\[[^]]*\] //' | sort | uniq -c | sort -rn | head -20 || true
 
+      - name: Verify raphael WiFi stack is linked in the final kernel
+        if: ${{ inputs.raphael_wifi }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          kernel = Path('out/picasso/kernel/kernel.macho').read_bytes()
+          link_log = Path('out/picasso/logs/kernel.log').read_text(errors='replace')
+          checks = [
+              ('force_load hook ran', 'raphael: force_load ->' in link_log),
+              ('raphael glue traced (LX: %s)', kernel.count(b'LX: %s') >= 1),
+              ('ath10k driver linked', kernel.count(b'ath10k') >= 10),
+          ]
+          for label, passed in checks:
+              print(f'{"PASS" if passed else "FAIL"}: {label}')
+          failed = [label for label, passed in checks if not passed]
+          if failed:
+              raise SystemExit('raphael stack missing from final kernel: ' + ', '.join(failed))
+          PY
+
       - name: Verify Data seed, compiled UUID and payload handoff
         if: ${{ !inputs.fast }}
         run: |

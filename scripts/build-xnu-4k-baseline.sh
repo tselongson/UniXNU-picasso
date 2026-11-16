@@ -688,6 +688,14 @@ if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
   CRYPTO_ARCHIVE=$ROOT/build/corecrypto-2023/libcorecrypto_kernel_noasm-namespaced.a
   test -f "$CRYPTO_ARCHIVE"
   KERNEL_EXTRA_ARCHIVES="-L$KERNEL_SDKROOT/usr/local/lib/kernel -lfirehose_kernel $CRYPTO_ARCHIVE"
+  # Route 2: raphael's full WiFi stack, force_load-ed from tree-external paths.
+  # This device script is copied into out/<device>/tree/scripts LAST (after the
+  # patched source copy), so the hook must live here too, not only in
+  # patches/unixnu-source-kernel.patch.
+  if [ -n "${RAPHAEL_ARCHIVES:-}" ]; then
+    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES $RAPHAEL_ARCHIVES"
+    echo "raphael: force_load -> $RAPHAEL_ARCHIVES"
+  fi
   KERNEL_ARCHIVE_DEPENDENCIES=$CRYPTO_ARCHIVE
   if [ "$ADRENO_FIRMWARE_PROBE" = 1 ]; then
     ADRENO_PROBE_ARCHIVE=$ROOT/build/adreno-firmware-probe/libAdrenoFirmwareProbe.a
