@@ -919,7 +919,10 @@ PY_BINDINGS
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$RWIFI_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ATH10K_OBJ"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $RWIFI_ARCHIVE $ATH10K_OBJ"
-  elif [ "${XNU_PICASSO_WLAN:-0}" = 1 ]; then
+  elif [ "${XNU_PICASSO_WLAN:-0}" = 1 ] && [ -z "${RAPHAEL_ARCHIVES:-}" ]; then
+    # The relink pass exports RAPHAEL_ARCHIVES and force-loads libRaphaelWifi.a.
+    # libNativeWlan.a defines the same IO80211/en0 stack and would collide with
+    # 93 duplicate symbols, so it must never be linked into that kernel.
     WLAN_ARCHIVE=$ROOT/build/native-wlan/libNativeWlan.a
     test -f "$WLAN_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$WLAN_ARCHIVE"
