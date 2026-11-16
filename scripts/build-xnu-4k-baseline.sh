@@ -152,13 +152,11 @@ if [ "$ADRENO620_PROBE" = 1 ]; then
   # Inert unless the boot arguments carry sheng-gpu=<1..5>.
   if [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-arm-driver.py AdrenoPicasso; fi
 fi
-# Route 2: raphael's complete kernel-side WiFi stack, opt-in. Compiles the 9
-# hakios.*.c glue files against the XNU record into libRaphaelWifi.a, linked
-# below via force_load. Default off; the existing self-developed stack is used
-# when XNU_RAPHAEL_WIFI=0.
-if [ "${XNU_RAPHAEL_WIFI:-0}" = 1 ]; then
-  if [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-raphael-wifi.py; fi
-fi
+# Route 2: raphael's complete kernel-side WiFi stack is compiled into
+# libRaphaelWifi.a later in this script, just before the final link (after the
+# archive builders have produced the compile record). Do not compile it here:
+# on a fresh tree this script first runs as the bootstrap pass, before the
+# record and the other archives exist.
 python3 - "$BOOT_PROGRESS" <<'PY'
 from pathlib import Path
 import hashlib, sys
@@ -898,6 +896,11 @@ PY_BINDINGS
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ADRENO620_ARCHIVE"
   fi
   if [ "${XNU_RAPHAEL_WIFI:-0}" = 1 ]; then
+    # This block runs only on the non-bootstrap pass: the compile record and
+    # all other archives exist now. Build raphael's archive before force_load
+    # tests for it. (On a fresh tree the bootstrap pass already ran above and
+    # skipped this whole block, which is expected.)
+    python3 scripts/build-raphael-wifi.py
     # Route 2: raphael's kernel glue + ath10k driver, mutually exclusive with
     # the self-developed libNativeWlan.a (both would register en0 / wlfw_*).
     RWIFI_ARCHIVE=$ROOT/build/raphael-wifi/libRaphaelWifi.a
