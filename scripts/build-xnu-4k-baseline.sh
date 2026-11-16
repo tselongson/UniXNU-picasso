@@ -684,16 +684,6 @@ fi
 if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ]; then
   EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_SOURCE_CORECRYPTO14=1"
 fi
-# Route 2: rebuild raphael's WiFi archive from CURRENT sources whenever the
-# compile record exists (i.e. any pass after bootstrap). Do not gate on
-# BOOTSTRAP: a cached/stale libRaphaelWifi.a lacks our latest glue stubs and
-# causes undefined symbols at link. Rebuilding is cheap (objects are ccache'd).
-if [ "${XNU_RAPHAEL_WIFI:-0}" = 1 ]; then
-  RECORD=build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json
-  if [ -f "$RECORD" ]; then
-    python3 scripts/build-raphael-wifi.py
-  fi
-fi
 if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
   CRYPTO_ARCHIVE=$ROOT/build/corecrypto-2023/libcorecrypto_kernel_noasm-namespaced.a
   test -f "$CRYPTO_ARCHIVE"
