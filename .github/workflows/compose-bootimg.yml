@@ -252,10 +252,18 @@ jobs:
             echo "raphael: compiling libRaphaelWifi.a against the record"
             ATH10K_TREE="$PWD/out/picasso/tree" ATH10K_DEVICE="$PWD" python3 scripts/build-raphael-wifi.py 2>&1 | tee out/picasso/logs/actions-raphael-archive.log
             test -f out/picasso/tree/build/raphael-wifi/libRaphaelWifi.a || { echo "raphael: archive missing"; exit 1; }
-            # ath10k.o is staged earlier by the "Stage prebuilt" step; the
-            # baseline force_load finds it by walking up from the tree.
-            echo "raphael: pass 2 - relink with raphael stack"
-            XNU_RAPHAEL_WIFI=1 python3 ./unixnu build "${BUILD_ARGS[@]}" 2>&1 | tee out/picasso/logs/actions-build.log
+            # unixnu rebuilds out/picasso/tree on every build, so keep the
+            # archive in the device checkout (tree-external) and hand its path
+            # to the kernel link via the stock XNU_EXTRA_LD_ARCHIVES hook.
+            mkdir -p prebuilt
+            cp -f out/picasso/tree/build/raphael-wifi/libRaphaelWifi.a prebuilt/
+            ATH10K_O="$PWD/wifi-ath10k/prebuilt/ath10k.o"
+            RWIFI_A="$PWD/prebuilt/libRaphaelWifi.a"
+            export XNU_EXTRA_LD_ARCHIVES="-Wl,-force_load,$RWIFI_A -Wl,-force_load,$ATH10K_O"
+            echo "raphael: pass 2 - relink with raphael stack ($RWIFI_A)"
+            # XNU_RAPHAEL_WIFI stays 0 so the baseline's own force_load block
+            # (which expects the archive inside the tree) does not double-add.
+            XNU_RAPHAEL_WIFI=0 python3 ./unixnu build "${BUILD_ARGS[@]}" 2>&1 | tee out/picasso/logs/actions-build.log
           else
             python3 ./unixnu build "${BUILD_ARGS[@]}" 2>&1 | tee out/picasso/logs/actions-build.log
           fi
