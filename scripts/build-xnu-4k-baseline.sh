@@ -901,8 +901,14 @@ PY_BINDINGS
     # Route 2: raphael's kernel glue + ath10k driver, mutually exclusive with
     # the self-developed libNativeWlan.a (both would register en0 / wlfw_*).
     RWIFI_ARCHIVE=$ROOT/build/raphael-wifi/libRaphaelWifi.a
-    ATH10K_OBJ=$ROOT/wifi-ath10k/prebuilt/ath10k.o
+    # prebuilt ath10k.o lives in the device checkout, not in the prepared tree.
+    # Walk up from ROOT (the tree) to find it.
+    ATH10K_OBJ=""
+    for d in "$ROOT" "$(dirname "$ROOT")" "$(dirname "$(dirname "$ROOT")")" "$(dirname "$(dirname "$(dirname "$ROOT")")")"; do
+      if [ -f "$d/wifi-ath10k/prebuilt/ath10k.o" ]; then ATH10K_OBJ="$d/wifi-ath10k/prebuilt/ath10k.o"; break; fi
+    done
     test -f "$RWIFI_ARCHIVE"
+    test -n "$ATH10K_OBJ"
     test -f "$ATH10K_OBJ"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$RWIFI_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ATH10K_OBJ"
