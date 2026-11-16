@@ -134,7 +134,8 @@ def driver_build():
         '-DKLD_MODULE', '-DHAVE_KERNEL_OPTION_HEADERS', '-include', str(gen / 'opt_global.h'),
         '-include', str(s / 'compat/linuxkpi/common/include/linux/kconfig.h'), '-DLINUXKPI_VERSION=70000', '-U__APPLE__',
         '-include', str(W / 'include/lx_prelude.h'), '-include', str(W / 'ath10k/include/ath10k_prelude.h'),
-        '-DCONFIG_ATH10K_SNOC', '-DCONFIG_ATH10K_DEBUG', '-DLX_HAVE_SAE', '-DKBUILD_MODNAME="ath10k"',
+        '-DCONFIG_ATH10K_SNOC', '-DCONFIG_ATH10K_DEBUG', '-DKBUILD_MODNAME="ath10k"',
+        *([] if os.environ.get('ATH10K_NO_SAE') else ['-DLX_HAVE_SAE']),
         f'-DLX_HAKIOS_LX_H="{ROOT}/xnu/files/bsd/sys/hakios.lx.h"', f'-DLX_HAKIOS_QMI_H="{ROOT}/xnu/files/bsd/sys/hakios.qmi.h"']
     flags += [f'-I{p}' for p in [W / 'ath10k/include', W / 'include', W / 'src', W / 'sae', ROOT / 'xnu/files/bsd', ROOT / 'xnu/files/bsd/sys', gen, s,
               s / 'contrib/ck/include', s / 'compat/linuxkpi/common/include', s / 'compat/linuxkpi/dummy/include',
@@ -173,7 +174,7 @@ def main():
         run([B / 'wpa3-test'])
         return
     objects = driver_build()
-    crypto, _ = sae_build(False)
+    crypto = [] if os.environ.get('ATH10K_NO_SAE') else sae_build(False)[0]
     out = B / 'out'; out.mkdir(exist_ok=True)
     ld = Path(os.environ.get('ATH10K_LD', str(ROOT / 'xnu-deps/host/bin/ld64')))
     run([ld, '-r', '-arch', 'arm64', *objects, *crypto, '-o', out / 'all.o'])
