@@ -133,7 +133,10 @@ def driver_build():
                                'linux-7.0.14/drivers/net/wireless/ath/spectral_common.h',
                                'linux-7.0.14/drivers/net/wireless/ath/ath.h'], [W / 'ath10k/patches/icnss-bootstrap.patch'])
     objdir = B / 'obj'; objdir.mkdir(exist_ok=True)
-    flags = shlex.split(os.environ.get('CC', 'clang')) + ['-target', os.environ.get('ATH10K_TARGET', 'arm64-apple-ios16.5'), '-mkernel',
+    # macOS Xcode clang is older and cannot do __typeof__ on a __counted_by
+    # array (linux-7.0.14 uses it); neutralise the attribute on that toolchain.
+    old_clang = ['-D__counted_by(a)='] if os.environ.get('ATH10K_OLD_CLANG') else []
+    flags = old_clang + shlex.split(os.environ.get('CC', 'clang')) + ['-target', os.environ.get('ATH10K_TARGET', 'arm64-apple-ios16.5'), '-mkernel',
         '-mgeneral-regs-only', '-fno-builtin', '-fno-common', '-ffreestanding', '-fno-strict-aliasing',
         '-funsigned-char', '-nostdinc', '-std=gnu17', '-O2', '-g', '-w', '-D__FreeBSD__=15', '-D_KERNEL',
         '-DKLD_MODULE', '-DHAVE_KERNEL_OPTION_HEADERS', '-include', str(gen / 'opt_global.h'),
