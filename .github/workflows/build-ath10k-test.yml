@@ -65,12 +65,20 @@ jobs:
           CC: ${{ env.UNIXNU_LLVM_BIN }}/clang
           ATH10K_TARGET: arm64-apple-ios16.5
           ATH10K_LD: ${{ runner.temp }}/unixnu-linux/CommandLineTools/usr/bin/ld
-          ATH10K_NM: ${{ env.UNIXNU_LLVM_BIN }}/llvm-nm
           ATH10K_NO_SAE: "1"
         run: |
           set -o pipefail
           # mk-ath10k.py's driver_build uses rg to enumerate opt_*.h includes.
           command -v rg >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep; }
+          # Locate an nm that reads Mach-O objects. The toolchain has clang/objcopy
+          # but not always llvm-nm; fall back to the Xcode CTL nm, then system nm.
+          NM=""
+          for c in "$UNIXNU_LLVM_BIN/llvm-nm" "$RUNNER_TEMP/unixnu-linux/CommandLineTools/usr/bin/nm" "$(command -v nm)"; do
+            if [ -x "$c" ]; then NM="$c"; break; fi
+          done
+          test -n "$NM" || { echo "no nm found"; exit 1; }
+          echo "using nm=$NM"
+          export ATH10K_NM="$NM"
           command -v rg awk patch tar curl
           python3 mk-ath10k-picasso.py 2>&1 | tee compile.log
           ls -l xnu-deps/build/ath10k/out/ath10k.o
