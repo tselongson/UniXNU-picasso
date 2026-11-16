@@ -1091,6 +1091,7 @@ static uint32_t wlfw_node, wlfw_port;
 static bool wlfw_probe, wlfw_probed, wlfw_assigned;
 static unsigned wlfw_state, wlfw_tries, wlfw_last;
 static bool wlfw_ready;   /* FW_READY_IND seen: ath10k sends CFG+MODE only after it */
+static bool wlfw_rejuvenating; /* raphael: 0x39 recovery-reason indication seen */
 static bool pdr_sent;
 static bool pdr_nolen_done;
 static uint32_t pdr_instance;
@@ -2728,6 +2729,12 @@ modem_monitor(void *arg __unused, wait_result_t wr __unused)
 #define WLFW_MSA_INFO       0x002D
 #define WLFW_MSA_READY      0x002E
 #define WLFW_HOST_CAP       0x0034
+/* raphael xnu_files_bsd_dev_hakios.wifi.c:3442/4412: the firmware sends
+ * indication 0x39 (recovery reason TLVs) to say it is about to restart; the
+ * host answers with request 0x3a to let it rejuvenate, then waits for a fresh
+ * FW_READY.  Copied verbatim from raphael's event-driven recovery. */
+#define WLFW_RECOVERY_IND   0x0039
+#define WLFW_RECOVERY_REQ   0x003A
 #define WLFW_CLIENT_ID      0x4b4e454cu
 #define WLFW_MAX_BDF_CHUNK  4096u
 
@@ -3015,6 +3022,22 @@ wlfw_step(void)
 		break;
 	case 7:
 		/* Wait for WLFW_FW_READY_IND (0x0021) indication */
+		if (wlfw_rejuvenating) {
+			/* raphael icnss_bootstrap :4410: answer the firmware's 0x39
+			 * recovery indication with an empty 0x3a request, then keep
+			 * waiting for a fresh FW_READY.  wlfw_ready must be cleared so
+			 * the new FW_READY is not mistaken for the old one. */
+			struct qmsg rej;
+			LOG("t=%u ms: WLFW 0x39 seen: sending recovery-req 0x3a (raphael)", g_ms);
+			wlfw_rejuvenating = false;
+			wlfw_ready = false;
+			qm_init_req(&rej, svc_txn++, WLFW_RECOVERY_REQ);
+			if (rej.b) {
+				qm_send(&rej, PORT_WLFW, wlfw_node, wlfw_port);
+			} else {
+				LOG("t=%u ms: WLFW 0x3a send: no buffer", g_ms);
+			}
+		}
 		if (wlfw_ready) {
 			wlfw_state = 8;
 			wlfw_step();
@@ -4120,6 +4143,11 @@ wlfw_rx(const uint8_t *d, uint32_t len)
 				wlfw_tries = 0;
 				wlfw_step();
 			}
+		} else if (msg == WLFW_RECOVERY_IND) {
+			/* raphael wlfw_receive :3442: firmware announces it will restart.
+			 * Set the flag; wlfw_step() case 7 answers with 0x3a. */
+			LOG("t=%u ms: WLFW recovery-reason IND (0x39) len %u: firmware will restart", g_ms, mlen);
+			wlfw_rejuvenating = true;
 		}
 		return true;
 	}
