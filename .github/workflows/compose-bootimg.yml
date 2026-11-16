@@ -213,19 +213,16 @@ jobs:
         if: ${{ inputs.raphael_wifi }}
         working-directory: device/wifi-ath10k
         env:
-          CC: ${{ runner.temp }}/unixnu-linux/llvm/bin/clang
           ATH10K_TARGET: arm64-apple-ios16.5
           ATH10K_NO_SAE: "1"
         run: |
           set -o pipefail
-          command -v rg >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep; }
-          NM=""
-          for c in "$RUNNER_TEMP/unixnu-linux/llvm/bin/llvm-nm" \
-                   "$RUNNER_TEMP/unixnu-linux/CommandLineTools/usr/bin/nm" "$(command -v nm)"; do
-            if [ -x "$c" ]; then NM="$c"; break; fi
-          done
-          test -n "$NM" || { echo "no nm found"; exit 1; }
-          export ATH10K_NM="$NM"
+          # macOS runner: use Xcode's toolchain via xcrun. The standalone gate
+          # used the Linux toolchain; here xcrun gives the matching ld64/nm.
+          export CC="$(xcrun -sdk iphoneos -find clang)"
+          export ATH10K_LD="$(xcrun -sdk iphoneos -find ld)"
+          export ATH10K_NM="$(xcrun -sdk iphoneos -find nm)"
+          echo "CC=$CC LD=$ATH10K_LD NM=$ATH10K_NM"
           python3 mk-ath10k-picasso.py 2>&1 | tee compile.log
           test -s xnu-deps/build/ath10k/out/ath10k.o
           ls -l xnu-deps/build/ath10k/out/ath10k.o
