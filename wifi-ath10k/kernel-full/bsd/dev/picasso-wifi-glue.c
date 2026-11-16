@@ -16,6 +16,7 @@
  * reference); see the raphael-port patch applied to wifi-ath10k/kernel-full.
  */
 #include <stdarg.h>
+#include <mach/mach_types.h>
 #include <kern/kalloc.h>
 #include <sys/errno.h>
 #include <sys/stat.h>
@@ -198,4 +199,47 @@ void
 hakios_nas_client_close(struct hakios_nas_client *client)
 {
 	(void)client;
+}
+
+void
+hakios_cell_attach(void)
+{
+	printf("LX: cellular attach skipped on picasso (WiFi-only)\n");
+}
+
+/* raphael's GICv3 driver lives in its patched XNU, not in the stock picasso
+ * kernel. These stubs let LinuxKPI's irq layer link; picasso's WiFi path still
+ * has to be checked on hardware for whether CE completions arrive. They are
+ * deliberately loud so a missing interrupt is visible in the serial log. */
+kern_return_t
+gic_v3_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid), void *context)
+{
+	(void)edge; (void)handler; (void)context;
+	printf("LX: GIC SPI %u attach stubbed (no picasso interrupt handler)\n", intid);
+	return KERN_SUCCESS;
+}
+
+void
+gic_v3_spi_mask(uint32_t intid)
+{
+	(void)intid;
+}
+
+void
+gic_v3_spi_unmask(uint32_t intid)
+{
+	(void)intid;
+}
+
+void
+gic_v3_spi_detach(uint32_t intid)
+{
+	(void)intid;
+}
+
+uint64_t
+gic_v3_spi_count(uint32_t intid)
+{
+	(void)intid;
+	return 0;
 }
