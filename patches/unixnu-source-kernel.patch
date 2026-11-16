@@ -7176,3 +7176,21 @@ diff --git a/patches/xnu/native-lookup-trace.patch b/patches/xnu/native-lookup-t
 + 	if (startdir_with_usecount) {
 + 		vnode_rele(startdir_with_usecount);
 + 		startdir_with_usecount = NULLVP;
+
+diff --git a/scripts/build-xnu-4k-baseline.sh b/scripts/build-xnu-4k-baseline.sh
+index 8f9d3cf..ad3cf0e 100644
+--- a/scripts/build-xnu-4k-baseline.sh
++++ b/scripts/build-xnu-4k-baseline.sh
+@@ -592,6 +592,12 @@ if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
+   CRYPTO_ARCHIVE=$ROOT/build/corecrypto-2023/libcorecrypto_kernel_noasm-namespaced.a
+   test -f "$CRYPTO_ARCHIVE"
+   KERNEL_EXTRA_ARCHIVES="-L$KERNEL_SDKROOT/usr/local/lib/kernel -lfirehose_kernel $CRYPTO_ARCHIVE"
++  # Route 2: raphael's full WiFi stack, force_load-ed from stable paths
++  # outside the build tree (unixnu rebuilds the tree every pass).
++  if [ -n "${RAPHAEL_ARCHIVES:-}" ]; then
++    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES $RAPHAEL_ARCHIVES"
++    echo "raphael: force_load -> $RAPHAEL_ARCHIVES"
++  fi
+   KERNEL_ARCHIVE_DEPENDENCIES=$CRYPTO_ARCHIVE
+   if [ "$ADRENO_FIRMWARE_PROBE" = 1 ]; then
+     ADRENO_PROBE_ARCHIVE=$ROOT/build/adreno-firmware-probe/libAdrenoFirmwareProbe.a
