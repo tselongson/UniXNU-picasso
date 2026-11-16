@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def compile_file(source: Path, destination: Path, record: dict, extra_flags: list):
+def compile_file(source: Path, destination: Path, record: dict, extra_flags: list, is_cpp: bool = False):
     destination.parent.mkdir(parents=True, exist_ok=True)
     command = []
     arguments = record['arguments']
@@ -25,7 +25,12 @@ def compile_file(source: Path, destination: Path, record: dict, extra_flags: lis
     while index < len(arguments):
         value = arguments[index]
         if value == '-xc++':
-            command.append('-xc')
+            # For .c files force C mode; for real C++ (wlan.cpp) keep the
+            # record's C++ driver mode and std.
+            if not is_cpp:
+                command.append('-xc')
+            else:
+                command.append(value)
         elif value == '-fapple-kext':
             pass
         elif value == record['file']:
@@ -38,7 +43,8 @@ def compile_file(source: Path, destination: Path, record: dict, extra_flags: lis
         elif not value.startswith('-W'):
             command.append(value)
         index += 1
-    command.append('-std=gnu11')
+    if not is_cpp:
+        command.append('-std=gnu11')
     command.extend(['-Wno-everything'])  # raphael code is warning-noisy on XNU 16.6
     command.extend(['-I', str(ROOT / '.cache/xnu-work/osfmk')])
     command.extend(extra_flags)
@@ -82,6 +88,26 @@ def main():
         compile_file(s, o, record, inc)
         objects.append(o)
         print(f'compiled {name}.c')
+
+    # IOKit integration: raphael's iokit/Kernel/hakios.wlan.cpp provides
+    # HakiosWLANStart() (creates the IO80211Controller / en0 that iOS's network
+    # stack binds to). We did not import raphael's iokit tree; picasso's
+    # self-developed hakios.wlan.cpp is the equivalent, self-contained (defines
+    # its own IO80211Controller) and is the only workable integration layer.
+    # This is the one place route 2 intentionally keeps picasso code.
+    wlan_cpp = None
+    for parent in (ROOT, *Path(__file__).resolve().parents):
+        candidate = parent / 'wifi-wcn3990' / 'source' / 'hakios.wlan.cpp'
+        if candidate.is_file():
+            wlan_cpp = candidate
+            break
+    if wlan_cpp is None:
+        raise SystemExit('cannot find picasso hakios.wlan.cpp for IO80211 integration')
+    wlan_o = out / 'hakios_wlan.o'
+    wlan_inc = inc + ['-I', str(wlan_cpp.parent)]
+    compile_file(wlan_cpp, wlan_o, record, wlan_inc, is_cpp=True)
+    objects.append(wlan_o)
+    print(f'compiled {wlan_cpp.name} (IO80211 integration)')
 
     archive = out / 'libRaphaelWifi.a'
     archive.unlink(missing_ok=True)
