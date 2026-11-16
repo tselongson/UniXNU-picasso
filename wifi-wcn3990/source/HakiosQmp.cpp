@@ -328,6 +328,37 @@ int railPosition(const char *name, uint32_t level, uint32_t *address)
     return -1;
 }
 
+/* cmd-db base address of a named rail, with raphael's LDO-class check
+ * (icnss_power :4158: (entry->address >> 16 & 0xf) == 4).  Unlike
+ * railPosition() this does not interpret the level table; icnss_power writes
+ * the desired millivolts directly. */
+bool railAddress(const char *name, uint32_t *address)
+{
+    char id[8] = { 0 };
+    if (!gCmdDb) {
+        gCmdDb = reinterpret_cast<const CmdDbHeader *>(ml_io_map(kCmdDbPhys, kCmdDbSize));
+        if (!gCmdDb) return false;
+    }
+    if (!(gCmdDb->magic[0] == 0xdb && gCmdDb->magic[1] == 0x30 &&
+          gCmdDb->magic[2] == 0x03 && gCmdDb->magic[3] == 0x0c)) return false;
+    strlcpy(id, name, sizeof(id));
+    for (unsigned s = 0; s < 8; s++) {
+        const CmdDbSlave *slave = &gCmdDb->slave[s];
+        const CmdDbEntry *entry = reinterpret_cast<const CmdDbEntry *>(gCmdDb->data + slave->header_offset);
+        if (slave->id == 0 || slave->count > 512) continue;
+        for (unsigned i = 0; i < slave->count; i++) {
+            if (memcmp(entry[i].id, id, sizeof(id)) != 0) continue;
+            if (static_cast<unsigned>(slave->data_offset) + entry[i].offset + entry[i].length >
+                kCmdDbSize - 0x1000u) return false;
+            if (((entry[i].address >> 16) & 0xfu) != 4) return false; /* not an LDO-class rail */
+            *address = entry[i].address;
+            return true;
+        }
+    }
+    printf("PICASSO_WLAN qmp: cmd-db has no LDO rail \"%s\"\n", name);
+    return false;
+}
+
 /* One RPMh write through TCS 0: the message id, address and value, enabled,
  * put in active mode and triggered, then its bit in the completion status
  * waited for. Same shape as the two-rail request in hakios_mpss_rails(). */
@@ -370,6 +401,59 @@ bool rpmhWrite(uint32_t address, uint32_t value)
         rd(gRsc.base, tcsOffset(kRpmhTcs, kTcsControl)) & ~(kTcsTrigger | kTcsActiveMode));
     wr(gRsc.base, tcsOffset(kRpmhTcs, kTcsEnabled), 0);
     lck_mtx_unlock(gRscLock);
+    return done != 0;
+}
+
+/* ---- TCS1 bulk write, copied verbatim from raphael
+ *      xnu_files_bsd_dev_hakios.wifi.c wifi_rpmh_write() :1052-1092.
+ *
+ * The existing rpmhWrite() above uses TCS0 (ACTIVE), whose direct programming
+ * is documented at :378-384 to replace the display MDSS's CX vote and freeze
+ * the panel (measured in v310/v312).  Raphael deliberately uses TCS1 for the
+ * Wi-Fi rail votes and keeps TCS0 only for the IRQ/completion handshake.
+ * On-device survey (wlan_rails_probe=1, 648-tcs-probe.cap) confirmed TCS1 is
+ * free here: status 0x1, enabled 0, command flags 0x10108 -- identical to
+ * raphael.  This is a literal port: same register sequence, same flags, same
+ * completion poll.  The only substitution is our gRsc/tcsOffset/rd/wr/sleepUs
+ * for raphael's rsc/RSC_TCS/rd/wr/sleep_us. */
+bool wifiRpmhWriteTcs1(const uint32_t *addresses, const uint32_t *values, unsigned count)
+{
+    if (!need(&gRsc)) return false;
+    if (count == 0 || count > 16) return false;
+    const uint32_t all = (1u << count) - 1u;
+    const uint32_t tcs1 = static_cast<uint32_t>(tcsOffset(1, 0)); /* RSC_TCS(1) */
+    const uint32_t tcs0 = static_cast<uint32_t>(tcsOffset(0, 0)); /* RSC_TCS(0) */
+    if (rd(gRsc.base, tcs1 + kTcsStatus) == 0) return false;
+    const uint32_t irq = rd(gRsc.base, tcs0);
+    wr(gRsc.base, tcs1 + kTcsControl, rd(gRsc.base, tcs1 + kTcsControl) & ~(1u << 24));
+    wr(gRsc.base, tcs1 + kTcsControl, rd(gRsc.base, tcs1 + kTcsControl) & ~(1u << 16));
+    wr(gRsc.base, tcs0 + 8, 2);
+    for (unsigned i = 0; i < count; i++) {
+        const uint32_t cmd = static_cast<uint32_t>(tcsOffset(1, 0x30u + 20u * i));
+        wr(gRsc.base, cmd, kMsgIdWriteWaited);        /* 0x10108, same as raphael */
+        wr(gRsc.base, cmd + 4, addresses[i]);
+        wr(gRsc.base, cmd + 8, values[i]);
+    }
+    wr(gRsc.base, tcs1 + 0x10, all);
+    wr(gRsc.base, tcs1 + kTcsEnabled, all);
+    wr(gRsc.base, tcs0, irq | 2);
+    __asm__ volatile("dsb sy" ::: "memory");          /* raphael settle() */
+    wr(gRsc.base, tcs1 + kTcsControl, 1u << 16);
+    wr(gRsc.base, tcs1 + kTcsControl, (1u << 16) | (1u << 24));
+    uint32_t done = 0;
+    for (unsigned n = 0; n < 2000 && !done; n++) {
+        done = rd(gRsc.base, tcs0 + 4) & 2;
+        if (!done) sleepUs(100);
+    }
+    printf("PICASSO_WLAN qmp: RPMh TCS1 %u commands %s; first/last status %#x/%#x\n",
+        count, done ? "accepted" : "timed out",
+        rd(gRsc.base, tcsOffset(1, 0x30u)), rd(gRsc.base, tcsOffset(1, 0x30u + 20u * (count - 1))));
+    wr(gRsc.base, tcs1 + kTcsControl, rd(gRsc.base, tcs1 + kTcsControl) & ~(1u << 24));
+    wr(gRsc.base, tcs1 + kTcsControl, rd(gRsc.base, tcs1 + kTcsControl) & ~(1u << 16));
+    wr(gRsc.base, tcs1 + kTcsEnabled, 0);
+    wr(gRsc.base, tcs1 + 0x10, 0);
+    wr(gRsc.base, tcs0 + 8, 2);
+    wr(gRsc.base, tcs0, irq);
     return done != 0;
 }
 
@@ -524,4 +608,66 @@ hakios_wlan_arc_level(const char *res, unsigned level)
     printf("PICASSO_WLAN qmp: %s (0x%x) <- level %u (position %d)\n", res, address,
         level, position);
     return rpmhWrite(address, static_cast<uint32_t>(position)) ? 0 : -1;
+}
+
+/* ---- icnss_power, copied from raphael xnu_files_bsd_dev_hakios.wifi.c
+ *      icnss_power() :4144-4185.  Rail names/voltages are picasso's own
+ *      (PicassoWlan.cpp:5826-5838): SM7250 uses ldoa14 where SM8150 uses ldoa7,
+ *      and ldoc11 is 3312 mV here vs 3104 mV on raphael.  The write pattern --
+ *      base=mV, base+8=drive (L10C HPM 7, others 4), base+4=enable, issued as
+ *      one TCS1 batch -- is verbatim.  on=false walks the rails in reverse and
+ *      drops the QDSS clock, also like raphael. */
+bool icnssPower(bool on)
+{
+    static const char *const names[5] = { "ldoa1", "ldoa14", "ldoc2", "ldoc10", "ldoc11" };
+    static const uint32_t millivolts[5] = { 752, 1800, 1304, 3312, 3312 };
+    uint32_t addresses[15], values[15];
+    unsigned count = 0;
+    static uint32_t railAddressCache[5] = { 0, 0, 0, 0, 0 };
+    static bool qdssTouched = false;
+    bool clockDone = true;
+
+    if (!on && qdssTouched) {
+        clockDone = hakios_aop_mailbox_send("{class: clock, res: qdss, val: 0}");
+        if (clockDone) qdssTouched = false;
+    }
+    for (unsigned i = 0; i < 5; i++) {
+        if (on && railAddressCache[i] == 0) {
+            if (!railAddress(names[i], &railAddressCache[i])) return false;
+        }
+    }
+    for (unsigned n = 0; n < 5; n++) {
+        unsigned i = on ? n : 4u - n;
+        uint32_t base = railAddressCache[i];
+        if (on) {
+            addresses[count] = base; values[count++] = millivolts[i];
+            addresses[count] = base + 8; values[count++] = (i == 3) ? 7 : 4;
+        }
+        addresses[count] = base + 4; values[count++] = on ? 1 : 0;
+        printf("PICASSO_WLAN qmp: ICNSS %s %s, %u mV\n", names[i], on ? "on" : "off", millivolts[i]);
+    }
+    bool done = wifiRpmhWriteTcs1(addresses, values, count);
+    if (on && done) {
+        qdssTouched = true;
+        done = hakios_aop_mailbox_send("{class: clock, res: qdss, val: 1}");
+    }
+    printf("PICASSO_WLAN qmp: ICNSS power %s: TCS1 %s, QDSS %s\n",
+        on ? "on" : "off", done ? "ok" : "FAILED", clockDone ? "ok" : "FAILED");
+    return done && clockDone;
+}
+
+/* PicassoWlan.cpp's sweet_rpmh_vreg_enable() stub forwards here.  Gated:
+ *   wlan_rails=0 (default): no vote, report the stub's historical success
+ *   wlan_rails=1: legacy cx.lvl/mss.lvl single yazoo vote (rpmhWrite, TCS0)
+ *   wlan_rails=2: raphael-style 5-rail + QDSS over TCS1 (icnssPower)
+ * The 5 calls made by PicassoWlan.cpp collapse to one icnssPower(true) batch. */
+extern "C" int hakios_wlan_icnss_power(void)
+{
+    uint32_t mode = 0;
+    PE_parse_boot_argn("wlan_rails", &mode, sizeof(mode));
+    if (mode < 2) return mode; /* 0/1: caller keeps its legacy behaviour */
+    static bool applied = false;
+    if (applied) return 2;      /* PicassoWlan.cpp calls vreg_enable five times */
+    applied = true;
+    return icnssPower(true) ? 2 : -2;
 }

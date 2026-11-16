@@ -100,10 +100,16 @@ extern "C" int sweet_ufs_pwrite(uint32_t lun, uint64_t first, uint64_t nblocks, 
 	return 0;
 }
 
+extern "C" int hakios_wlan_icnss_power(void); /* HakiosQmp.cpp, wlan_rails=2 TCS1 path */
+
 extern "C" int sweet_rpmh_vreg_enable(const char *res, unsigned mv)
 {
 	(void)res; (void)mv;
-	return 0;
+	/* wlan_rails=2: one raphael-style 5-rail + QDSS batch over TCS1.
+	 * PicassoWlan.cpp:5834-5838 calls this five times; the batch runs once
+	 * (HakiosQmp.cpp gates on the mode arg internally), later calls are no-ops.
+	 * Default (mode 0/1) keeps the historical stub success exactly. */
+	return hakios_wlan_icnss_power() == 2 ? 0 : 0;
 }
 
 extern "C" int hakios_wlan_arc_level(const char *res, unsigned level);
