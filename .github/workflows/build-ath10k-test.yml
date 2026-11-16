@@ -66,6 +66,7 @@ jobs:
           ATH10K_TARGET: arm64-apple-ios16.5
           ATH10K_LD: ${{ runner.temp }}/unixnu-linux/CommandLineTools/usr/bin/ld
           ATH10K_NM: ${{ env.UNIXNU_LLVM_BIN }}/llvm-nm
+          ATH10K_NO_SAE: "1"
         run: |
           set -o pipefail
           # mk-ath10k.py's driver_build uses rg to enumerate opt_*.h includes.
