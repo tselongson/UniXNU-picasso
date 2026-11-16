@@ -387,7 +387,7 @@ def main():
         # XNU compile record exists (build-raphael-wifi.py needs it). Doing it
         # here avoids the record-not-yet-generated problem in the baseline
         # script, and keeps the mutually-exclusive archive selection clean.
-        if os.environ.get('XNU_RAPHAEL_WIFI') == '1':
+        if os.environ.get('XNU_RAPHAEL_WIFI') == '1' or (ROOT / '.raphael-wifi-enable').is_file():
             import runpy
             runpy.run_path(str(ROOT / 'scripts' / 'build-raphael-wifi.py'), run_name='__main__')
         else:

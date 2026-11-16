@@ -244,6 +244,7 @@ jobs:
           if [ "$XNU_RAPHAEL_WIFI" = 1 ]; then
             cp -f scripts/build-arm-driver.py "$UNIXNU_TREE/scripts/"
             cp -f scripts/build-raphael-wifi.py "$UNIXNU_TREE/scripts/"
+            touch "$UNIXNU_TREE/.raphael-wifi-enable"
             echo "raphael: synced build scripts into $UNIXNU_TREE/scripts"
             grep -n "XNU_RAPHAEL_WIFI" "$UNIXNU_TREE/scripts/build-arm-driver.py" | head -3
           fi
