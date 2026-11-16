@@ -215,6 +215,7 @@ jobs:
         env:
           ATH10K_TARGET: arm64-apple-ios16.5
           ATH10K_NO_SAE: "1"
+          ATH10K_OLD_CLANG: "1"
         run: |
           set -o pipefail
           # macOS runner: use Xcode's toolchain via xcrun. The standalone gate
