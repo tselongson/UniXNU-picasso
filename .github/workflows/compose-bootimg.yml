@@ -209,24 +209,19 @@ jobs:
               2>&1 | tee out/picasso/logs/actions-ram-data.log
           fi
 
-      - name: Compile raphael ath10k.o (route 2)
+      - name: Stage prebuilt raphael ath10k.o (route 2)
         if: ${{ inputs.raphael_wifi }}
-        working-directory: device/wifi-ath10k
-        env:
-          ATH10K_TARGET: arm64-apple-ios16.5
-          ATH10K_NO_SAE: "1"
-          ATH10K_OLD_CLANG: "1"
+        working-directory: device
         run: |
-          set -o pipefail
-          # macOS runner: use Xcode's toolchain via xcrun. The standalone gate
-          # used the Linux toolchain; here xcrun gives the matching ld64/nm.
-          export CC="$(xcrun -sdk iphoneos -find clang)"
-          export ATH10K_LD="$(xcrun -sdk iphoneos -find ld)"
-          export ATH10K_NM="$(xcrun -sdk iphoneos -find nm)"
-          echo "CC=$CC LD=$ATH10K_LD NM=$ATH10K_NM"
-          python3 mk-ath10k-picasso.py 2>&1 | tee compile.log
-          test -s xnu-deps/build/ath10k/out/ath10k.o
-          ls -l xnu-deps/build/ath10k/out/ath10k.o
+          # ath10k.o is built by the Linux gate (build-ath10k-test.yml, which
+          # has the newer clang that accepts linux-7.0.14's __counted_by).
+          # Xcode clang on this macOS runner is too old, so we commit the
+          # verified binary rather than rebuild it here. ath10k source is a
+          # verbatim copy of raphael and does not change.
+          test -s wifi-ath10k/prebuilt/ath10k.o
+          mkdir -p build/raphael-wifi
+          python3 -c "import struct; d=open('wifi-ath10k/prebuilt/ath10k.o','rb').read(4); assert d==b'\xcf\xfa\xed\xfe', 'not arm64 Mach-O'"
+          ls -l wifi-ath10k/prebuilt/ath10k.o
 
       - name: Build kernel + payload
         env:
