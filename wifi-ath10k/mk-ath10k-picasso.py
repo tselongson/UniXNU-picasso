@@ -114,7 +114,12 @@ def driver_build():
         run(['awk', '-f', s / 'tools/makeobjops.awk', s / p, '-h'], cwd=gen)
     for mode in 'hpq':
         run(['awk', '-f', s / 'tools/vnode_if.awk', s / 'kern/vnode_if.src', f'-{mode}'], cwd=gen)
-    options = subprocess.check_output(['rg', '-o', '--no-filename', r'opt_[a-z0-9_]+\.h', s], text=True).split()
+    # picasso build runs on macOS (no rg): collect opt_*.h names in Python.
+    import re as _re
+    options = []
+    for root, _dirs, files in os.walk(s):
+        for fn in files:
+            options.extend(_re.findall(r'opt_[a-z0-9_]+\.h', fn))
     for name in set(options + ['lkpi_iic_if.h']):
         (gen / name).touch()
     (gen / 'opt_global.h').write_text('#define SMP 1\n')
