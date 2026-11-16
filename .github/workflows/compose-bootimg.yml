@@ -238,22 +238,27 @@ jobs:
         run: |
           python3 ./unixnu fetch xnu libplatform libdispatch AvailabilityVersions libpthread corecrypto-2023 IOStorageFamily
           mkdir -p out/picasso/logs
-          # Route 2: the prepared tree can carry stale copies of these build
-          # scripts; force the current device versions in so archive-08
-          # compiles libRaphaelWifi.a with all glue/constant fixes.
+          BUILD_ARGS=(kernel payload -j 3 --skip-setup --trust-cache out/picasso/ui-trust.bundle --data-ramdisk out/picasso/ram-data/data.dbrdisk)
           if [ "$XNU_RAPHAEL_WIFI" = 1 ]; then
-            # The build actually uses out/picasso/tree (unixnu copies the
-            # prepared .cache tree there). Sync into BOTH to be safe.
-            for T in "$UNIXNU_TREE" "out/picasso/tree"; do
-              mkdir -p "$T/scripts"
-              cp -f scripts/build-arm-driver.py "$T/scripts/"
-              cp -f scripts/build-raphael-wifi.py "$T/scripts/"
-              touch "$T/.raphael-wifi-enable"
-              echo "raphael: synced build scripts into $T/scripts"
-              grep -n "NATIVE-WLAN-DIAG" "$T/scripts/build-arm-driver.py" | head -1
-            done
+            # Route 2 two-pass build. The XNU compile record (needed to compile
+            # raphael's kernel glue against the exact kernel headers) only
+            # exists after a build has run. Pass 1 builds the normal kernel
+            # (raphael off) to generate it; then we compile libRaphaelWifi.a;
+            # pass 2 relinks with XNU_RAPHAEL_WIFI so force_load picks it up.
+            echo "raphael: pass 1 - base build to generate compile record"
+            XNU_RAPHAEL_WIFI=0 python3 ./unixnu build "${BUILD_ARGS[@]}" 2>&1 | tee out/picasso/logs/actions-build-pass1.log
+            RECORD=out/picasso/tree/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json
+            test -f "$RECORD" || { echo "raphael: no compile record after pass 1"; exit 1; }
+            echo "raphael: compiling libRaphaelWifi.a against the record"
+            ATH10K_TREE="$PWD/out/picasso/tree" ATH10K_DEVICE="$PWD" python3 scripts/build-raphael-wifi.py 2>&1 | tee out/picasso/logs/actions-raphael-archive.log
+            test -f out/picasso/tree/build/raphael-wifi/libRaphaelWifi.a || { echo "raphael: archive missing"; exit 1; }
+            # ath10k.o is staged earlier by the "Stage prebuilt" step; the
+            # baseline force_load finds it by walking up from the tree.
+            echo "raphael: pass 2 - relink with raphael stack"
+            XNU_RAPHAEL_WIFI=1 python3 ./unixnu build "${BUILD_ARGS[@]}" 2>&1 | tee out/picasso/logs/actions-build.log
+          else
+            python3 ./unixnu build "${BUILD_ARGS[@]}" 2>&1 | tee out/picasso/logs/actions-build.log
           fi
-          python3 ./unixnu build kernel payload -j 3 --skip-setup --trust-cache out/picasso/ui-trust.bundle --data-ramdisk out/picasso/ram-data/data.dbrdisk 2>&1 | tee out/picasso/logs/actions-build.log
           ccache -sv || true
           # Which options and inputs ccache refuses (the stats only count them).
           grep -hE "unsupported|Multiple input|multiple source" "$RUNNER_TEMP/ccache.log" 2>/dev/null | sed -E 's/^\[[^]]*\] //' | sort | uniq -c | sort -rn | head -20 || true
