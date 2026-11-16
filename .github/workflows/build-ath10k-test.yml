@@ -1,0 +1,86 @@
+name: Test ath10k Compile (Linux)
+
+# Route 2 feasibility gate: compile raphael's ath10k driver object with
+# picasso's existing Linux toolchain. Does NOT touch the normal kernel build.
+# Default WiFi stack (wifi-wcn3990) is unaffected.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ath10k-compile-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ath10k_compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+        working-directory: device
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: device
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Prepare source tree
+        run: |
+          TREE=$(python3 ./unixnu --prepare)
+          echo "UNIXNU_TREE=$TREE" >> "$GITHUB_ENV"
+          echo "UNIXNU_LLVM_BIN=$RUNNER_TEMP/unixnu-linux/llvm/bin" >> "$GITHUB_ENV"
+
+      - name: Install Linux host dependencies
+        run: |
+          sudo python3 "$UNIXNU_TREE/scripts/linux/setup-toolchain.py" --host-only \
+            2>&1 | tee out/picasso/logs/linux-host-tools.log
+
+      - name: Install the fixed Linux toolchain Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/linux-toolchain-release.py download \
+            --pin configs/linux-toolchain-release.json --output "$RUNNER_TEMP/picasso-toolchain-release"
+          sudo python3 scripts/linux-toolchain-release.py install --tree "$UNIXNU_TREE" \
+            --bundle "$RUNNER_TEMP/picasso-toolchain-release" --pin configs/linux-toolchain-release.json \
+            2>&1 | tee out/picasso/logs/linux-toolchain.log
+          echo "$UNIXNU_LLVM_BIN" >> "$GITHUB_PATH"
+          test -x "$UNIXNU_LLVM_BIN/llvm-objcopy"
+
+      - name: Compile ath10k.o
+        working-directory: device/wifi-ath10k
+        env:
+          CC: ${{ env.UNIXNU_LLVM_BIN }}/clang
+          ATH10K_TARGET: arm64-apple-ios16.5
+          ATH10K_LD: ${{ runner.temp }}/unixnu-linux/CommandLineTools/usr/bin/ld
+          ATH10K_NM: ${{ env.UNIXNU_LLVM_BIN }}/llvm-nm
+        run: |
+          set -o pipefail
+          which rg awk patch tar curl
+          python3 mk-ath10k-picasso.py 2>&1 | tee compile.log
+          ls -l xnu-deps/build/ath10k/out/ath10k.o
+
+      - name: Upload ath10k.o
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ath10k-test-object
+          path: device/wifi-ath10k/xnu-deps/build/ath10k/out/ath10k.o
+
+      - name: Upload compile logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ath10k-compile-logs
+          path: |
+            device/wifi-ath10k/compile.log
+            device/wifi-ath10k/xnu-deps/build/ath10k/obj/*.err
