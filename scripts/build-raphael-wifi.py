@@ -74,7 +74,7 @@ def main():
     names = ['hakios.wifi', 'hakios.mpss', 'hakios.qmi', 'hakios.net',
              'hakios.sta', 'hakios.apple80211', 'hakios.wlfw', 'hakios.lx',
              'picasso-wifi-glue']
-    inc = ['-I', str(src)]  # resolves <sys/hakios.*.h> via kernel-full/bsd/sys/
+    inc = ['-I', str(src / 'bsd'), '-I', str(src)]  # <sys/hakios.*.h> -> kernel-full/bsd/sys/
     objects = []
     for name in names:
         s = src / 'bsd/dev' / (name + '.c')
