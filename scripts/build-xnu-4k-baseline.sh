@@ -152,6 +152,13 @@ if [ "$ADRENO620_PROBE" = 1 ]; then
   # Inert unless the boot arguments carry sheng-gpu=<1..5>.
   if [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-arm-driver.py AdrenoPicasso; fi
 fi
+# Route 2: raphael's complete kernel-side WiFi stack, opt-in. Compiles the 9
+# hakios.*.c glue files against the XNU record into libRaphaelWifi.a, linked
+# below via force_load. Default off; the existing self-developed stack is used
+# when XNU_RAPHAEL_WIFI=0.
+if [ "${XNU_RAPHAEL_WIFI:-0}" = 1 ]; then
+  if [ "$BOOTSTRAP" = 0 ]; then python3 scripts/build-raphael-wifi.py; fi
+fi
 python3 - "$BOOT_PROGRESS" <<'PY'
 from pathlib import Path
 import hashlib, sys
@@ -890,7 +897,17 @@ PY_BINDINGS
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ADRENO620_ARCHIVE"
     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ADRENO620_ARCHIVE"
   fi
-  if [ "${XNU_PICASSO_WLAN:-0}" = 1 ]; then
+  if [ "${XNU_RAPHAEL_WIFI:-0}" = 1 ]; then
+    # Route 2: raphael's kernel glue + ath10k driver, mutually exclusive with
+    # the self-developed libNativeWlan.a (both would register en0 / wlfw_*).
+    RWIFI_ARCHIVE=$ROOT/build/raphael-wifi/libRaphaelWifi.a
+    ATH10K_OBJ=$ROOT/wifi-ath10k/xnu-deps/build/ath10k/out/ath10k.o
+    test -f "$RWIFI_ARCHIVE"
+    test -f "$ATH10K_OBJ"
+    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$RWIFI_ARCHIVE"
+    KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ATH10K_OBJ"
+    KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $RWIFI_ARCHIVE $ATH10K_OBJ"
+  elif [ "${XNU_PICASSO_WLAN:-0}" = 1 ]; then
     WLAN_ARCHIVE=$ROOT/build/native-wlan/libNativeWlan.a
     test -f "$WLAN_ARCHIVE"
     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$WLAN_ARCHIVE"

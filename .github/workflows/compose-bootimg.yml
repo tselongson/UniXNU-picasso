@@ -26,6 +26,10 @@ on:
         description: Also build and upload the userdata root image (sparse, for fastboot flash userdata)
         type: boolean
         default: false
+      raphael_wifi:
+        description: Route 2 - build raphael's complete ath10k WiFi stack (replaces self-developed stack)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -205,9 +209,31 @@ jobs:
               2>&1 | tee out/picasso/logs/actions-ram-data.log
           fi
 
+      - name: Compile raphael ath10k.o (route 2)
+        if: ${{ inputs.raphael_wifi }}
+        working-directory: device/wifi-ath10k
+        env:
+          CC: ${{ runner.temp }}/unixnu-linux/llvm/bin/clang
+          ATH10K_TARGET: arm64-apple-ios16.5
+          ATH10K_NO_SAE: "1"
+        run: |
+          set -o pipefail
+          command -v rg >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep; }
+          NM=""
+          for c in "$RUNNER_TEMP/unixnu-linux/llvm/bin/llvm-nm" \
+                   "$RUNNER_TEMP/unixnu-linux/CommandLineTools/usr/bin/nm" "$(command -v nm)"; do
+            if [ -x "$c" ]; then NM="$c"; break; fi
+          done
+          test -n "$NM" || { echo "no nm found"; exit 1; }
+          export ATH10K_NM="$NM"
+          python3 mk-ath10k-picasso.py 2>&1 | tee compile.log
+          test -s xnu-deps/build/ath10k/out/ath10k.o
+          ls -l xnu-deps/build/ath10k/out/ath10k.o
+
       - name: Build kernel + payload
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          XNU_RAPHAEL_WIFI: ${{ inputs.raphael_wifi && '1' || '0' }}
           UNIXNU_UNIQUE_CHIP_ID: "41a551c0dec0de01"
           CC: ${{ runner.temp }}/ccache-bin/clang
           CXX: ${{ runner.temp }}/ccache-bin/clang++
