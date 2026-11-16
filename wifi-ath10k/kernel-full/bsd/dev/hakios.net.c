@@ -26,6 +26,10 @@
 #include <net/if_types.h>
 #include <net/kpi_interface.h>
 #include <netinet/in.h>
+/* picasso XNU 16.6 header does not declare etherbroadcastaddr (raphael's
+ * patched one did). Supply the value locally so we do not depend on that
+ * kernel global being exported: it is always ff:ff:ff:ff:ff:ff. */
+static const unsigned char lx_etherbroadcastaddr[6] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
 #include <pexpert/pexpert.h>
 #include <sys/kern_event.h>
 #include <sys/kpi_mbuf.h>
@@ -358,7 +362,7 @@ hakios_net_attach(const struct hakios_net_link *link)
 		.check_multi = ether_check_multi,
 		.framer_extended = ether_frameout_extended,
 		.ioctl = net_ioctl,
-		.broadcast_addr = etherbroadcastaddr,
+		.broadcast_addr = lx_etherbroadcastaddr,
 		.broadcast_len = ETHER_ADDR_LEN,
 	};
 	const uint8_t *address = link->address;
