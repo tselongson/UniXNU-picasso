@@ -381,18 +381,11 @@ def main():
         build_adreno_picasso(record)
         return
     if args.component == 'NativeWlan':
-        print(f'NATIVE-WLAN-DIAG ROOT={ROOT} env={os.environ.get("XNU_RAPHAEL_WIFI")} marker={(ROOT / ".raphael-wifi-enable").is_file()} cwd={Path.cwd()}', flush=True)
-        # Route 2: when raphael's stack is enabled, the archive-08 builder
-        # slot compiles libRaphaelWifi.a instead of the self-developed
-        # libNativeWlan.a. This slot runs after the bootstrap pass, when the
-        # XNU compile record exists (build-raphael-wifi.py needs it). Doing it
-        # here avoids the record-not-yet-generated problem in the baseline
-        # script, and keeps the mutually-exclusive archive selection clean.
-        if os.environ.get('XNU_RAPHAEL_WIFI') == '1' or (ROOT / '.raphael-wifi-enable').is_file():
-            import runpy
-            runpy.run_path(str(ROOT / 'scripts' / 'build-raphael-wifi.py'), run_name='__main__')
-        else:
-            build_wlan(record)
+        # Route 2: libRaphaelWifi.a is compiled by a dedicated workflow step
+        # (after pass 1 generates the XNU compile record) and force_load-ed by
+        # build-xnu-4k-baseline.sh when XNU_RAPHAEL_WIFI=1. This slot always
+        # builds the normal archive; it is simply not linked in that mode.
+        build_wlan(record)
         return
 
     out_map = {

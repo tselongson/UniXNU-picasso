@@ -12,9 +12,14 @@ import json
 import struct
 import subprocess
 import sys
+import os
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+# The XNU compile record and headers live in the prepared build tree. Allow an
+# explicit override so this script can be run from a standalone workflow that
+# knows the tree path, independent of where the script file itself sits.
+ROOT = Path(os.environ['ATH10K_TREE']) if os.environ.get('ATH10K_TREE') else Path(__file__).resolve().parents[1]
+DEVICE = Path(os.environ['ATH10K_DEVICE']) if os.environ.get('ATH10K_DEVICE') else ROOT
 
 
 def compile_file(source: Path, destination: Path, record: dict, extra_flags: list, is_cpp: bool = False):
@@ -63,7 +68,7 @@ def main():
     # but wifi-ath10k/ source lives in the device checkout, not in the tree.
     # Walk up from __file__ to find it (same pattern as build-arm-driver.py).
     src = None
-    for parent in (ROOT, *Path(__file__).resolve().parents):
+    for parent in (DEVICE, ROOT, *Path(__file__).resolve().parents):
         candidate = parent / 'wifi-ath10k' / 'kernel-full'
         if candidate.is_dir():
             src = candidate
@@ -96,7 +101,7 @@ def main():
     # its own IO80211Controller) and is the only workable integration layer.
     # This is the one place route 2 intentionally keeps picasso code.
     wlan_cpp = None
-    for parent in (ROOT, *Path(__file__).resolve().parents):
+    for parent in (DEVICE, ROOT, *Path(__file__).resolve().parents):
         candidate = parent / 'wifi-wcn3990' / 'source' / 'hakios.wlan.cpp'
         if candidate.is_file():
             wlan_cpp = candidate
