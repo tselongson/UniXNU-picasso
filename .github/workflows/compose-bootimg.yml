@@ -223,31 +223,6 @@ jobs:
           python3 -c "import struct; d=open('wifi-ath10k/prebuilt/ath10k.o','rb').read(4); assert d==b'\xcf\xfa\xed\xfe', 'not arm64 Mach-O'"
           ls -l wifi-ath10k/prebuilt/ath10k.o
 
-      - name: Add raphael BDF boot argument (route 2)
-        if: ${{ inputs.raphael_wifi }}
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          board = Path('board.toml')
-          text = board.read_text()
-          # raphael's icnss_board_data() refuses to probe without wifi_bdf=bdwlan.bin.
-          # The stock kernel_args is 996 bytes; swap out only the four repeat-gesture
-          # automation knobs (keep offline-hid-input / sheng-touch* / picasso-buttons).
-          for token in ('offline-hid-auto-home=5', 'offline-hid-swipe-delay=8',
-                        'offline-hid-auto-home-count=8', 'offline-hid-swipe=8'):
-              line = f'  "{token}",\n'
-              if line not in text:
-                  raise SystemExit(f'missing boot arg to remove: {token}')
-              text = text.replace(line, '', 1)
-          marker = '  "wifi=1",\n'
-          if marker not in text:
-              raise SystemExit('missing wifi=1 boot arg anchor')
-          text = text.replace(marker, marker + '  "wifi_bdf=bdwlan.bin",\n', 1)
-          board.write_text(text)
-          print('raphael boot args: added wifi_bdf=bdwlan.bin, removed 4 repeat-gesture knobs')
-          PY
-
       - name: Build kernel + payload
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -418,6 +393,26 @@ jobs:
             -o "$GITHUB_WORKSPACE/device/out/picasso/boot/boot.img" \
             2>&1 | tee out/picasso/logs/bootimg.log
           ls -lh out/picasso/boot/boot.img
+
+      - name: Add raphael BDF boot argument to boot.img (route 2)
+        if: ${{ inputs.raphael_wifi }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          image = Path('out/picasso/boot/boot.img')
+          data = image.read_bytes()
+          old, new = b'offline-hid-swipe=8', b'wifi_bdf=bdwlan.bin'
+          if len(old) != len(new):
+              raise SystemExit(f'length mismatch: {len(old)} vs {len(new)}')
+          start = data.find(b'args = "-v')
+          end = data.find(b'"', start + 9) if start >= 0 else -1
+          if start < 0 or end < 0 or old not in data[start:end]:
+              raise SystemExit('offline-hid-swipe=8 not found in the boot image cmdline')
+          line = data[start:end].replace(old, new, 1)
+          image.write_bytes(data[:start] + line + data[end:])
+          print(f'boot.img cmdline: {old.decode()} -> {new.decode()} (length unchanged)')
+          PY
 
       # A few MiB of packed seeds must outlive the disposable kernel artifacts.
       # If all copies become unavailable, reuse fails instead of formatting APFS.
