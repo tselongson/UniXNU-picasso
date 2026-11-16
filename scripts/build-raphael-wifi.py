@@ -53,7 +53,17 @@ def compile_file(source: Path, destination: Path, record: dict, extra_flags: lis
 def main():
     recipe = ROOT / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/IOPlatformExpert.cpo.json'
     record = json.loads(recipe.read_text().strip().rstrip(','))
-    src = ROOT / 'wifi-ath10k/kernel-full'
+    # This script is copied into the prepared tree (out/picasso/tree/scripts/),
+    # but wifi-ath10k/ source lives in the device checkout, not in the tree.
+    # Walk up from __file__ to find it (same pattern as build-arm-driver.py).
+    src = None
+    for parent in (ROOT, *Path(__file__).resolve().parents):
+        candidate = parent / 'wifi-ath10k' / 'kernel-full'
+        if candidate.is_dir():
+            src = candidate
+            break
+    if src is None:
+        raise SystemExit('cannot find wifi-ath10k/kernel-full source')
     out = ROOT / 'build/raphael-wifi'
     out.mkdir(parents=True, exist_ok=True)
 
