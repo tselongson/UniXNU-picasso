@@ -34,7 +34,7 @@ def archive(name):
     p = CACHE / filename
     if not p.exists():
         tmp = p.with_suffix(p.suffix + '.partial')
-        run(['curl', '--fail', '--location', '--max-time', '180', url, '-o', tmp])
+        run(['curl', '--fail', '--location', '--retry', '3', '--retry-delay', '5', '--max-time', '900', url, '-o', tmp])
         tmp.replace(p)
     if hashlib.file_digest(p.open('rb'), 'sha256').hexdigest() != sha:
         raise RuntimeError(f'Checksum mismatch: {p}')
