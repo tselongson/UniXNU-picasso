@@ -68,7 +68,9 @@ jobs:
           ATH10K_NM: ${{ env.UNIXNU_LLVM_BIN }}/llvm-nm
         run: |
           set -o pipefail
-          which rg awk patch tar curl
+          # mk-ath10k.py's driver_build uses rg to enumerate opt_*.h includes.
+          command -v rg >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep; }
+          command -v rg awk patch tar curl
           python3 mk-ath10k-picasso.py 2>&1 | tee compile.log
           ls -l xnu-deps/build/ath10k/out/ath10k.o
 
