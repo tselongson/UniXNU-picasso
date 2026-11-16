@@ -236,6 +236,46 @@ uint32_t tcsCommand(uint32_t command, uint32_t within)
     return tcsOffset(kRpmhTcs, 0x30u + 20u * command + within);
 }
 
+/* ---- READ-ONLY TCS survey (copied from raphael xnu_files_bsd_dev_hakios.wifi.c
+ *      :1005-1045, the step that prints the sequencer's TCSs).  Gated by
+ *      wlan_rails_probe=1, default off, reads registers only -- never writes,
+ *      so it cannot freeze the panel.  Purpose: establish whether TCS1 is free
+ *      on picasso before porting raphael's TCS1 bulk-write (wifi_rpmh_write). */
+void surveyTcs(void)
+{
+    constexpr uint32_t kRscId = 0x000u;       /* raphael RSC_ID  :993 */
+    constexpr uint32_t kRscConfig = 0x00cu;   /* raphael RSC_CONFIG :994 */
+    static const char *const kinds[] = {
+        "at once", "at once", "asleep", "asleep", "asleep", "awake", "awake", "awake"
+    };
+
+    if (!need(&gRsc)) return;
+    const uint32_t id = rd(gRsc.base, kRscId);
+    const uint32_t config = rd(gRsc.base, kRscConfig);
+    if (((id >> 16) & 0xffu) >= 3u) {
+        printf("PICASSO_WLAN qmp: rsc sequencer version %u: layout not read\n", (id >> 16) & 0xffu);
+        return;
+    }
+    const unsigned count = (config >> 12) & 0x3fu;
+    const unsigned commands = (config >> 27) & 0x1fu;
+    printf("PICASSO_WLAN qmp: rsc has %u TCSs of %u commands (id %#x config %#x)\n",
+        count, commands, id, config);
+    for (unsigned t = 0; t < count && t < 8; t++) {
+        const uint32_t enabled = rd(gRsc.base, tcsOffset(t, kTcsEnabled));
+        printf("PICASSO_WLAN qmp: TCS %u (%s): enabled %#x, control %#x, status %#x\n",
+            t, kinds[t], enabled, rd(gRsc.base, tcsOffset(t, kTcsControl)),
+            rd(gRsc.base, tcsOffset(t, kTcsStatus)));
+        for (unsigned c = 0; c < commands && c < 16; c++) {
+            const uint32_t flags = rd(gRsc.base, tcsOffset(t, 0x30u + 20u * c));
+            const uint32_t address = rd(gRsc.base, tcsOffset(t, 0x30u + 20u * c + 4u));
+            const uint32_t value = rd(gRsc.base, tcsOffset(t, 0x30u + 20u * c + 8u));
+            if (address == 0 && !(enabled & (1u << c))) continue;
+            printf("PICASSO_WLAN qmp:   TCS %u command %u%s: addr %#x = %#x, flags %#x\n",
+                t, c, (enabled & (1u << c)) ? "" : " (not enabled)", address, value, flags);
+        }
+    }
+}
+
 /* The level position RPMh takes for that rail and level; -1: not found. */
 int railPosition(const char *name, uint32_t level, uint32_t *address)
 {
@@ -461,6 +501,17 @@ extern "C" int
 hakios_wlan_arc_level(const char *res, unsigned level)
 {
     uint32_t address = 0;
+
+    /* READ-ONLY TCS survey, gated, default off.  Runs once per boot to decide
+     * whether raphael's TCS1 path can be ported.  No register writes. */
+    {
+        uint32_t probe = 0;
+        static bool surveyed = false;
+        if (!surveyed && PE_parse_boot_argn("wlan_rails_probe", &probe, sizeof(probe)) && probe) {
+            surveyed = true;
+            surveyTcs();
+        }
+    }
 
     if (!railsWanted()) return 0;
 
