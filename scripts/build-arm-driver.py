@@ -381,6 +381,7 @@ def main():
         build_adreno_picasso(record)
         return
     if args.component == 'NativeWlan':
+        print(f'NATIVE-WLAN-DIAG ROOT={ROOT} env={os.environ.get("XNU_RAPHAEL_WIFI")} marker={(ROOT / ".raphael-wifi-enable").is_file()} cwd={Path.cwd()}', flush=True)
         # Route 2: when raphael's stack is enabled, the archive-08 builder
         # slot compiles libRaphaelWifi.a instead of the self-developed
         # libNativeWlan.a. This slot runs after the bootstrap pass, when the
