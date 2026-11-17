@@ -408,23 +408,26 @@ lfn_prepend(const uint8_t entry[32], char *buf, size_t max)
 }
 
 static int
+#define FAT_DIR_CAP (128u * 1024u)
+
 fat_load_dir(const struct fat_vol *v, uint32_t clus, uint8_t **out, uint32_t *bytes)
 {
 	uint32_t n = 0;
 
+	/* The proven picasso loader always gives a directory 128 KiB, even when
+	 * the FAT16 root is only 16 KiB. An exact-sized buffer turned a UFS read
+	 * that wrote a few bytes past the directory into a kernel data abort. */
+	*out = kalloc_data(FAT_DIR_CAP, Z_WAITOK | Z_ZERO);
+	if (*out == NULL) return -1;
 	if (clus == 0) {
 		*bytes = v->rootents * 32;
-		if (*bytes == 0) return -1;
-		*out = kalloc_data(*bytes, Z_WAITOK | Z_ZERO);
-		if (*out == NULL) return -1;
+		if (*bytes == 0 || *bytes > FAT_DIR_CAP) return -1;
 		return picasso_ufs_read_part(v->part, v->root_sec * v->bps, *out, *bytes);
 	}
 	for (uint32_t c = clus; c >= 2 && c < 0x0ffffff0u && n < 4096; c = fat_next(v, c)) n++;
 	if (n == 0) return -1;
 	*bytes = n * v->spc * v->bps;
-	if (*bytes == 0 || *bytes > 8u * 1024u * 1024u) return -1;
-	*out = kalloc_data(*bytes, Z_WAITOK | Z_ZERO);
-	if (*out == NULL) return -1;
+	if (*bytes == 0 || *bytes > FAT_DIR_CAP) return -1;
 	return fat_read_chain(v, clus, *out, *bytes);
 }
 
@@ -506,12 +509,12 @@ fat_lookup(const struct fat_vol *v, const char *name, uint32_t *clus, uint32_t *
 		}
 		if (probe != NULL) kfree_data(probe, 256 * 1024);
 	}
-	kfree_data(dir, bytes);
+	kfree_data(dir, FAT_DIR_CAP);
 	if (result == 0) return 0;
 	for (unsigned i = 0; i < 2 && child[i] != 0; i++) {
 		if (fat_load_dir(v, child[i], &dir, &bytes) != 0) continue;
 		result = fat_scan_dir(v, dir, bytes, name, clus, size, NULL);
-		kfree_data(dir, bytes);
+		kfree_data(dir, FAT_DIR_CAP);
 		if (result == 0) break;
 	}
 	return result;
