@@ -191,10 +191,14 @@ picasso_ufs_find_part(const char *name, uint64_t *first, uint64_t *nblocks, uint
 		char wanted[GPT_NAME_MAX];
 		int i;
 
+		/* A/B devices keep the real firmware in modem_a / modem_b; a plain
+		 * "modem" entry can be an empty metadata partition. Prefer slots. */
 		if (attempt == 0) {
-			strlcpy(wanted, name, sizeof(wanted));
+			snprintf(wanted, sizeof(wanted), "%s_a", name);
+		} else if (attempt == 1) {
+			snprintf(wanted, sizeof(wanted), "%s_b", name);
 		} else {
-			snprintf(wanted, sizeof(wanted), "%s_%c", name, attempt == 1 ? 'a' : 'b');
+			strlcpy(wanted, name, sizeof(wanted));
 		}
 		for (i = 0; i < g_part_count; i++) {
 			if (strcmp(g_parts[i].name, wanted) != 0) continue;
@@ -480,6 +484,8 @@ fat_lookup(const struct fat_vol *v, const char *name, uint32_t *clus, uint32_t *
 	if (fat_load_dir(v, v->rootents != 0 ? 0 : v->rootclus, &dir, &bytes) != 0) return -1;
 	printf("LX: firmware FAT root: %u bytes, looking for %s\n", bytes, name);
 	result = fat_scan_dir(v, dir, bytes, name, clus, size, child);
+	if (result != 0 && dir[0] == 0)
+		printf("LX: firmware FAT root is empty on partition %u\n", v->part);
 	kfree_data(dir, bytes);
 	if (result == 0) return 0;
 	for (unsigned i = 0; i < 2 && child[i] != 0; i++) {
