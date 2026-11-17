@@ -286,6 +286,7 @@ fat_mount(struct fat_vol *v)
 	uint32_t total16, total32;
 
 	if (picasso_ufs_find_part("modem", NULL, NULL, &v->part) != 0) return -1;
+	printf("LX: firmware FAT: using UFS partition %u\n", v->part);
 	if (picasso_ufs_read_part(v->part, 0, boot, sizeof(boot)) != 0) return -1;
 	if (boot[510] != 0x55 || boot[511] != 0xaa) return -1;
 	v->bps = le16(boot + 11);
@@ -392,34 +393,35 @@ lfn_prepend(const uint8_t entry[32], char *buf, size_t max)
 }
 
 static int
-fat_lookup(const struct fat_vol *v, const char *name, uint32_t *clus, uint32_t *size)
+fat_load_dir(const struct fat_vol *v, uint32_t clus, uint8_t **out, uint32_t *bytes)
 {
-	uint8_t *dir = NULL;
-	uint32_t dir_bytes = 0;
-	uint64_t dir_byte = 0;
-	char pending[128] = "";
-	int result = -1;
+	uint32_t n = 0;
 
-	if (v->rootents != 0) {
-		dir_bytes = v->rootents * 32;
-		dir_byte = v->root_sec * v->bps;
-	} else {
-		uint32_t c = v->rootclus, clusters = 0;
-		while (c >= 2 && c < 0x0ffffff0u && clusters < 4096) {
-			clusters++;
-			c = fat_next(v, c);
-		}
-		if (clusters == 0) return -1;
-		dir_bytes = clusters * v->spc * v->bps;
+	if (clus == 0) {
+		*bytes = v->rootents * 32;
+		if (*bytes == 0) return -1;
+		*out = kalloc_data(*bytes, Z_WAITOK | Z_ZERO);
+		if (*out == NULL) return -1;
+		return picasso_ufs_read_part(v->part, v->root_sec * v->bps, *out, *bytes);
 	}
-	if (dir_bytes == 0 || dir_bytes > 8u * 1024u * 1024u) return -1;
-	dir = kalloc_data(dir_bytes, Z_WAITOK | Z_ZERO);
-	if (dir == NULL) return -1;
-	if (v->rootents != 0) {
-		if (picasso_ufs_read_part(v->part, dir_byte, dir, dir_bytes) != 0) goto out;
-	} else if (fat_read_chain(v, v->rootclus, dir, dir_bytes) != 0) {
-		goto out;
-	}
+	for (uint32_t c = clus; c >= 2 && c < 0x0ffffff0u && n < 4096; c = fat_next(v, c)) n++;
+	if (n == 0) return -1;
+	*bytes = n * v->spc * v->bps;
+	if (*bytes == 0 || *bytes > 8u * 1024u * 1024u) return -1;
+	*out = kalloc_data(*bytes, Z_WAITOK | Z_ZERO);
+	if (*out == NULL) return -1;
+	return fat_read_chain(v, clus, *out, *bytes);
+}
+
+/* Android's modem FAT keeps the images under image/ (and sometimes fw/), not
+ * in the root. Scan one directory, remember those child directories, then let
+ * fat_lookup() descend into them on a second pass. */
+static int
+fat_scan_dir(const struct fat_vol *v, uint8_t *dir, uint32_t dir_bytes, const char *name,
+    uint32_t *clus, uint32_t *size, uint32_t child[2])
+{
+	char pending[128] = "";
+
 	for (uint32_t off = 0; off + 32 <= dir_bytes; off += 32) {
 		const uint8_t *entry = dir + off;
 		char effective[128];
@@ -443,15 +445,37 @@ fat_lookup(const struct fat_vol *v, const char *name, uint32_t *clus, uint32_t *
 		pending[0] = 0;
 		entry_clus = le16(entry + 26);
 		if (v->bits == 32) entry_clus |= (uint32_t)le16(entry + 20) << 16;
+		if ((attr & 0x10) != 0) {
+			if (child != NULL && name_equal(effective, "image")) child[0] = entry_clus;
+			if (child != NULL && name_equal(effective, "fw")) child[1] = entry_clus;
+			continue;
+		}
 		if (name_equal(effective, name)) {
 			*clus = entry_clus;
 			*size = le32(entry + 28);
-			result = 0;
-			break;
+			return 0;
 		}
 	}
-out:
-	kfree_data(dir, dir_bytes);
+	return -1;
+}
+
+static int
+fat_lookup(const struct fat_vol *v, const char *name, uint32_t *clus, uint32_t *size)
+{
+	uint8_t *dir = NULL;
+	uint32_t bytes = 0, child[2] = { 0, 0 };
+	int result = -1;
+
+	if (fat_load_dir(v, 0, &dir, &bytes) != 0) return -1;
+	result = fat_scan_dir(v, dir, bytes, name, clus, size, child);
+	kfree_data(dir, bytes);
+	if (result == 0) return 0;
+	for (unsigned i = 0; i < 2 && child[i] != 0; i++) {
+		if (fat_load_dir(v, child[i], &dir, &bytes) != 0) continue;
+		result = fat_scan_dir(v, dir, bytes, name, clus, size, NULL);
+		kfree_data(dir, bytes);
+		if (result == 0) break;
+	}
 	return result;
 }
 
