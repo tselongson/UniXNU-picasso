@@ -2009,6 +2009,25 @@ step_header(void)
 	}
 	settle();
 	result = scm("to take the Wi-Fi DSP's header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_WPSS, kvtophys(page), 0, 0, &answer);
+	if ((result != 0 || answer != 0) && picasso_best_effort) {
+		/* IS_SUPPORTED cannot be trusted on this phone, so if the id the device tree
+		 * implies does not take the header, ask the others. INIT_IMAGE only hands
+		 * metadata over to TrustZone; nothing is started, so a wrong id costs nothing. */
+		for (uint32_t id = 0; id <= 0x1f && (result != 0 || answer != 0); id++) {
+			uint64_t other = ~0ull;
+			int32_t tried;
+
+			if (id == PAS_WPSS) continue;
+			tried = scm("to take the Wi-Fi DSP's header under another id", SCM_PAS_INIT_IMAGE,
+			    SCM_VALUE_AND_BUFFER, id, kvtophys(page), 0, 0, &other);
+			if (tried == 0 && other == 0) {
+				printf("wifi: %u: PAS ID %u TAKES THE HEADER, not %u\n", step, id, PAS_WPSS);
+				PAS_WPSS = id;
+				result = 0;
+				answer = 0;
+			}
+		}
+	}
 	if (result != 0 || answer != 0) {
 		printf("wifi: %u: TRUSTZONE DOES NOT TAKE THE HEADER: the call returns %d, its answer is %#llx\n", step, result, answer);
 		return false;
@@ -5660,7 +5679,10 @@ hakios_wifi_init(void)
 			for (uint32_t id = 0; id <= 15; id++) {
 				uint64_t supported = 0;
 
-				if (scm("which PAS ids it knows", SCM_CALL(2, 7), SCM_ONE_VALUE, id, 0, 0, 0, &supported) == 0 &&
+				/* Linux: QCOM_SCM_PAS_IS_SUPPORTED_CMD is 0x1f, not 0x07 as the
+				 * self-developed loader has it. With 0x07 every id looks unsupported,
+				 * which is exactly what both loaders have been seeing. */
+				if (scm("which PAS ids it knows", SCM_CALL(2, 0x1f), SCM_ONE_VALUE, id, 0, 0, 0, &supported) == 0 &&
 				    supported == 1) {
 					printf("wifi: PAS id %u is supported\n", id);
 					if (found == ~0u) found = id;
