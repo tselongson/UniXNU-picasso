@@ -201,6 +201,9 @@ picasso_ufs_find_part(const char *name, uint64_t *first, uint64_t *nblocks, uint
 			if (first) *first = g_parts[i].first;
 			if (nblocks) *nblocks = g_parts[i].last - g_parts[i].first + 1;
 			if (part_idx) *part_idx = (uint32_t)i;
+			printf("LX: UFS partition %s: LUN %u sector %u first %llu index %d\n",
+			    wanted, g_parts[i].lun, g_parts[i].sector,
+			    (unsigned long long)g_parts[i].first, i);
 			return 0;
 		}
 	}
@@ -310,6 +313,8 @@ fat_mount(struct fat_vol *v)
 	v->data_sec = v->root_sec + ((uint64_t)v->rootents * 32 + v->bps - 1) / v->bps;
 	v->fat_bytes = v->fatsz * v->bps;
 	if (v->fat_bytes > 4u * 1024u * 1024u) return -1;
+	printf("LX: firmware FAT geometry: bps=%u spc=%u reserved=%u fats=%u fatsz=%u rootents=%u rootclus=%u bits=%u\n",
+	    v->bps, v->spc, v->reserved, v->nfats, v->fatsz, v->rootents, v->rootclus, v->bits);
 	v->fat = kalloc_data(v->fat_bytes, Z_WAITOK | Z_ZERO);
 	if (v->fat == NULL) return -1;
 	if (picasso_ufs_read_part(v->part, v->fat_sec * v->bps, v->fat, v->fat_bytes) != 0) {
@@ -424,6 +429,7 @@ fat_scan_dir(const struct fat_vol *v, uint8_t *dir, uint32_t dir_bytes, const ch
     uint32_t *clus, uint32_t *size, uint32_t child[2])
 {
 	char pending[128] = "";
+	unsigned shown = 0;
 
 	for (uint32_t off = 0; off + 32 <= dir_bytes; off += 32) {
 		const uint8_t *entry = dir + off;
@@ -448,6 +454,7 @@ fat_scan_dir(const struct fat_vol *v, uint8_t *dir, uint32_t dir_bytes, const ch
 		pending[0] = 0;
 		entry_clus = le16(entry + 26);
 		if (v->bits == 32) entry_clus |= (uint32_t)le16(entry + 20) << 16;
+		if (shown++ < 12) printf("LX: FAT entry '%s' attr=%x clus=%u\n", effective, attr, entry_clus);
 		if ((attr & 0x10) != 0) {
 			if (child != NULL && name_equal(effective, "image")) child[0] = entry_clus;
 			if (child != NULL && name_equal(effective, "fw")) child[1] = entry_clus;
@@ -469,7 +476,9 @@ fat_lookup(const struct fat_vol *v, const char *name, uint32_t *clus, uint32_t *
 	uint32_t bytes = 0, child[2] = { 0, 0 };
 	int result = -1;
 
-	if (fat_load_dir(v, 0, &dir, &bytes) != 0) return -1;
+	/* FAT16 has a fixed root area (clus 0); FAT32 roots are a cluster chain. */
+	if (fat_load_dir(v, v->rootents != 0 ? 0 : v->rootclus, &dir, &bytes) != 0) return -1;
+	printf("LX: firmware FAT root: %u bytes, looking for %s\n", bytes, name);
 	result = fat_scan_dir(v, dir, bytes, name, clus, size, child);
 	kfree_data(dir, bytes);
 	if (result == 0) return 0;
