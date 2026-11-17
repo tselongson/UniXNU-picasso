@@ -184,6 +184,18 @@ scan_parts(void)
 		delay_for_interval(1000, NSEC_PER_MSEC);
 	}
 	printf("LX: UFS GPT scan found %d partitions\n", g_part_count);
+	{
+		static bool dumped;
+
+		if (!dumped) {
+			dumped = true;
+			for (int i = 0; i < g_part_count; i++) {
+				printf("LX: GPT[%d] %s lun=%u first=%llu MiB=%llu\n", i, g_parts[i].name,
+				    g_parts[i].lun, (unsigned long long)g_parts[i].first,
+				    (unsigned long long)((g_parts[i].last - g_parts[i].first + 1) * g_parts[i].sector >> 20));
+			}
+		}
+	}
 }
 
 int
@@ -634,6 +646,8 @@ proven_lookup_in(struct fat_vol *v, uint32_t dir_clus, const char *name, uint32_
 
 	if (dir == NULL) return ENOMEM;
 	err = proven_fat_dir_read(v, dir_clus, dir, 128 * 1024, &used);
+	printf("LX: proven FAT dir=%u used=%u first=%02x %02x %02x %02x\n", dir_clus, used,
+	    dir[0], dir[1], dir[2], dir[3]);
 	proven_name83(name, name83);
 	lfn[0] = 0;
 	for (uint32_t i = 0; !err && i + 32 <= used; i += 32) {
