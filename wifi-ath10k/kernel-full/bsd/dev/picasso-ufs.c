@@ -517,6 +517,53 @@ fat_lookup(const struct fat_vol *v, const char *name, uint32_t *clus, uint32_t *
 	return result;
 }
 
+/* The root directory on this board's modem partition is empty, so directory
+ * traversal never reaches the firmware. Directory entries live somewhere in
+ * the first megabytes; find the UTF-16 LFN for the requested name with 4 KiB
+ * reads (the large multi-block read was what faulted) and take the short entry
+ * that follows it. */
+static int
+raw_find_file(const char *name, uint32_t *clus, uint32_t *size)
+{
+	static uint8_t block[4096];
+	uint8_t pattern[64];
+	size_t plen = 0;
+	uint64_t total, limit;
+	unsigned hits = 0;
+
+	for (const char *p = name; *p != 0 && plen + 1 < sizeof(pattern); p++) {
+		pattern[plen++] = (uint8_t)*p;
+		pattern[plen++] = 0;
+	}
+	if (plen == 0) return -1;
+	const struct gpt_part *part = &g_parts[g_fat.part];
+	total = (part->last - part->first + 1) * (uint64_t)part->sector;
+	limit = total < 8u * 1024u * 1024u ? total : 8u * 1024u * 1024u;
+	for (uint64_t off = 0; off + 4096 <= limit; off += 4096) {
+		if (picasso_ufs_read_part(g_fat.part, off, block, 4096) != 0) continue;
+		for (unsigned at = 1; at + plen + 32 <= 4096; at++) {
+			uint32_t entry_start, short_at, entry_clus;
+
+			if (memcmp(block + at, pattern, plen) != 0) continue;
+			entry_start = (at - 1) & ~31u;
+			if (block[entry_start + 11] != 0x0f) continue;
+			short_at = entry_start + 32;
+			if (short_at + 32 > 4096 || block[short_at + 11] == 0x0f) continue;
+			entry_clus = le16(block + short_at + 26);
+			if (g_fat.bits == 32) entry_clus |= (uint32_t)le16(block + short_at + 20) << 16;
+			if (entry_clus < 2) continue;
+			*clus = entry_clus;
+			*size = le32(block + short_at + 28);
+			printf("LX: firmware FAT raw: %s at +%#llx clus %u size %u\n",
+			    name, (unsigned long long)off + at, entry_clus, *size);
+			return 0;
+		}
+		if (++hits > 2048) break;
+	}
+	printf("LX: firmware FAT raw: %s not in the first 8 MiB\n", name);
+	return -1;
+}
+
 const uint8_t *
 picasso_fw_get(const char *name, uint64_t *size)
 {
@@ -533,8 +580,13 @@ picasso_fw_get(const char *name, uint64_t *size)
 		}
 		g_fat_ready = true;
 	}
-	if (fat_lookup(&g_fat, name, &clus, &bytes) != 0 || bytes == 0 || bytes > 64u * 1024u * 1024u) {
+	if (raw_find_file(name, &clus, &bytes) != 0 &&
+	    (fat_lookup(&g_fat, name, &clus, &bytes) != 0 || bytes == 0 || bytes > 64u * 1024u * 1024u)) {
 		printf("LX: firmware FAT: %s not found\n", name);
+		return NULL;
+	}
+	if (bytes == 0 || bytes > 64u * 1024u * 1024u) {
+		printf("LX: firmware FAT: %s has invalid size %u\n", name, bytes);
 		return NULL;
 	}
 	data = kalloc_data(bytes, Z_WAITOK | Z_ZERO);
