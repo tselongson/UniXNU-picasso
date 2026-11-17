@@ -1121,11 +1121,16 @@ mpss_proxy(void)
 				}
 			}
 		}
-		if (!found) { printf("wifi: MPSS has no TURBO position for %s\n", names[i]); return false; }
-		printf("wifi: MPSS proxy %s: address %#x, vote %u\n", names[i], addresses[i], values[i]);
+		if (!found) { tell("wifi: MPSS has no TURBO position for %s\n", names[i]); return false; }
+		tell("wifi: MPSS proxy %s: address %#x, vote %u\n", names[i], addresses[i], values[i]);
 	}
 	/* shortcut: keep shared CX/XO proxy votes until reboot; replace with aggregated votes for normal Wi-Fi use. */
-	return wifi_rpmh_write(addresses, values, 3);
+	{
+		bool written = wifi_rpmh_write(addresses, values, 3);
+
+		tell("wifi: MPSS proxy votes %s\n", written ? "written" : "NOT written");
+		return written;
+	}
 }
 
 /* ---- step 4: the supplies themselves ------------------------------------------------------------------- */
@@ -2408,8 +2413,11 @@ step_start(void)
 		}
 		printf("wifi: %u: the always-on processor did not take the load state; going on\n", step);
 	}
+	tell("wifi: %u: about to ask TrustZone to authenticate the image and let the DSP out of reset; if this is the last line, "
+	    "that call did not return\n", step);
 	result = scm("to authenticate the Wi-Fi DSP's image and start it", SCM_PAS_AUTH_AND_RESET, SCM_ONE_VALUE, PAS_WPSS, 0, 0, 0,
 	    &answer);
+	tell("wifi: %u: the call to start the DSP returned %d, its answer %#llx\n", step, result, answer);
 	doorbell.since = started = now_us();
 	image_written = false;                  /* (whatever the answer: the memory is not ours to look at now) */
 	if (result != 0 || answer != 0) {
@@ -5735,7 +5743,11 @@ hakios_wifi_init(void)
 			}
 			whole = whole_runs = true;
 			last_step = 15;
-			quiet = !(PE_parse_boot_argn("wifi_loud", &back, sizeof(back)) && back);
+			/* Said aloud by default: a start that hangs leaves no ring buffer behind to read
+			 * afterwards, and the only way to see where it stopped is to have said it as it
+			 * went. wifi_quiet=1 keeps it, wifi_loud=1 is still accepted. */
+			quiet = (PE_parse_boot_argn("wifi_quiet", &back, sizeof(back)) && back) &&
+			    !(PE_parse_boot_argn("wifi_loud", &back, sizeof(back)) && back);
 			pause_ms = watch_seconds = 0;
 			new_from = STEPS + 1;
 			hakios_lx_net_early();
@@ -5785,7 +5797,11 @@ hakios_wifi_init(void)
 			return;
 		}
 		whole = whole_runs = true;
-		quiet = !(PE_parse_boot_argn("wifi_loud", &back, sizeof(back)) && back);
+		/* Said aloud by default: a start that hangs leaves no ring buffer behind to read
+			 * afterwards, and the only way to see where it stopped is to have said it as it
+			 * went. wifi_quiet=1 keeps it, wifi_loud=1 is still accepted. */
+			quiet = (PE_parse_boot_argn("wifi_quiet", &back, sizeof(back)) && back) &&
+			    !(PE_parse_boot_argn("wifi_loud", &back, sizeof(back)) && back);
 		hakios_lx_net_early();
 		pause_ms = watch_seconds = 0;
 		new_from = STEPS + 1;
