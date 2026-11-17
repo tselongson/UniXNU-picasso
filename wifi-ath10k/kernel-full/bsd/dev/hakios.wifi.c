@@ -1600,6 +1600,13 @@ step_mailbox_open(void)
 	lck_mtx_lock(&hakios_aop_mailbox_lock);
 	open = step_mailbox_open_locked();
 	lck_mtx_unlock(&hakios_aop_mailbox_lock);
+	if (!open && picasso_best_effort) {
+		/* On this phone the always-on processor does not answer its link (the words read
+		 * 0xffff, which is what a mailbox nobody has set up looks like). The mailbox carries
+		 * the modem's load-state note, not the image: TrustZone takes the image without it. */
+		printf("wifi: %u: THE ALWAYS-ON PROCESSOR'S MAILBOX DID NOT OPEN; going on without it\n", step);
+		return true;
+	}
 	return open;
 }
 
@@ -2270,7 +2277,12 @@ step_our_item(void)
 	announce("see that our two marks in GLINK's descriptor are at zero before the DSP starts");
 	if (hakios_is_raphael() && !glink_prepare()) return false;
 	glink_reset();
-	if (hakios_is_raphael() && last_step >= 14 && hakios_wifi_option("wifi_ask") && !mpss_storage_prepare()) return false;
+	if (hakios_is_raphael() && last_step >= 14 && hakios_wifi_option("wifi_ask") && !mpss_storage_prepare()) {
+		/* The modem's EFS files (nv-modemst1, 0-rmtfs-ram) are not in this phone's modem FAT.
+		 * WLFW does not need rmtfs, so a missing one is said and gone on from, not fatal. */
+		if (!picasso_best_effort) return false;
+		printf("wifi: %u: rmtfs is not prepared; going on without the modem's file system\n", step);
+	}
 	return true;
 }
 
@@ -4732,7 +4744,10 @@ step_qrtr(void)
 	PE_parse_boot_argn("wifi_listen", &seconds, sizeof(seconds));
 	if (hakios_is_raphael() && hakios_wifi_option("wifi_diag")) mpss_microdump("before WLAN");
 	if (hakios_is_raphael() && hakios_wifi_option("wifi_ask") && hakios_wifi_option("wifi_diag") && !mpss_diag_start()) return false;
-	if (hakios_is_raphael() && hakios_wifi_option("wifi_ask") && (!mpss_storage_start() || !tftp_start())) return false;
+	if (hakios_is_raphael() && hakios_wifi_option("wifi_ask") && (!mpss_storage_start() || !tftp_start())) {
+		if (!picasso_best_effort) return false;
+		printf("wifi: %u: rmtfs and tftp did not start; going on without them\n", step);
+	}
 	if (hakios_is_raphael() && hakios_wifi_option("wifi_ask")) { pd_mapper_start(); if (hakios_wifi_option("wifi_pdr")) wlan_pdr_start(); }
 	announce("listen for QRTR on the channel: the DSP's hello is answered with ours, its services are written down; and a "
 	    "port of ours looks the Wi-Fi firmware's service up, as the radio's driver will");
@@ -5621,7 +5636,6 @@ hakios_wifi_init(void)
 		/* rmtfs (the modem's view of the file system) wants nv-modemst1 and 0-rmtfs-ram,
 		 * which this phone keeps outside the modem FAT; WLFW does not need it, so the ask
 		 * that would fail for their absence is off. wifi_ask=1 turns it back on. */
-		picasso_no_storage = true;
 		picasso_best_effort = true;
 		dsp_image_name = "modem";
 		hakios_qmi_set_transport(&qrtr_ops);
