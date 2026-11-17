@@ -1408,7 +1408,7 @@ step_firmware(void)
 
 	announce("find the DSP's image in the small image that came with the kernel, and check it against its own header");
 	image.segments = 0;
-	if (image_base != WPSS_MEMORY) {
+	if (WPSS_MEMORY == 0x8c000000u) {
 		/* What the boot chain left behind: the reserved region the image goes into, and the
 		 * window its segments are linked at. Both are only read here; a word of either tells
 		 * whether an image is already there. */
@@ -5599,13 +5599,14 @@ hakios_wifi_init(void)
 		aoss.size = 0x1000;
 		SMEM_WPSS = 1;
 		ITEM_SMP2P_OURS = 428; ITEM_SMP2P_THEIRS = 435; ITEM_CRASH_REASON = 421;
-		/* The image's segments are linked at 0xc0000000 and that whole 1 GB is the modem's:
-		 * board.toml has dram_size 0x180000000 and owned_memory_size 0x140000000, so the
-		 * kernel never touches the top gigabyte, and the dt lists it as memory@c0000000.
-		 * Writing the segments where the image says they are is what the split Android
-		 * loader does; modem_wlan_region@8c000000 (248 MB) is the shared region beside it. */
-		PAS_WPSS = 4; WPSS_MEMORY = 0xc0000000u; WPSS_MEMORY_SIZE = 0x40000000u;
-		image_base = 0xc0000000ull;
+		/* This phone's modem.mdt has every loadable segment between 0x8c000000 and
+		 * 0x9b800000 (its last one ends exactly at 0x9b800000), which is the reserved region
+		 * dt calls modem_wlan_region@8c000000, 248 MB. So the image is written where its own
+		 * addresses say, inside that region: image_base is WPSS_MEMORY itself. (The
+		 * modem-extract copy in work/firmware is from another build and is linked at
+		 * 0xc0000000; do not use it to pick these.) */
+		PAS_WPSS = 4; WPSS_MEMORY = 0x8c000000u; WPSS_MEMORY_SIZE = 0x0f800000u;
+		image_base = 0x8c000000ull;
 		/* rmtfs (the modem's view of the file system) wants nv-modemst1 and 0-rmtfs-ram,
 		 * which this phone keeps outside the modem FAT; WLFW does not need it, so the ask
 		 * that would fail for their absence is off. wifi_ask=1 turns it back on. */
