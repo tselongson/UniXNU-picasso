@@ -1994,19 +1994,40 @@ step_header(void)
 		    "there is nothing to shut down\n", step);
 	}
 
-	announce("hand the image's header to TrustZone to check its signature, in a page of ours");
+	announce("hand the image's header to TrustZone to check its signature, in memory of ours that is in one piece");
 	/* in memory of ours, page-aligned and in one piece, not touched again and never freed (see hakios.adreno.c).
 	 * picasso's split modem.mdt is 9420 bytes (52 of ELF header, 1120 of program headers, 8248 of hashes),
-	 * so the copy takes three pages, not one. */
+	 * so the copy takes three pages, not one -- and TrustZone reads them as one run of physical memory:
+	 * kmem_alloc's three pages are only contiguous in the kernel's map, so the hashes that follow the
+	 * header were garbage by the time the monitor checked them (the self-developed loader allocates
+	 * with kmem_alloc_contig for exactly this reason). */
 	header_pages = round_page(image.header_size);
-	if (kmem_alloc(kernel_map, &page, header_pages, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+	if (kmem_alloc_contig(kernel_map, &page, header_pages, PAGE_MASK, 0, 0,
+	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 		printf("wifi: %u: no memory\n", step);
 		return false;
 	}
 	memcpy((void *)page, image.header, image.header_size);
+	{
+		uint64_t first = kvtophys(page), at = first;
+
+		for (vm_offset_t p = page; p < page + header_pages; p += PAGE_SIZE) {
+			uint64_t here = kvtophys(p);
+
+			if (here != at) {
+				printf("wifi: %u: the header is not in one piece: page at %#llx, the one before it ends at %#llx\n", step,
+				    here, at);
+			}
+			at = here + PAGE_SIZE;
+		}
+		printf("wifi: %u: the header is %llu bytes at %#llx, %llu page(s)\n", step, image.header_size, first,
+		    (uint64_t)(header_pages / PAGE_SIZE));
+	}
 	for (vm_offset_t line = page; line < page + header_pages; line += 64) {
 		__asm__ volatile ("dc civac, %0" : : "r" (line));       /* TrustZone reads memory, not this processor's cache */
 	}
+	__asm__ volatile ("dsb sy" : : : "memory");                     /* ...and only once the cleaning is done */
+	__asm__ volatile ("isb" : : : "memory");
 	settle();
 	result = scm("to take the Wi-Fi DSP's header", SCM_PAS_INIT_IMAGE, SCM_VALUE_AND_BUFFER, PAS_WPSS, kvtophys(page), 0, 0, &answer);
 	if ((result != 0 || answer != 0) && picasso_best_effort) {
