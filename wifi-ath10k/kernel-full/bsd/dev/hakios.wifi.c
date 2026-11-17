@@ -5453,7 +5453,7 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 	 * 0x05500000, 0x1e400000 and 0xc0000000.. -- reloading it here cannot work, and the
 	 * shutdown it would do first takes the modem away from the system. So go straight to GLINK,
 	 * QRTR and the WLFW exchange. wifi_modem_load=1 keeps raphael's own sequence for comparison. */
-	static const uint8_t needed_running[] = { 12, 13, 14, 15 };
+	static const uint8_t needed_running[] = { 10, 12, 13, 14, 15 };
 	const uint8_t *list = needed;
 	unsigned count = sizeof(needed);
 	uint64_t began = now_us();
@@ -5469,17 +5469,21 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 		uint32_t load = 0;
 
 		if (!(PE_parse_boot_argn("wifi_modem_load", &load, sizeof(load)) && load)) {
-			if (!glink_prepare()) {
-				tell("wifi: the GLINK items are not in shared memory and could not be made\n");
-				whole_runs = false;
-				thread_terminate(current_thread());
+			struct smp2p words;
+
+			/* Whether the modem has run since the phone was started: its SMP2P item is written
+			 * by the modem itself, so its presence is the proof. */
+			if (dsp_words(&words)) {
+				show_words("the modem's SMP2P item says (so it has run since the phone was started)", &words);
+			} else {
+				printf("wifi: the modem's SMP2P item %u is NOT there: it may not be running\n", ITEM_SMP2P_THEIRS);
 			}
 			list = needed_running;
 			count = sizeof(needed_running);
 			dsp_started = true;             /* out of reset since the phone was started */
 			image_written = true;
 			modem_was_running = true;
-			tell("wifi: the modem was started by the boot firmware: GLINK, QRTR and WLFW only "
+			tell("wifi: the modem was started by the boot firmware: SMP2P, GLINK, QRTR and WLFW only "
 			    "(wifi_modem_load=1 would reload it through TrustZone)\n");
 		}
 	}
