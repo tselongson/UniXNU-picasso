@@ -1408,6 +1408,26 @@ step_firmware(void)
 
 	announce("find the DSP's image in the small image that came with the kernel, and check it against its own header");
 	image.segments = 0;
+	if (image_base != WPSS_MEMORY) {
+		/* What the boot chain left behind: the reserved region the image goes into, and the
+		 * window its segments are linked at. Both are only read here; a word of either tells
+		 * whether an image is already there. */
+		static const uint64_t probes[] = { 0x8c000000ull, 0xc0000000ull };
+
+		for (unsigned p = 0; p < sizeof(probes) / sizeof(probes[0]); p++) {
+			vm_offset_t map = ml_io_map_unmappable(probes[p], 4096, VM_WIMG_WCOMB);
+			const uint8_t *word;
+
+			if (map == 0) {
+				printf("wifi: %u: probe %#llx: cannot be mapped\n", step, probes[p]);
+				continue;
+			}
+			word = (const uint8_t *)map;
+			printf("wifi: %u: probe %#llx: %02x %02x %02x %02x %02x %02x %02x %02x\n", step, probes[p], word[0], word[1],
+			    word[2], word[3], word[4], word[5], word[6], word[7]);
+			ml_io_unmap(map, 4096);
+		}
+	}
 	snprintf(header_name, sizeof(header_name), "%s.mdt", dsp_image_name);
 	header = image_file(header_name, &size);
 	if (header == NULL) {
@@ -1938,6 +1958,7 @@ step_header(void)
 {
 	struct smp2p words;
 	vm_offset_t page = 0;
+	vm_size_t header_pages;
 	uint64_t answer = ~0ull;
 	uint32_t again = 0;
 	int32_t result;
@@ -1967,13 +1988,16 @@ step_header(void)
 	}
 
 	announce("hand the image's header to TrustZone to check its signature, in a page of ours");
-	/* in memory of ours, page-aligned and in one piece, not touched again and never freed (see hakios.adreno.c) */
-	if (kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+	/* in memory of ours, page-aligned and in one piece, not touched again and never freed (see hakios.adreno.c).
+	 * picasso's split modem.mdt is 9420 bytes (52 of ELF header, 1120 of program headers, 8248 of hashes),
+	 * so the copy takes three pages, not one. */
+	header_pages = round_page(image.header_size);
+	if (kmem_alloc(kernel_map, &page, header_pages, KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 		printf("wifi: %u: no memory\n", step);
 		return false;
 	}
 	memcpy((void *)page, image.header, image.header_size);
-	for (vm_offset_t line = page; line < page + PAGE_SIZE; line += 64) {
+	for (vm_offset_t line = page; line < page + header_pages; line += 64) {
 		__asm__ volatile ("dc civac, %0" : : "r" (line));       /* TrustZone reads memory, not this processor's cache */
 	}
 	settle();
