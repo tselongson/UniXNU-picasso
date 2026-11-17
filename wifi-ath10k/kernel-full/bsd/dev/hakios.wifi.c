@@ -340,6 +340,8 @@ settle(void)
 
 static bool whole;                      /* wifi=1: all of it, by itself (see the top of this file) */
 static volatile bool whole_runs;        /* ... and the thread that does it is at work */
+static bool picasso_no_storage;         /* no rmtfs files in this phone's modem FAT: do not ask for them */
+static bool picasso_best_effort;        /* the AOP mailbox and the proxy votes may not answer: go on without them */
 
 /*
  * A number given to the kernel when it was started; with wifi=1 the ones that stands for are as if
@@ -361,7 +363,7 @@ hakios_wifi_option(const char *name)
 	if (PE_parse_boot_argn(name, &value, sizeof(value))) {
 		return value;
 	}
-	if (whole && hakios_is_raphael() && !strcmp(name, "wifi_ask")) return 1;
+	if (whole && hakios_is_raphael() && !strcmp(name, "wifi_ask")) return picasso_no_storage ? 0 : 1;
 	for (unsigned i = 0; whole && i < sizeof(stands_for) / sizeof(stands_for[0]); i++) {
 		if (strcmp(name, stands_for[i].name) == 0) {
 			return stands_for[i].value;
@@ -1340,6 +1342,12 @@ step_pins(void)
 /* ---- step 6: the firmware ------------------------------------------------------------------------------ */
 
 static uint32_t PAS_WPSS = 6, WPSS_MEMORY = 0x9ae00000u, WPSS_MEMORY_SIZE = 0x01900000u;
+/* Where the image's own addresses begin. On raphael that is WPSS_MEMORY itself. On picasso the
+ * image is the split Android one: its segments are linked at 0xc0000000 and want the reserved
+ * region at 0x8c000000 (dt: modem_wlan_region@8c000000, 248 MB), so a segment at p goes to
+ * WPSS_MEMORY + (p - image_base). Segments outside that window belong to the modem's internal
+ * memories (0x05500000, 0x1e400000) and are left to it. */
+static uint64_t image_base = 0x9ae00000u;
 static const char *dsp_image_name = "wpss";
 
 extern dev_t mdevlookup(int devid);
@@ -1411,7 +1419,7 @@ step_firmware(void)
 		return false;
 	}
 	count = header[44] | header[45] << 8;
-	if (count < 3 || count > MAX_SEGMENTS || 52 + 32 * count > size || size > PAGE_SIZE) {
+	if (count < 3 || count > MAX_SEGMENTS || 52 + 32 * count > size || size > 64u * 1024u) {
 		printf("wifi: %u: fw/%s has an invalid segment table (%u segments, %llu bytes)\n", step, header_name, count, size);
 		return false;
 	}
@@ -1425,13 +1433,22 @@ step_firmware(void)
 		if (segment.type != 1 || MDT_HASH(segment.flags) || segment.memory_size == 0) {
 			continue;                       /* (not one that is loaded) */
 		}
-		if (segment.paddr < WPSS_MEMORY || segment.file_size > segment.memory_size ||
-		    (uint64_t)segment.paddr + segment.memory_size > (uint64_t)WPSS_MEMORY + WPSS_MEMORY_SIZE) {
-			printf("wifi: %u: segment %u (%#x, %#x bytes) is not within the DSP's memory\n", step, i, segment.paddr,
+		if (segment.file_size > segment.memory_size) {
+			printf("wifi: %u: segment %u: %#x bytes of file, %#x of memory\n", step, i, segment.file_size,
 			    segment.memory_size);
 			return false;
 		}
-		image.segment[image.segments].at = segment.paddr - WPSS_MEMORY;
+		if (segment.paddr < image_base ||
+		    (uint64_t)segment.paddr + segment.memory_size > image_base + WPSS_MEMORY_SIZE) {
+			/* The split Android image also carries segments for the modem's own internal
+			 * memories (0x05500000, 0x1e400000). They are not ours to write: the modem sets
+			 * them up itself once TrustZone lets it run. */
+			printf("wifi: %u: segment %u (%#x, %#x bytes) is outside %#llx..%#llx: left to the DSP\n", step, i,
+			    segment.paddr, segment.memory_size, (unsigned long long)image_base,
+			    (unsigned long long)(image_base + WPSS_MEMORY_SIZE));
+			continue;
+		}
+		image.segment[image.segments].at = (uint32_t)(segment.paddr - image_base);
 		image.segment[image.segments].file_size = segment.file_size;
 		image.segment[image.segments].memory_size = segment.memory_size;
 		image.segment[image.segments].file = NULL;
@@ -1455,7 +1472,7 @@ step_firmware(void)
 		highest = segment.paddr + segment.memory_size > highest ? segment.paddr + segment.memory_size : highest;
 		image.segments++;
 	}
-	if (image.segments == 0 || lowest != WPSS_MEMORY || 52 + 32 * count + (uint64_t)hashes != size) {
+	if (image.segments == 0 || 52 + 32 * count + (uint64_t)hashes != size) {
 		printf("wifi: %u: not what TrustZone takes: %u segments to load, the lowest at %#x; the header file has %llu bytes, "
 		    "the header %u and the hashes %u\n", step, image.segments, lowest, size, 52 + 32 * count, hashes);
 		image.segments = 0;
@@ -1463,9 +1480,15 @@ step_firmware(void)
 	}
 	image.header = header;
 	image.header_size = size;
-	image.size = ((highest + 0xfff) & ~0xfffu) - WPSS_MEMORY;
+	image.size = (uint32_t)(((highest + 0xfff) & ~0xfffu) - image_base);
+	if (image.size == 0 || image.size > WPSS_MEMORY_SIZE) {
+		printf("wifi: %u: the image wants %#x bytes, the reserved memory is %#x\n", step, image.size, WPSS_MEMORY_SIZE);
+		image.segments = 0;
+		return false;
+	}
 	printf("wifi: %u: the image is whole: a header of %llu bytes (%u of hashes), %u segments, %llu bytes of files, %#x bytes "
-	    "of the DSP's %#x from %#x\n", step, size, hashes, image.segments, files, image.size, WPSS_MEMORY_SIZE, WPSS_MEMORY);
+	    "of the DSP's %#x from %#x (its own addresses from %#llx)\n", step, size, hashes, image.segments, files, image.size,
+	    WPSS_MEMORY_SIZE, WPSS_MEMORY, (unsigned long long)image_base);
 	return true;
 }
 
@@ -1992,6 +2015,7 @@ step_image(void)
 {
 	volatile uint64_t *dsp_memory;
 	uint64_t written = 0, cleared = 0, wrong = 0;
+	vm_size_t mapped;
 
 	if (image.segments == 0) {
 		return false;
@@ -2001,7 +2025,8 @@ step_image(void)
 	 * (The memory is looked at only now: TrustZone has just said that it is not its own. And it
 	 * is mapped for as long as this takes: 25 MB do not fit where ml_io_map() puts what stays.)
 	 */
-	dsp_memory = (volatile uint64_t *)ml_io_map_unmappable(WPSS_MEMORY, WPSS_MEMORY_SIZE, VM_WIMG_WCOMB);
+	mapped = round_page(image.size);
+	dsp_memory = (volatile uint64_t *)ml_io_map_unmappable(WPSS_MEMORY, mapped, VM_WIMG_WCOMB);
 	if (dsp_memory == NULL) return false;
 	printf("wifi: %u: the memory begins %#llx, the image %#llx\n", step, dsp_memory[0], segment_word(0, 0));
 	for (unsigned s = 0; s < image.segments; s++) {
@@ -2009,7 +2034,7 @@ step_image(void)
 
 		if (image.segment[s].at & 7) {
 			printf("wifi: %u: a segment that does not begin at a multiple of eight bytes: not written\n", step);
-			ml_io_unmap((vm_offset_t)dsp_memory, WPSS_MEMORY_SIZE);
+			ml_io_unmap((vm_offset_t)dsp_memory, mapped);
 			return false;
 		}
 		printf("wifi: %u: about to write %#x bytes at %#x (%#x of them the file's)\n", step, image.segment[s].memory_size,
@@ -2042,7 +2067,7 @@ step_image(void)
 	printf("wifi: %u: %llu bytes written and %llu cleared; read back, %llu words of eight bytes differ\n", step, written, cleared,
 	    wrong);
 	settle();
-	ml_io_unmap((vm_offset_t)dsp_memory, WPSS_MEMORY_SIZE);
+	ml_io_unmap((vm_offset_t)dsp_memory, mapped);
 	image_written = wrong == 0;
 	return image_written;
 }
@@ -2273,11 +2298,19 @@ step_start(void)
 		put(&ipcc, "listened for", IPCC_ENABLE, IPCC_WPSS << 16 | IPCC_SMP2P);
 	}
 	bzero(&doorbell, sizeof(doorbell));
-	if (hakios_is_raphael() && !mpss_proxy()) return false;
+	if (hakios_is_raphael() && !mpss_proxy()) {
+		/* picasso's boot chain has already voted the modem's rails; the proxy vote is a
+		 * shortcut, not a condition for TrustZone to let the DSP out of reset. */
+		if (!picasso_best_effort) return false;
+		printf("wifi: %u: the proxy votes were not taken; going on without them\n", step);
+	}
 	lck_mtx_lock(&dsp_lock);
 	if (!dsp_load_state(true)) {
-		lck_mtx_unlock(&dsp_lock);
-		return false;
+		if (!picasso_best_effort) {
+			lck_mtx_unlock(&dsp_lock);
+			return false;
+		}
+		printf("wifi: %u: the always-on processor did not take the load state; going on\n", step);
 	}
 	result = scm("to authenticate the Wi-Fi DSP's image and start it", SCM_PAS_AUTH_AND_RESET, SCM_ONE_VALUE, PAS_WPSS, 0, 0, 0,
 	    &answer);
@@ -5466,25 +5499,26 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 		thread_terminate(current_thread());
 	}
 	if (hakios_is_raphael()) {
-		uint32_t load = 0;
+		uint32_t running = 0;
+		struct smp2p words;
 
-		if (!(PE_parse_boot_argn("wifi_modem_load", &load, sizeof(load)) && load)) {
-			struct smp2p words;
-
-			/* Whether the modem has run since the phone was started: its SMP2P item is written
-			 * by the modem itself, so its presence is the proof. */
-			if (dsp_words(&words)) {
-				show_words("the modem's SMP2P item says (so it has run since the phone was started)", &words);
-			} else {
-				printf("wifi: the modem's SMP2P item %u is NOT there: it may not be running\n", ITEM_SMP2P_THEIRS);
-			}
+		/* Whether the modem has run since the phone was started: its own SMP2P item is the
+		 * proof. On picasso it is not there, so the image below is the one it will run. */
+		if (dsp_words(&words)) {
+			show_words("the modem's SMP2P item says (so it has run since the phone was started)", &words);
+		} else {
+			printf("wifi: the modem's SMP2P item %u is not there: it has not run, so its image is loaded here\n",
+			    ITEM_SMP2P_THEIRS);
+		}
+		if (PE_parse_boot_argn("wifi_modem_running", &running, sizeof(running)) && running) {
+			/* For a phone whose boot chain did load and authenticate the modem: take it as
+			 * up and go straight to the exchange. */
 			list = needed_running;
 			count = sizeof(needed_running);
-			dsp_started = true;             /* out of reset since the phone was started */
+			dsp_started = true;
 			image_written = true;
 			modem_was_running = true;
-			tell("wifi: the modem was started by the boot firmware: SMP2P, GLINK, QRTR and WLFW only "
-			    "(wifi_modem_load=1 would reload it through TrustZone)\n");
+			tell("wifi: wifi_modem_running=1: the modem is taken as already up: SMP2P, GLINK, QRTR and WLFW only\n");
 		}
 	}
 	for (unsigned i = 0; i < count && failed == 0; i++) {
@@ -5541,7 +5575,13 @@ hakios_wifi_init(void)
 		aoss.size = 0x1000;
 		SMEM_WPSS = 1;
 		ITEM_SMP2P_OURS = 428; ITEM_SMP2P_THEIRS = 435; ITEM_CRASH_REASON = 421;
-		PAS_WPSS = 4; WPSS_MEMORY = 0x8e000000u; WPSS_MEMORY_SIZE = 0x09600000u;
+		PAS_WPSS = 4; WPSS_MEMORY = 0x8c000000u; WPSS_MEMORY_SIZE = 0x0f800000u;
+		image_base = 0xc0000000ull;
+		/* rmtfs (the modem's view of the file system) wants nv-modemst1 and 0-rmtfs-ram,
+		 * which this phone keeps outside the modem FAT; WLFW does not need it, so the ask
+		 * that would fail for their absence is off. wifi_ask=1 turns it back on. */
+		picasso_no_storage = true;
+		picasso_best_effort = true;
 		dsp_image_name = "modem";
 		hakios_qmi_set_transport(&qrtr_ops);
 		if (last_step == 0) {
