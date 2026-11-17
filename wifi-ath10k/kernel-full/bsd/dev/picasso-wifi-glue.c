@@ -17,7 +17,10 @@
  */
 #include <stdarg.h>
 #include <mach/mach_types.h>
+#include <kern/clock.h>
 #include <kern/kalloc.h>
+#include <kern/thread.h>
+#include <pexpert/pexpert.h>
 #include <sys/errno.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
@@ -65,12 +68,28 @@ int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size)
 /* More raphael-patch symbols referenced by the WiFi files. */
 void hakios_spmi_lock(void) { }
 void hakios_spmi_unlock(void) { }
-int hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst,
-                              uint64_t len, uint64_t *bytes)
+extern int picasso_ufs_find_part(const char *name, uint64_t *first, uint64_t *nblocks, uint32_t *part_idx);
+extern int picasso_ufs_read_part(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len);
+extern int picasso_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint64_t len, uint64_t *bytes);
+extern const uint8_t *picasso_fw_get(const char *name, uint64_t *size);
+
+int
+hakios_ufs_find_part(const char *name, uint64_t *first, uint64_t *nblocks, uint32_t *part_idx)
 {
-	(void)name; (void)offset; (void)dst; (void)len;
-	if (bytes) *bytes = 0;
-	return -1;
+	return picasso_ufs_find_part(name, first, nblocks, part_idx);
+}
+
+int
+hakios_ufs_read_part(uint32_t part, uint64_t offset, uint8_t *dst, uint64_t len)
+{
+	return picasso_ufs_read_part(part, offset, dst, len);
+}
+
+int
+hakios_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst,
+                          uint64_t len, uint64_t *bytes)
+{
+	return picasso_ufs_read_partition(name, offset, dst, len, bytes);
 }
 void hakios_virtio_net_init(void) { }  /* QEMU-only, not on picasso */
 
@@ -83,7 +102,38 @@ SYSCTL_NODE(_kern, OID_AUTO, hakios, CTLFLAG_RD, 0, "hakios");
  * raphael build it starts raphael's self-contained wifi=1 bring-up instead of
  * the self-developed stack. The display module also probes WiFi presence. */
 extern void hakios_wifi_init(void);
-void picasso_wlan_deferred_start(void) { hakios_wifi_init(); }
+
+/* bsd_init must not block on the WiFi bring-up: the CDC console and launchd
+ * start afterwards, and the self-developed stack learned this the hard way
+ * (a synchronous start left no serial port at all). Delay onto a kernel
+ * thread; wlan_delay_ms overrides the 150 s default for experiments. */
+static void
+picasso_wlan_boot(void *argument, wait_result_t result)
+{
+	uint32_t delay_ms = 150000;
+
+	(void)argument;
+	(void)result;
+	PE_parse_boot_argn("wlan_delay_ms", &delay_ms, sizeof(delay_ms));
+	if (delay_ms < 1000) delay_ms = 1000;
+	delay_for_interval(delay_ms, NSEC_PER_MSEC);
+	printf("LX: raphael WiFi deferred init starting after %u ms\n", delay_ms);
+	hakios_wifi_init();
+	printf("LX: raphael WiFi deferred init returned\n");
+	thread_terminate(current_thread());
+}
+
+void
+picasso_wlan_deferred_start(void)
+{
+	thread_t thread;
+
+	if (kernel_thread_start(picasso_wlan_boot, NULL, &thread) != KERN_SUCCESS) {
+		printf("LX: cannot start raphael WiFi deferred init thread\n");
+		return;
+	}
+	thread_deallocate(thread);
+}
 void native_wlan_probe(void) { }
 
 /* raphael's hakios.image.c reads firmware from an APFS payload RAM disk through
@@ -105,6 +155,19 @@ hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_o
 	(void)dir;
 	if (name == NULL || size == NULL) {
 		return NULL;
+	}
+	/* The Android modem FAT partition is where the working picasso stack has
+	 * always found bdwlan.bin / firmware-5.bin / wlanmdsp.mbn. Try it before
+	 * the root filesystem; the latter is only a fallback. */
+	{
+		const uint8_t *firmware = picasso_fw_get(name, size);
+
+		if (firmware != NULL) {
+			printf("LX: image_file %s: %llu bytes from modem FAT\n", name,
+			    (unsigned long long)*size);
+			if (disk_out != NULL) *disk_out = -1;
+			return firmware;
+		}
 	}
 	for (unsigned i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
 		vnode_t vnode = NULLVP;
@@ -203,38 +266,110 @@ hakios_cell_attach(void)
 }
 
 /* raphael's GICv3 driver lives in its patched XNU, not in the stock picasso
- * kernel. These stubs let LinuxKPI's irq layer link; picasso's WiFi path still
- * has to be checked on hardware for whether CE completions arrive. They are
- * deliberately loud so a missing interrupt is visible in the serial log. */
+ * kernel. Instead of dead stubs (which leave ath10k with no CE completions),
+ * emulate the SPI line with a 1 ms polling thread: the handler raphael gives
+ * us is lx_irq_arrived(), which only has to set a pending bit and wake the
+ * existing lx_irq_runs thread. This keeps the whole LinuxKPI IRQ path intact
+ * without touching picasso's live interrupt controller. */
+#define GIC_POLL_SLOTS 64
+struct gic_poll_slot {
+	uint32_t intid;
+	void   (*handler)(void *context, uint32_t intid);
+	void    *context;
+	volatile bool enabled;
+	uint64_t count;
+};
+static struct gic_poll_slot gic_poll_slots[GIC_POLL_SLOTS];
+static thread_t gic_poll_thread;
+
+static void
+gic_poll_runs(__unused void *argument, __unused wait_result_t result)
+{
+	for (;;) {
+		for (unsigned i = 0; i < GIC_POLL_SLOTS; i++) {
+			struct gic_poll_slot *slot = &gic_poll_slots[i];
+
+			if (slot->enabled && slot->handler != NULL) {
+				slot->count++;
+				slot->handler(slot->context, slot->intid);
+			}
+		}
+		delay_for_interval(1000, NSEC_PER_USEC);
+	}
+}
+
+static struct gic_poll_slot *
+gic_poll_find(uint32_t intid)
+{
+	for (unsigned i = 0; i < GIC_POLL_SLOTS; i++) {
+		if (gic_poll_slots[i].intid == intid) {
+			return &gic_poll_slots[i];
+		}
+	}
+	return NULL;
+}
+
 kern_return_t
 gic_v3_spi_attach(uint32_t intid, bool edge, void (*handler)(void *context, uint32_t intid), void *context)
 {
-	(void)edge; (void)handler; (void)context;
-	printf("LX: GIC SPI %u attach stubbed (no picasso interrupt handler)\n", intid);
+	struct gic_poll_slot *slot;
+
+	(void)edge;
+	if (handler == NULL) return KERN_INVALID_ARGUMENT;
+	if ((slot = gic_poll_find(intid)) == NULL) {
+		for (unsigned i = 0; i < GIC_POLL_SLOTS; i++) {
+			if (gic_poll_slots[i].intid == 0) {
+				slot = &gic_poll_slots[i];
+				break;
+			}
+		}
+	}
+	if (slot == NULL) return KERN_RESOURCE_SHORTAGE;
+	slot->intid = intid;
+	slot->handler = handler;
+	slot->context = context;
+	slot->count = 0;
+	slot->enabled = true;
+	if (gic_poll_thread == THREAD_NULL) {
+		if (kernel_thread_start(gic_poll_runs, NULL, &gic_poll_thread) != KERN_SUCCESS) {
+			gic_poll_thread = THREAD_NULL;
+			return KERN_FAILURE;
+		}
+		thread_set_thread_name(gic_poll_thread, "wifi-gic-poll");
+		thread_deallocate(gic_poll_thread);
+	}
+	printf("LX: GIC SPI %u attached to 1 ms poller\n", intid);
 	return KERN_SUCCESS;
 }
 
 void
 gic_v3_spi_mask(uint32_t intid)
 {
-	(void)intid;
+	struct gic_poll_slot *slot = gic_poll_find(intid);
+	if (slot != NULL) slot->enabled = false;
 }
 
 void
 gic_v3_spi_unmask(uint32_t intid)
 {
-	(void)intid;
+	struct gic_poll_slot *slot = gic_poll_find(intid);
+	if (slot != NULL) slot->enabled = true;
 }
 
 void
 gic_v3_spi_detach(uint32_t intid)
 {
-	(void)intid;
+	struct gic_poll_slot *slot = gic_poll_find(intid);
+	if (slot != NULL) {
+		slot->enabled = false;
+		slot->handler = NULL;
+		slot->intid = 0;
+	}
 }
 
 uint64_t
 gic_v3_spi_count(uint32_t intid)
 {
-	(void)intid;
-	return 0;
+	struct gic_poll_slot *slot = gic_poll_find(intid);
+	return slot != NULL ? slot->count : 0;
 }

@@ -84,7 +84,7 @@ def main():
     # by our picasso-wifi-glue.c below.
     names = ['hakios.wifi', 'hakios.mpss', 'hakios.qmi', 'hakios.net',
              'hakios.sta', 'hakios.apple80211', 'hakios.wlfw', 'hakios.lx',
-             'picasso-wifi-glue']
+             'picasso-ufs', 'picasso-wifi-glue']
     inc = ['-I', str(src / 'bsd'), '-I', str(src)]  # <sys/hakios.*.h> -> kernel-full/bsd/sys/
     objects = []
     for name in names:

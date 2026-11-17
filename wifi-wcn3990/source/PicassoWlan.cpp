@@ -6477,3 +6477,30 @@ picasso_modem_init(void)
 }
 
 
+
+/* Route 2 bridge: raphael's hakios_image_file() gets WCN3990 firmware from the
+ * same Android "modem" FAT partition the self-developed stack used. Only the
+ * filesystem reader is reused here; no self-developed WiFi stack is started. */
+extern "C" int
+picasso_fw_mount(void)
+{
+	static struct fat_vol volume;
+	uint64_t first = 0, nblocks = 0;
+	uint32_t lun = 0;
+
+	if (g_fat != NULL) return 0;
+	if (hakios_ufs_find_part("modem", &first, &nblocks, &lun) != 0) return -1;
+	return fat_mount(&volume, lun, first, nblocks);
+}
+
+extern "C" const uint8_t *
+picasso_fw_get(const char *name, uint64_t *size)
+{
+	struct fw_file *file;
+
+	if (name == NULL || size == NULL || picasso_fw_mount() != 0) return NULL;
+	file = fw_get(name);
+	if (file == NULL || file->data == NULL) return NULL;
+	*size = file->size;
+	return file->data;
+}
