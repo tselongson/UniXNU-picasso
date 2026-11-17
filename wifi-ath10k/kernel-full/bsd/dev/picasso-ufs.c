@@ -319,6 +319,9 @@ fat_mount(struct fat_vol *v)
 	if (v->fat_bytes > 4u * 1024u * 1024u) return -1;
 	printf("LX: firmware FAT geometry: bps=%u spc=%u reserved=%u fats=%u fatsz=%u rootents=%u rootclus=%u bits=%u\n",
 	    v->bps, v->spc, v->reserved, v->nfats, v->fatsz, v->rootents, v->rootclus, v->bits);
+	printf("LX: firmware FAT boot: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+	    boot[0], boot[1], boot[2], boot[3], boot[4], boot[5], boot[6], boot[7],
+	    boot[8], boot[9], boot[10], boot[11], boot[12], boot[13], boot[14], boot[15]);
 	v->fat = kalloc_data(v->fat_bytes, Z_WAITOK | Z_ZERO);
 	if (v->fat == NULL) return -1;
 	if (picasso_ufs_read_part(v->part, v->fat_sec * v->bps, v->fat, v->fat_bytes) != 0) {
@@ -484,8 +487,25 @@ fat_lookup(const struct fat_vol *v, const char *name, uint32_t *clus, uint32_t *
 	if (fat_load_dir(v, v->rootents != 0 ? 0 : v->rootclus, &dir, &bytes) != 0) return -1;
 	printf("LX: firmware FAT root: %u bytes, looking for %s\n", bytes, name);
 	result = fat_scan_dir(v, dir, bytes, name, clus, size, child);
-	if (result != 0 && dir[0] == 0)
+	if (result != 0 && dir[0] == 0) {
+		uint8_t *probe;
+		unsigned hits = 0;
+
 		printf("LX: firmware FAT root is empty on partition %u\n", v->part);
+		probe = kalloc_data(256 * 1024, Z_WAITOK | Z_ZERO);
+		if (probe != NULL && picasso_ufs_read_part(v->part, 0, probe, 256 * 1024) == 0) {
+			for (unsigned at = 0; at + 16 < 256 * 1024 && hits < 16; at++) {
+				if (memcmp(probe + at, "MODEM", 5) == 0 ||
+				    memcmp(probe + at, "BDWLAN", 6) == 0 ||
+				    memcmp(probe + at, "IMAGE", 5) == 0 ||
+				    memcmp(probe + at, "FIRMWARE", 8) == 0) {
+					printf("LX: firmware FAT probe +%#x: %.24s\n", at, probe + at);
+					hits++;
+				}
+			}
+		}
+		if (probe != NULL) kfree_data(probe, 256 * 1024);
+	}
 	kfree_data(dir, bytes);
 	if (result == 0) return 0;
 	for (unsigned i = 0; i < 2 && child[i] != 0; i++) {
