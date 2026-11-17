@@ -123,10 +123,25 @@ picasso_wlan_boot(void *argument, wait_result_t result)
 	thread_terminate(current_thread());
 }
 
+extern int hakios_lx_prepare(void);
+
 void
 picasso_wlan_deferred_start(void)
 {
 	thread_t thread;
+
+	/* raphael's ath10k shows the radio 44 MB of memory in one physical piece
+	 * (lx_pool_init -> kmem_alloc_contig). Raphael took it while its system
+	 * was still empty; picasso reaches this hook at bsd_init and then waits
+	 * 150 s, by which time SpringBoard owns the memory and a 44 MB
+	 * contiguous alloc fails ("NO MEMORY FOR THE RADIO in one piece").
+	 * Reserve the pool here, before anything else runs; the deferred thread
+	 * finds pool.memory already set and reuses it. */
+	if (hakios_lx_prepare() != 0) {
+		printf("LX: could not reserve the radio memory at bsd_init\n");
+	} else {
+		printf("LX: radio memory reserved at bsd_init\n");
+	}
 
 	if (kernel_thread_start(picasso_wlan_boot, NULL, &thread) != KERN_SUCCESS) {
 		printf("LX: cannot start raphael WiFi deferred init thread\n");
