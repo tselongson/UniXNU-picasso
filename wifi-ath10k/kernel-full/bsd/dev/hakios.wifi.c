@@ -2362,9 +2362,21 @@ step_start(void)
 	int32_t result;
 	bool have, spoke = false, handed_over = false;
 
-	if (!image_written || our_box == 0) {
-		printf("wifi: %u: the image is not in place, or the mailbox not open\n", step);
+	if (!image_written) {
+		printf("wifi: %u: the image is not in place\n", step);
 		return false;
+	}
+	if (our_box == 0) {
+		/* The mailbox belongs to the always-on processor, which this phone's boot chain has
+		 * not started: it is told of the load so that it keeps the DSP's supplies voted. On
+		 * picasso the votes are already the boot chain's, and TrustZone starts the DSP on
+		 * the call alone, so a missing AOP is not a reason to leave the radio down. */
+		if (!picasso_best_effort) {
+			printf("wifi: %u: the mailbox to the always-on processor is not open\n", step);
+			return false;
+		}
+		printf("wifi: %u: the mailbox to the always-on processor is not open; TrustZone is asked to start the DSP without the "
+		    "always-on processor being told of it\n", step);
 	}
 	PE_parse_boot_argn("wifi_wait", &wait_seconds, sizeof(wait_seconds));
 	bzero(&last, sizeof(last));
