@@ -11,11 +11,15 @@
 #include <kern/clock.h>
 #include <kern/kalloc.h>
 #include <pexpert/pexpert.h>
+#include <sys/errno.h>
 #include <sys/systm.h>
 
 extern int native_ufs_raw_read(uint32_t lun, uint64_t lba, uint32_t blocks, void *dst);
 extern uint32_t native_ufs_raw_max_blocks(void);
 extern void native_ufs_raw_diag(uint32_t *out);
+/* Same allocator the proven picasso firmware loader used: wired and contiguous. */
+extern void *IOMalloc(vm_size_t size);
+extern void IOFree(void *address, vm_size_t size);
 
 #define GPT_MAX_PARTS 256
 #define GPT_NAME_MAX  72
@@ -282,6 +286,7 @@ picasso_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint
 
 struct fat_vol {
 	uint32_t part, bps, spc, reserved, nfats, fatsz, rootents, rootclus, bits;
+	uint32_t root_secs, fat_ents;
 	uint64_t fat_sec, root_sec, data_sec;
 	uint8_t *fat;
 	uint32_t fat_bytes;
@@ -314,7 +319,9 @@ fat_mount(struct fat_vol *v)
 	    v->fatsz > 2048 || (total16 == 0 && total32 == 0)) return -1;
 	v->fat_sec = v->reserved;
 	v->root_sec = v->reserved + (uint64_t)v->nfats * v->fatsz;
-	v->data_sec = v->root_sec + ((uint64_t)v->rootents * 32 + v->bps - 1) / v->bps;
+	v->root_secs = ((uint32_t)v->rootents * 32 + v->bps - 1) / v->bps;
+	v->data_sec = v->root_sec + v->root_secs;
+	v->fat_ents = v->fatsz * v->bps / (v->rootclus != 0 ? 4 : 2);
 	v->fat_bytes = v->fatsz * v->bps;
 	if (v->fat_bytes > 4u * 1024u * 1024u) return -1;
 	printf("LX: firmware FAT geometry: bps=%u spc=%u reserved=%u fats=%u fatsz=%u rootents=%u rootclus=%u bits=%u\n",
@@ -322,10 +329,10 @@ fat_mount(struct fat_vol *v)
 	printf("LX: firmware FAT boot: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
 	    boot[0], boot[1], boot[2], boot[3], boot[4], boot[5], boot[6], boot[7],
 	    boot[8], boot[9], boot[10], boot[11], boot[12], boot[13], boot[14], boot[15]);
-	v->fat = kalloc_data(v->fat_bytes, Z_WAITOK | Z_ZERO);
+	v->fat = IOMalloc(v->fat_bytes);
 	if (v->fat == NULL) return -1;
 	if (picasso_ufs_read_part(v->part, v->fat_sec * v->bps, v->fat, v->fat_bytes) != 0) {
-		kfree_data(v->fat, v->fat_bytes);
+		IOFree(v->fat, v->fat_bytes);
 		v->fat = NULL;
 		return -1;
 	}
@@ -567,6 +574,127 @@ raw_find_file(const char *name, uint32_t *clus, uint32_t *size)
 	return -1;
 }
 
+/* The proven picasso firmware loader, copied from the working self-developed
+ * path: 128 KiB IOMalloc directory, 4 KiB partition reads, VFAT long names.
+ * This code ran on the phone; the earlier reimplementation is not used. */
+static int
+proven_fat_dir_read(struct fat_vol *v, uint32_t dir_clus, void *buf, uint32_t cap, uint32_t *used)
+{
+	int err;
+
+	*used = 0;
+	if (dir_clus == 0 && v->rootclus == 0) {
+		uint32_t n = v->root_secs * v->bps;
+		if (n > cap) n = cap;
+		err = picasso_ufs_read_part(v->part, (uint64_t)v->root_sec * v->bps, (uint8_t *)buf, n);
+		if (!err) *used = n;
+		return err;
+	}
+	if (dir_clus == 0) dir_clus = v->rootclus;
+	uint32_t per = v->spc * v->bps;
+	while (dir_clus >= 2 && dir_clus < v->fat_ents && *used < cap) {
+		uint64_t off = ((uint64_t)v->data_sec + (uint64_t)(dir_clus - 2) * v->spc) * v->bps;
+		uint32_t n = cap - *used;
+		if (n > per) n = per;
+		err = picasso_ufs_read_part(v->part, off, (uint8_t *)buf + *used, n);
+		if (err) return err;
+		*used += n;
+		dir_clus = fat_next(v, dir_clus);
+	}
+	return 0;
+}
+
+static void
+proven_name83(const char *name, char out[11])
+{
+	unsigned n = 0, i = 0;
+
+	memset(out, 0, 11);
+	while (name[n] != 0 && name[n] != '.' && n < 8) {
+		char c = name[n++];
+		out[i++] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+	}
+	i = 8;
+	if (name[n] == '.') n++;
+	while (name[n] != 0 && i < 11) {
+		char c = name[n++];
+		out[i++] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+	}
+}
+
+static int
+proven_lookup_in(struct fat_vol *v, uint32_t dir_clus, const char *name, uint32_t *clus, uint32_t *size)
+{
+	uint8_t *dir = IOMalloc(128 * 1024);
+	char lfn[260];
+	char name83[11];
+	uint32_t used = 0;
+	bool found = false;
+	int err;
+
+	if (dir == NULL) return ENOMEM;
+	err = proven_fat_dir_read(v, dir_clus, dir, 128 * 1024, &used);
+	proven_name83(name, name83);
+	lfn[0] = 0;
+	for (uint32_t i = 0; !err && i + 32 <= used; i += 32) {
+		const uint8_t *e = dir + i;
+
+		if (e[0] == 0) break;
+		if (e[0] == 0xe5) { lfn[0] = 0; continue; }
+		if (e[11] == 0x0f) {
+			char part[14];
+			unsigned k = 0;
+			static const uint8_t at[13] = { 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30 };
+			for (unsigned j = 0; j < 13; j++) {
+				uint16_t ch = (uint16_t)(e[at[j]] | e[at[j] + 1] << 8);
+				if (ch == 0 || ch == 0xffff) break;
+				part[k++] = (ch < 0x80) ? (char)ch : '?';
+			}
+			part[k] = 0;
+			size_t have = strlen(lfn), add = strlen(part);
+			if (have + add < sizeof(lfn)) {
+				memmove(lfn + add, lfn, have + 1);
+				memcpy(lfn, part, add);
+			}
+			continue;
+		}
+		if ((e[11] & 0x08) != 0) { lfn[0] = 0; continue; }
+		bool hit = (lfn[0] != 0 && name_equal(lfn, name));
+		if (!hit) {
+			char shortname[13];
+			unsigned c;
+			for (c = 0; c < 8 && e[c] != ' '; c++) shortname[c] = (char)e[c];
+			if (e[8] != ' ') {
+				shortname[c++] = '.';
+				for (unsigned j = 8; j < 11 && e[j] != ' '; j++) shortname[c++] = (char)e[j];
+			}
+			shortname[c] = 0;
+			hit = name_equal(shortname, name);
+		}
+		if (hit) {
+			*clus = (uint32_t)le16(e + 26) | ((uint32_t)le16(e + 20) << 16);
+			*size = le32(e + 28);
+			found = true;
+			break;
+		}
+		lfn[0] = 0;
+	}
+	IOFree(dir, 128 * 1024);
+	if (err) return err;
+	return found ? 0 : ENOENT;
+}
+
+static int
+proven_lookup(const char *name, uint32_t *clus, uint32_t *size)
+{
+	uint32_t image_clus = 0, image_size = 0;
+
+	if (proven_lookup_in(&g_fat, 0, "image", &image_clus, &image_size) == 0 && image_clus >= 2) {
+		if (proven_lookup_in(&g_fat, image_clus, name, clus, size) == 0) return 0;
+	}
+	return proven_lookup_in(&g_fat, 0, name, clus, size);
+}
+
 const uint8_t *
 picasso_fw_get(const char *name, uint64_t *size)
 {
@@ -583,8 +711,8 @@ picasso_fw_get(const char *name, uint64_t *size)
 		}
 		g_fat_ready = true;
 	}
-	if (raw_find_file(name, &clus, &bytes) != 0 &&
-	    (fat_lookup(&g_fat, name, &clus, &bytes) != 0 || bytes == 0 || bytes > 64u * 1024u * 1024u)) {
+	if (proven_lookup(name, &clus, &bytes) != 0 &&
+	    raw_find_file(name, &clus, &bytes) != 0) {
 		printf("LX: firmware FAT: %s not found\n", name);
 		return NULL;
 	}
