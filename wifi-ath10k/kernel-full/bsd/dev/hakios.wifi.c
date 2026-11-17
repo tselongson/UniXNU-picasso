@@ -5599,7 +5599,12 @@ hakios_wifi_init(void)
 		aoss.size = 0x1000;
 		SMEM_WPSS = 1;
 		ITEM_SMP2P_OURS = 428; ITEM_SMP2P_THEIRS = 435; ITEM_CRASH_REASON = 421;
-		PAS_WPSS = 4; WPSS_MEMORY = 0x8c000000u; WPSS_MEMORY_SIZE = 0x0f800000u;
+		/* The image's segments are linked at 0xc0000000 and that whole 1 GB is the modem's:
+		 * board.toml has dram_size 0x180000000 and owned_memory_size 0x140000000, so the
+		 * kernel never touches the top gigabyte, and the dt lists it as memory@c0000000.
+		 * Writing the segments where the image says they are is what the split Android
+		 * loader does; modem_wlan_region@8c000000 (248 MB) is the shared region beside it. */
+		PAS_WPSS = 4; WPSS_MEMORY = 0xc0000000u; WPSS_MEMORY_SIZE = 0x40000000u;
 		image_base = 0xc0000000ull;
 		/* rmtfs (the modem's view of the file system) wants nv-modemst1 and 0-rmtfs-ram,
 		 * which this phone keeps outside the modem FAT; WLFW does not need it, so the ask
