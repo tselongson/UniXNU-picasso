@@ -1439,7 +1439,7 @@ step_firmware(void)
 		return false;
 	}
 	count = header[44] | header[45] << 8;
-	if (count < 3 || count > MAX_SEGMENTS || 52 + 32 * count > size || size > 64u * 1024u) {
+	if (count < 3 || count > MAX_SEGMENTS || 52 + 32 * count > size || size > 1024u * 1024u) {
 		printf("wifi: %u: fw/%s has an invalid segment table (%u segments, %llu bytes)\n", step, header_name, count, size);
 		return false;
 	}
@@ -2201,8 +2201,11 @@ out:
 static bool
 step_our_item(void)
 {
-	static const char *const names[] = { OUR_ENTRY_STOP, OUR_ENTRY_RADIO };
-	uint32_t count = hakios_is_raphael() ? 1 : sizeof(names) / sizeof(names[0]);
+	/* The self-developed loader publishes "master-kernel" and "ipa" before it starts this
+	 * modem; raphael's does not give "ipa" at all. Keep both on picasso: an entry the modem
+	 * waits for and does not find keeps its "slave-kernel" from turning ready. */
+	static const char *const names[] = { OUR_ENTRY_STOP, "ipa", OUR_ENTRY_RADIO };
+	uint32_t count = hakios_is_raphael() ? 2 : sizeof(names) / sizeof(names[0]);
 	struct smem_partition header;
 	struct smp2p ours;
 	uint32_t cacheline = 0, size = 0, partition;
@@ -2341,8 +2344,16 @@ step_start(void)
 	doorbell.since = started = now_us();
 	image_written = false;                  /* (whatever the answer: the memory is not ours to look at now) */
 	if (result != 0 || answer != 0) {
+		uint64_t shut = 0;
+
 		printf("wifi: %u: TRUSTZONE DOES NOT START THE DSP: the call returns %d, its answer is %#llx\n", step, result, answer);
 		dsp_load_state(false);
+		/* What the self-developed loader does on every way out of a failed start: shut the
+		 * DSP down again, so that the next try begins from a known state and the memory is
+		 * not left owned by a peripheral that never ran. */
+		if (scm("to shut down what did not start", SCM_PAS_SHUTDOWN, SCM_ONE_VALUE, PAS_WPSS, 0, 0, 0, &shut) == 0) {
+			printf("wifi: %u: the DSP is shut down again after the refusal (answer %#llx)\n", step, shut);
+		}
 		lck_mtx_unlock(&dsp_lock);
 		return false;
 	}
@@ -5614,6 +5625,35 @@ hakios_wifi_init(void)
 		picasso_best_effort = true;
 		dsp_image_name = "modem";
 		hakios_qmi_set_transport(&qrtr_ops);
+		/* What the self-developed loader does before it asks for the image: check that secure
+		 * calls reach the monitor at all, then use the first PAS id TrustZone says it knows
+		 * rather than trusting the device tree's 4. AUTH_AND_RESET on an id it does not know
+		 * is refused, and that refusal is indistinguishable from a bad image in the log. */
+		{
+			uint64_t answer = 0;
+			uint32_t found = ~0u;
+
+			if (scm("whether secure calls reach the monitor", SCM_CALL(6, 1), SCM_ONE_VALUE, 0, 0, 0, 0, &answer) == 0) {
+				printf("wifi: the secure monitor answers: version %#llx\n", answer);
+			} else {
+				printf("wifi: THE SECURE MONITOR DOES NOT ANSWER: nothing below this line can work\n");
+			}
+			for (uint32_t id = 0; id <= 15; id++) {
+				uint64_t supported = 0;
+
+				if (scm("which PAS ids it knows", SCM_CALL(2, 7), SCM_ONE_VALUE, id, 0, 0, 0, &supported) == 0 &&
+				    supported == 1) {
+					printf("wifi: PAS id %u is supported\n", id);
+					if (found == ~0u) found = id;
+				}
+			}
+			if (found != ~0u && found != PAS_WPSS) {
+				printf("wifi: the modem is started as PAS id %u, not %u\n", found, PAS_WPSS);
+				PAS_WPSS = found;
+			} else if (found == ~0u) {
+				printf("wifi: no PAS id answered; trying %u as the device tree says\n", PAS_WPSS);
+			}
+		}
 		if (last_step == 0) {
 			if (!image_file("modem.mdt", &size) || !image_file("wlanmdsp.mbn", &size)) {
 				printf("wifi: raphael modem/WLAN firmware is missing from the RAM image\n");
