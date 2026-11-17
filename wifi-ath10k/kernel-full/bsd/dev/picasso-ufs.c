@@ -325,7 +325,10 @@ fat_mount(struct fat_vol *v)
 	v->fatsz = le16(boot + 22);
 	total32 = le32(boot + 32);
 	if (v->fatsz == 0) v->fatsz = le32(boot + 36);
-	v->rootclus = le32(boot + 44);
+	/* Offset 44 is FAT32's root cluster. On FAT16 (rootents != 0) those
+	 * bytes are boot code, which read as a bogus 1095639119 on this board
+	 * and made the fixed root area look like an empty cluster chain. */
+	v->rootclus = v->rootents == 0 ? le32(boot + 44) : 0;
 	v->bits = v->rootents == 0 ? 32 : 16;
 	if (v->bps < 512 || v->bps > 4096 || v->spc == 0 || v->fatsz == 0 ||
 	    v->fatsz > 2048 || (total16 == 0 && total32 == 0)) return -1;
