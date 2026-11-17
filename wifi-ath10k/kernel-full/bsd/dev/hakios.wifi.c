@@ -2073,26 +2073,31 @@ step_image(void)
 		snprintf(last_write, sizeof(last_write), "step %u wrote a segment of the image at %#x", step,
 		    WPSS_MEMORY + image.segment[s].at);
 		hold(true);
-		uint32_t whole = image.segment[s].memory_size & ~7u;
-		for (uint32_t i = 0; i < whole; i += 8) {
-			to[i / 8] = segment_word(s, i);
-		}
-		for (uint32_t i = whole; i < image.segment[s].memory_size; i++) {
-			((volatile uint8_t *)to)[i] = (uint8_t)segment_word(s, i);
+		/* 85 MB written eight bytes at a time through segment_word() took long enough to
+		 * risk the watchdog; the image is the file followed by zeroes, so say that once. */
+		{
+			uint8_t *dst = (uint8_t *)(uintptr_t)to;
+
+			if (image.segment[s].file_size != 0) {
+				memcpy(dst, image.segment[s].file, image.segment[s].file_size);
+			}
+			if (image.segment[s].memory_size > image.segment[s].file_size) {
+				bzero(dst + image.segment[s].file_size, image.segment[s].memory_size - image.segment[s].file_size);
+			}
 		}
 		written += image.segment[s].file_size;
 		cleared += image.segment[s].memory_size - image.segment[s].file_size;
 	}
 	settle();
 	for (unsigned s = 0; s < image.segments; s++) {
-		volatile uint64_t *from = dsp_memory + image.segment[s].at / 8;
+		const uint8_t *from = (const uint8_t *)(uintptr_t)(dsp_memory + image.segment[s].at / 8);
+		uint32_t at = 0;
 
-		uint32_t whole = image.segment[s].memory_size & ~7u;
-		for (uint32_t i = 0; i < whole; i += 8) {
-			wrong += from[i / 8] != segment_word(s, i);
+		for (; at < image.segment[s].file_size; at++) {
+			wrong += from[at] != image.segment[s].file[at];
 		}
-		for (uint32_t i = whole; i < image.segment[s].memory_size; i++) {
-			wrong += ((volatile uint8_t *)from)[i] != (uint8_t)segment_word(s, i);
+		for (; at < image.segment[s].memory_size; at++) {
+			wrong += from[at] != 0;
 		}
 	}
 	printf("wifi: %u: %llu bytes written and %llu cleared; read back, %llu words of eight bytes differ\n", step, written, cleared,
