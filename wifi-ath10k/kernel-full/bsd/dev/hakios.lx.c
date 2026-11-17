@@ -446,7 +446,10 @@ int
 lx_os_irq_attach(unsigned vector, void (*function)(void *), void *argument)
 {
 	kern_return_t kr;
-	if (hakios_is_raphael()) lx_irq_first = 446; /* SM8150 SNOC CE SPIs 414..425, level high. */
+	/* The firmware tells us its first SPI in lx_os_irq_msi(); only fall back to the
+	 * hard-coded SM8150 one when nothing did. On picasso the WLFW capabilities carry the
+	 * real number, and overwriting it here was throwing that away. */
+	if (hakios_is_raphael() && lx_irq_first == 0) lx_irq_first = 446;
 
 	if (vector >= LX_VECTORS || lx_irq_first == 0 || function == NULL) {
 		return EINVAL;
