@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <kern/clock.h>
+#include <kern/kalloc.h>
 #include <pexpert/pexpert.h>
 #include <sys/systm.h>
 
@@ -265,4 +266,223 @@ picasso_ufs_read_partition(const char *name, uint64_t offset, uint8_t *dst, uint
 	if (offset >= total) return -1;
 	if (len > total - offset) len = total - offset;
 	return picasso_ufs_read_part(idx, offset, dst, len);
+}
+
+/* ---- FAT12/16 reader for the Android "modem" partition ------------------- */
+
+struct fat_vol {
+	uint32_t part, bps, spc, reserved, nfats, fatsz, rootents, rootclus, bits;
+	uint64_t fat_sec, root_sec, data_sec;
+	uint8_t *fat;
+	uint32_t fat_bytes;
+};
+static struct fat_vol g_fat;
+static bool g_fat_ready, g_fat_tried;
+
+static int
+fat_mount(struct fat_vol *v)
+{
+	uint8_t boot[512];
+	uint32_t total16, total32;
+
+	if (picasso_ufs_find_part("modem", NULL, NULL, &v->part) != 0) return -1;
+	if (picasso_ufs_read_part(v->part, 0, boot, sizeof(boot)) != 0) return -1;
+	if (boot[510] != 0x55 || boot[511] != 0xaa) return -1;
+	v->bps = le16(boot + 11);
+	v->spc = boot[13];
+	v->reserved = le16(boot + 14);
+	v->nfats = boot[16];
+	v->rootents = le16(boot + 17);
+	total16 = le16(boot + 19);
+	v->fatsz = le16(boot + 22);
+	total32 = le32(boot + 32);
+	if (v->fatsz == 0) v->fatsz = le32(boot + 36);
+	v->rootclus = le32(boot + 44);
+	v->bits = v->rootents == 0 ? 32 : 16;
+	if (v->bps < 512 || v->bps > 4096 || v->spc == 0 || v->fatsz == 0 ||
+	    v->fatsz > 2048 || (total16 == 0 && total32 == 0)) return -1;
+	v->fat_sec = v->reserved;
+	v->root_sec = v->reserved + (uint64_t)v->nfats * v->fatsz;
+	v->data_sec = v->root_sec + ((uint64_t)v->rootents * 32 + v->bps - 1) / v->bps;
+	v->fat_bytes = v->fatsz * v->bps;
+	if (v->fat_bytes > 4u * 1024u * 1024u) return -1;
+	v->fat = kalloc_data(v->fat_bytes, Z_WAITOK | Z_ZERO);
+	if (v->fat == NULL) return -1;
+	if (picasso_ufs_read_part(v->part, v->fat_sec * v->bps, v->fat, v->fat_bytes) != 0) {
+		kfree_data(v->fat, v->fat_bytes);
+		v->fat = NULL;
+		return -1;
+	}
+	return 0;
+}
+
+static uint32_t
+fat_next(const struct fat_vol *v, uint32_t clus)
+{
+	if (v->bits == 16) return (uint32_t)le16(v->fat + (size_t)clus * 2);
+	return le32(v->fat + (size_t)clus * 4) & 0x0fffffffu;
+}
+
+static int
+fat_read_chain(const struct fat_vol *v, uint32_t clus, uint8_t *dst, uint32_t len)
+{
+	uint32_t per = v->spc * v->bps;
+
+	for (unsigned guard = 0; guard < 65536 && clus >= 2 && len > 0; guard++) {
+		uint64_t byte = (v->data_sec + (uint64_t)(clus - 2) * v->spc) * v->bps;
+		uint32_t n = len < per ? len : per;
+
+		if (picasso_ufs_read_part(v->part, byte, dst, n) != 0) return -1;
+		dst += n;
+		len -= n;
+		clus = fat_next(v, clus);
+		if (clus >= 0x0ffffff0u || clus == 0) break;
+	}
+	return len == 0 ? 0 : -1;
+}
+
+static void
+short_name(const uint8_t entry[11], char out[16])
+{
+	unsigned n = 0, i;
+
+	for (i = 0; i < 8 && n < 12; i++) {
+		if (entry[i] == ' ') break;
+		out[n++] = (char)entry[i];
+	}
+	if (entry[8] != ' ' && n < 13) {
+		out[n++] = '.';
+		for (i = 8; i < 11 && n < 15; i++) {
+			if (entry[i] == ' ') break;
+			out[n++] = (char)entry[i];
+		}
+	}
+	out[n] = 0;
+}
+
+static int
+name_equal(const char *a, const char *b)
+{
+	for (; *a && *b; a++, b++) {
+		char ca = *a, cb = *b;
+		if (ca >= 'A' && ca <= 'Z') ca += 32;
+		if (cb >= 'A' && cb <= 'Z') cb += 32;
+		if (ca != cb) return 0;
+	}
+	return *a == 0 && *b == 0;
+}
+
+static void
+lfn_prepend(const uint8_t entry[32], char *buf, size_t max)
+{
+	static const unsigned at[] = { 1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28 };
+	char chunk[16];
+	unsigned n = 0;
+
+	for (unsigned i = 0; i < 14 && n < sizeof(chunk) - 1; i++) {
+		uint16_t c = le16(entry + at[i]);
+		if (c == 0 || c == 0xffff) break;
+		if (c < 0x80) chunk[n++] = (char)c;
+	}
+	chunk[n] = 0;
+	size_t used = strlen(buf), add = strlen(chunk);
+	if (used + add >= max) return;
+	memmove(buf + add, buf, used + 1);
+	memcpy(buf, chunk, add);
+}
+
+static int
+fat_lookup(const struct fat_vol *v, const char *name, uint32_t *clus, uint32_t *size)
+{
+	uint8_t *dir = NULL;
+	uint32_t dir_bytes = 0;
+	uint64_t dir_byte = 0;
+	char pending[128] = "";
+	int result = -1;
+
+	if (v->rootents != 0) {
+		dir_bytes = v->rootents * 32;
+		dir_byte = v->root_sec * v->bps;
+	} else {
+		uint32_t c = v->rootclus, clusters = 0;
+		while (c >= 2 && c < 0x0ffffff0u && clusters < 4096) {
+			clusters++;
+			c = fat_next(v, c);
+		}
+		if (clusters == 0) return -1;
+		dir_bytes = clusters * v->spc * v->bps;
+	}
+	if (dir_bytes == 0 || dir_bytes > 8u * 1024u * 1024u) return -1;
+	dir = kalloc_data(dir_bytes, Z_WAITOK | Z_ZERO);
+	if (dir == NULL) return -1;
+	if (v->rootents != 0) {
+		if (picasso_ufs_read_part(v->part, dir_byte, dir, dir_bytes) != 0) goto out;
+	} else if (fat_read_chain(v, v->rootclus, dir, dir_bytes) != 0) {
+		goto out;
+	}
+	for (uint32_t off = 0; off + 32 <= dir_bytes; off += 32) {
+		const uint8_t *entry = dir + off;
+		char effective[128];
+		uint32_t entry_clus;
+		uint8_t attr;
+
+		if (entry[0] == 0) break;
+		if (entry[0] == 0xe5) { pending[0] = 0; continue; }
+		attr = entry[11];
+		if (attr == 0x0f) {
+			if ((entry[0] & 0x40) != 0) pending[0] = 0;
+			lfn_prepend(entry, pending, sizeof(pending));
+			continue;
+		}
+		if ((attr & 0x08) != 0) { pending[0] = 0; continue; }
+		if (pending[0] != 0) {
+			strlcpy(effective, pending, sizeof(effective));
+		} else {
+			short_name(entry, effective);
+		}
+		pending[0] = 0;
+		entry_clus = le16(entry + 26);
+		if (v->bits == 32) entry_clus |= (uint32_t)le16(entry + 20) << 16;
+		if (name_equal(effective, name)) {
+			*clus = entry_clus;
+			*size = le32(entry + 28);
+			result = 0;
+			break;
+		}
+	}
+out:
+	kfree_data(dir, dir_bytes);
+	return result;
+}
+
+const uint8_t *
+picasso_fw_get(const char *name, uint64_t *size)
+{
+	uint32_t clus = 0, bytes = 0;
+	uint8_t *data;
+
+	if (name == NULL || size == NULL) return NULL;
+	if (!g_fat_ready) {
+		if (g_fat_tried) return NULL;
+		g_fat_tried = true;
+		if (fat_mount(&g_fat) != 0) {
+			printf("LX: firmware FAT: cannot mount modem partition\n");
+			return NULL;
+		}
+		g_fat_ready = true;
+	}
+	if (fat_lookup(&g_fat, name, &clus, &bytes) != 0 || bytes == 0 || bytes > 64u * 1024u * 1024u) {
+		printf("LX: firmware FAT: %s not found\n", name);
+		return NULL;
+	}
+	data = kalloc_data(bytes, Z_WAITOK | Z_ZERO);
+	if (data == NULL) return NULL;
+	if (fat_read_chain(&g_fat, clus, data, bytes) != 0) {
+		kfree_data(data, bytes);
+		printf("LX: firmware FAT: %s read failed\n", name);
+		return NULL;
+	}
+	*size = bytes;
+	printf("LX: firmware FAT: %s %u bytes\n", name, bytes);
+	return data;
 }
