@@ -122,6 +122,7 @@ scan_lun(uint32_t lun)
 	uint64_t entries_byte;
 	uint32_t entries_count, entry_size;
 
+	if (g_scan_talk) printf("LX: UFS GPT probing LUN %u\n", lun);
 	if (read4k(lun, 0, block) != 0) return;
 	if (memcmp(block + 512, "EFI PART", 8) == 0) {
 		memcpy(hdr, block + 512, sizeof(hdr));
@@ -166,7 +167,9 @@ scan_parts(void)
 	for (unsigned attempt = 0; attempt < 40 && g_part_count <= 0; attempt++) {
 		g_part_count = 0;
 		g_scan_talk = (attempt == 0);
-		for (uint32_t lun = 0; lun < 8; lun++) scan_lun(lun);
+		/* LUN 6/7 can block inside native_ufs_raw_read() on this board;
+		 * all 108 partitions (including modem) live in LUN 0..5. */
+		for (uint32_t lun = 0; lun < 6; lun++) scan_lun(lun);
 		if (g_part_count > 0) break;
 		if (attempt == 0) {
 			uint32_t diag[5] = { 0, 0, 0, 0, 0 };
