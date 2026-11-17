@@ -1824,6 +1824,9 @@ dsp_ask_to_stop(uint32_t bound_ms)
 static LCK_MTX_DECLARE(dsp_lock, &wifi_lock_group);     /* the DSP being started or stopped */
 static bool dsp_started;                /* TrustZone has let it out of reset, and has not shut it down since */
 static bool stopped_by_its_word;        /* the shutdown last asked for was of a DSP that had acknowledged a stop */
+/* On this phone the boot firmware loaded and authenticated the modem before any kernel ran, and
+ * the modem's WLFW service is what the radio needs. It is not ours: never shut it down. */
+static bool modem_was_running;
 static uint32_t dirty;
 
 /* One call, as Linux makes these: one that may be preempted. What TrustZone returns: 0 or an error of its own, and a word of answer. */
@@ -5330,7 +5333,7 @@ hakios_wifi_stop(void)
 	}
 	hakios_apple80211_summary();
 	lck_mtx_lock(&dsp_lock);
-	if (dsp_started && !dirty) {
+	if (dsp_started && !dirty && !modem_was_running) {
 		bool down = dsp_shutdown("the run is about to end");
 
 		if (whole) {
@@ -5353,7 +5356,7 @@ void
 hakios_wifi_quiesce(void)
 {
 	hakios_apple80211_summary();           /* (also when the run is ended from the phone: five fingers) */
-	if (!dsp_started || dirty) {
+	if (!dsp_started || dirty || modem_was_running) {
 		return;
 	}
 	leaving = true;
@@ -5374,6 +5377,8 @@ steps_over(uint32_t done)
 		printf("wifi: THE DSP IS LEFT RUNNING (wifi_dirty), as a kernel that died would leave it\n");
 	} else if (dsp_started && done == last_step && hakios_wifi_option("wifi_keep")) {
 		printf("wifi: THE DSP STAYS ON while the system runs (wifi_keep)%s\n", link_runs ? ", and the link with it" : "");
+	} else if (dsp_started && modem_was_running) {
+		printf("wifi: THE MODEM IS LEFT RUNNING: the boot firmware started it, and the system needs it\n");
 	} else if (dsp_started) {
 		dsp_shutdown("the steps are over");
 	}
@@ -5442,6 +5447,15 @@ static void
 whole_thread(__unused void *parameter, __unused wait_result_t result)
 {
 	static const uint8_t needed[] = { 1, 2, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+	/* The boot firmware has already loaded and authenticated the modem, and its WLFW service is
+	 * what the radio needs. Raphael's own PAS sequence wants its relinked modem.mdt, whose every
+	 * segment sits inside WPSS_MEMORY; this phone's is the split Android image, spread over
+	 * 0x05500000, 0x1e400000 and 0xc0000000.. -- reloading it here cannot work, and the
+	 * shutdown it would do first takes the modem away from the system. So go straight to GLINK,
+	 * QRTR and the WLFW exchange. wifi_modem_load=1 keeps raphael's own sequence for comparison. */
+	static const uint8_t needed_running[] = { 12, 13, 14, 15 };
+	const uint8_t *list = needed;
+	unsigned count = sizeof(needed);
 	uint64_t began = now_us();
 	uint32_t done = 0, failed = 0;
 
@@ -5451,8 +5465,26 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 		whole_runs = false;
 		thread_terminate(current_thread());
 	}
-	for (unsigned i = 0; i < sizeof(needed) && failed == 0; i++) {
-		step = needed[i];
+	if (hakios_is_raphael()) {
+		uint32_t load = 0;
+
+		if (!(PE_parse_boot_argn("wifi_modem_load", &load, sizeof(load)) && load)) {
+			if (!glink_prepare()) {
+				tell("wifi: the GLINK items are not in shared memory and could not be made\n");
+				whole_runs = false;
+				thread_terminate(current_thread());
+			}
+			list = needed_running;
+			count = sizeof(needed_running);
+			dsp_started = true;             /* out of reset since the phone was started */
+			image_written = true;
+			modem_was_running = true;
+			tell("wifi: the modem was started by the boot firmware: GLINK, QRTR and WLFW only "
+			    "(wifi_modem_load=1 would reload it through TrustZone)\n");
+		}
+	}
+	for (unsigned i = 0; i < count && failed == 0; i++) {
+		step = list[i];
 		if (hakios_is_raphael() && step < 6) continue;
 		if (step == 15) {
 			tell("wifi: the radio's DSP is up and linked, %llu ms in; now the driver\n", (now_us() - began) / 1000);
@@ -5463,7 +5495,7 @@ whole_thread(__unused void *parameter, __unused wait_result_t result)
 			failed = step;
 		}
 	}
-	last_step = needed[sizeof(needed) - 1];
+	last_step = list[count - 1];
 	if (failed == 0) {
 		tell("wifi: THE RADIO IS UP, %llu.%llu s after the kernel began on it\n", (now_us() - began) / 1000000,
 		    (now_us() - began) / 100000 % 10);
