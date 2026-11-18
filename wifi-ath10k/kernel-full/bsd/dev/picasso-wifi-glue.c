@@ -164,7 +164,9 @@ picasso_rmtfs_reserve(void)
 		hakios_rmtfs_physical = page != 0 ? ptoa_64(page) : 0;
 	}
 	if (hakios_rmtfs_physical == 0) {
-		printf("LX: the modem's file system memory has no physical address\n");
+		printf("LX: the modem's file system memory at %#llx has no physical address\n",
+		    (uint64_t)hakios_rmtfs_buffer);
+		hakios_rmtfs_buffer = 0;
 		return;
 	}
 	printf("LX: modem's file system memory: %u bytes at %#llx (physical %#llx)\n", HAKIOS_RMTFS_BYTES,

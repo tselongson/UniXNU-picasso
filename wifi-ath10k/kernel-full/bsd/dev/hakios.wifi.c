@@ -3837,6 +3837,7 @@ mpss_storage_prepare(void)
 	 * that, and this phone's has none. bsd_init takes it instead, when a 3 MiB run is still
 	 * easy to find. */
 	cached = (vm_offset_t)hakios_rmtfs_memory(&rmtfs.physical);
+	printf("wifi: RMTFS: the window bsd_init took: %#llx, physical %#llx\n", (uint64_t)cached, rmtfs.physical);
 	if (cached != 0 && rmtfs.physical != 0) {
 		/* Reserved with kmem_alloc_contig at bsd_init: in one physical piece by
 		 * construction. kvtophys() cannot confirm it -- that mapping is not in the
@@ -4860,7 +4861,10 @@ static bool
 step_qrtr(void)
 {
 	struct hakios_qrtr_port *port;
-	uint32_t ask = 0, seconds = 20, services = 0;
+	/* The loader that worked on this phone saw WLFW only 42 s after the modem started
+	 * (t=42186 ms in its log), so three seconds -- or twenty -- is not a wait, it is a
+	 * guess. Give the modem a minute and keep asking. */
+	uint32_t ask = 0, seconds = 60, services = 0;
 
 	if (!glink.open) {
 		return false;
