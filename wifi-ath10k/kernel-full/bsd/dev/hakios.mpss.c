@@ -3187,6 +3187,18 @@ qrtr_control(const struct qrtr_header *header, const struct qrtr_control *contro
 		error = qrtr_out_packet(QRTR_HELLO, QRTR_CONTROL, header->from_node, QRTR_CONTROL, &hello, sizeof(hello));
 		printf("mpss: qrtr: HELLO FROM NODE %u; ours to it: %s\n", header->from_node, error == 0 ? "SENT" : "NOT SENT");
 		qrtr_announce_all(header->from_node);    /* (the name service's part: what we offer) */
+		/*
+		 * The modem here does not broadcast WLFW (0x45): it answered only 0x42 and 0x2b, so the
+		 * driver had nothing to attach to and its start returned ENODEV. The loader that brought
+		 * Wi-Fi up on this phone asks the name service for the service instead of waiting for a
+		 * broadcast it will not send. NEW_LOOKUP of 0x45 makes the modem send NEW_SERVER back.
+		 */
+		{
+			struct qrtr_control ask = { .command = QRTR_NEW_LOOKUP, .words = { 0x45, 0x01, 0xffffffff, 0 } };
+			int sent = qrtr_out_packet(QRTR_NEW_LOOKUP, QRTR_CONTROL, header->from_node, QRTR_CONTROL, &ask, sizeof(ask));
+
+			printf("mpss: qrtr: asked the modem for WLFW (0x45): %s\n", sent == 0 ? "SENT" : "NOT SENT");
+		}
 		break;
 	case QRTR_NEW_SERVER:
 		lck_mtx_lock(&qrtr_lock);
