@@ -4632,15 +4632,23 @@ retry:
 	    icnss_call(board_port, 0x24, NULL, 0) && icnss_default_board() && icnss_board_data(board_port);
 	if (!supplied) { qrtr_close(board_port); return false; }
 	(void)icnss_mac_address(board_port);
-	uint64_t until = now_us() + 30000000;
+	uint64_t until = now_us() + 30000000, said_at = now_us();
 	while (!wlfw_ready && !wlfw_next_port && !raphael_wlan_crashed && now_us() < until) {
 		if (wlfw_rejuvenating) {
 			wlfw_rejuvenating = false;
 			if (!icnss_call(port, 0x3a, NULL, 0)) { qrtr_close(board_port); return false; }
 		}
+		if (now_us() - said_at >= 5000000) {
+			printf("wifi: ICNSS still waiting for the firmware's ready indication, %llu s of 30 (answer %u, next port %u)\n",
+			    (uint64_t)(now_us() - until + 30000000) / 1000000, wlfw_answer, wlfw_next_port);
+			said_at = now_us();
+		}
 		sleep_us(1000);
 	}
+	printf("wifi: ICNSS the wait for the ready indication is over: ready %u, next port %u, crashed %u\n", wlfw_ready,
+	    wlfw_next_port, raphael_wlan_crashed);
 	qrtr_close(board_port);
+	printf("wifi: ICNSS the board's port is closed; bootstrap %s\n", wlfw_ready ? "succeeded" : "did not finish");
 	if (!wlfw_ready && wlfw_next_port && !raphael_wlan_crashed) {
 		/* shortcut: one endpoint handoff per diagnostic run; continuous Wi-Fi needs driver lifecycle recovery. */
 		if (handoffs++ == 0) {
