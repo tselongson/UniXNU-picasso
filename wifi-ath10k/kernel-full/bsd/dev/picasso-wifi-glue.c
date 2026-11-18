@@ -149,8 +149,9 @@ picasso_rmtfs_reserve(void)
 	if (hakios_rmtfs_buffer != 0) {
 		return;
 	}
-	if (kmem_alloc_contig(kernel_map, &hakios_rmtfs_buffer, HAKIOS_RMTFS_BYTES, PAGE_MASK, 0,
-	    (ppnum_t)(UINT32_MAX >> PAGE_SHIFT), KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+	/* max_pnum is the fifth argument in this kernel: 0x100000 pages = 4 GiB. */
+	if (kmem_alloc_contig(kernel_map, &hakios_rmtfs_buffer, HAKIOS_RMTFS_BYTES, PAGE_MASK, (ppnum_t)0x100000, 0,
+	    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 		printf("LX: no 3 MB in one piece below 4 GiB for the modem's file system\n");
 		hakios_rmtfs_buffer = 0;
 		return;

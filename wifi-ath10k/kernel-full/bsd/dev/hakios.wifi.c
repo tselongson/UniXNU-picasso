@@ -3844,8 +3844,13 @@ mpss_storage_prepare(void)
 		 * kernel's direct-mapped window and answers 0 for every page of it, which is
 		 * what made this function report "not prepared" with the memory in hand. */
 	} else {
-		allocation = kmem_alloc_contig(kernel_map, &cached, RMTFS_BYTES, PAGE_MASK, 0,
-		    (ppnum_t)(UINT32_MAX >> PAGE_SHIFT), KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT);
+		/* This kernel's signature is kmem_alloc_contig(map, &va, size, mask, max_pnum,
+		 * min_pnum, flags, tag): the fifth is the physical page ceiling, not the floor.
+		 * Passing them the other way round asked for a floor of 0xFFFFF pages and got
+		 * memory at 0x100000000 -- past the 32-bit addresses the modem can name. The
+		 * loader that worked uses 0x100000 (4 GiB / 4 KiB) as the ceiling. */
+		allocation = kmem_alloc_contig(kernel_map, &cached, RMTFS_BYTES, PAGE_MASK, (ppnum_t)0x100000, 0,
+		    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT);
 		if (allocation != KERN_SUCCESS || cached == 0) {
 			printf("wifi: RMTFS: no memory in one piece below 4 GiB for %u bytes (%d)\n", RMTFS_BYTES, allocation);
 			return false;
