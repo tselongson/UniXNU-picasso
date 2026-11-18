@@ -149,9 +149,12 @@ picasso_rmtfs_reserve(void)
 	if (hakios_rmtfs_buffer != 0) {
 		return;
 	}
-	/* max_pnum is the fifth argument in this kernel: 0x100000 pages = 4 GiB. */
+	/* max_pnum is the fifth argument in this kernel: 0x100000 pages = 4 GiB. KMA_KOBJECT
+	 * is what makes kvtophys() answer for it at all -- lx_os_radio_memory() in hakios.lx.c
+	 * takes the radio's 44 MB the same way, and a plain KMA_DATA mapping lives outside the
+	 * direct-mapped window where kvtophys() returns 0. */
 	if (kmem_alloc_contig(kernel_map, &hakios_rmtfs_buffer, HAKIOS_RMTFS_BYTES, PAGE_MASK, (ppnum_t)0x100000, 0,
-	    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+	    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
 		printf("LX: no 3 MB in one piece below 4 GiB for the modem's file system\n");
 		hakios_rmtfs_buffer = 0;
 		return;

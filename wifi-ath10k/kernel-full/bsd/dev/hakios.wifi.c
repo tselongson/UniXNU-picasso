@@ -3850,7 +3850,7 @@ mpss_storage_prepare(void)
 		 * memory at 0x100000000 -- past the 32-bit addresses the modem can name. The
 		 * loader that worked uses 0x100000 (4 GiB / 4 KiB) as the ceiling. */
 		allocation = kmem_alloc_contig(kernel_map, &cached, RMTFS_BYTES, PAGE_MASK, (ppnum_t)0x100000, 0,
-		    KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT);
+		    KMA_KOBJECT | KMA_ZERO | KMA_DATA, VM_KERN_MEMORY_IOKIT);
 		if (allocation != KERN_SUCCESS || cached == 0) {
 			printf("wifi: RMTFS: no memory in one piece below 4 GiB for %u bytes (%d)\n", RMTFS_BYTES, allocation);
 			return false;
