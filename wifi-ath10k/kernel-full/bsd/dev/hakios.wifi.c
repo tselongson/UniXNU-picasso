@@ -3040,7 +3040,8 @@ glink_send(const void *data, uint32_t length)
 #define QRTR_US                 1u
 #define QRTR_CONTROL            0xfffffffeu     /* the control port */
 #define QRTR_FIRST_PORT         0x4000u         /* where Linux begins numbering ports that ask for no number */
-enum { QRTR_DATA = 1, QRTR_HELLO = 2, QRTR_BYE = 3, QRTR_NEW_SERVER = 4, QRTR_DEL_SERVER = 5, QRTR_DEL_CLIENT = 6, QRTR_RESUME_TX = 7 };
+enum { QRTR_DATA = 1, QRTR_HELLO = 2, QRTR_BYE = 3, QRTR_NEW_SERVER = 4, QRTR_DEL_SERVER = 5, QRTR_DEL_CLIENT = 6, QRTR_RESUME_TX = 7,
+       QRTR_NEW_LOOKUP = 10 };
 
 struct qrtr_header {                            /* version 1, which Linux sends; version 2 is read as well */
 	uint32_t version, type, from_node, from_port, confirm, size, to_node, to_port;
@@ -3148,6 +3149,16 @@ qrtr_control(const struct qrtr_header *header, const struct qrtr_control *contro
 		}
 		error = qrtr_out_packet(QRTR_HELLO, QRTR_CONTROL, header->from_node, QRTR_CONTROL, &hello, sizeof(hello));
 		printf("wifi: qrtr: HELLO FROM NODE %u; ours to it: %s\n", header->from_node, error == 0 ? "SENT" : "NOT SENT");
+		/* This modem announces only 0x42 and 0x2b on its own: without asking, WLFW (0x45) never
+		 * comes and the driver starts with no 2 GHz band (ENODEV). The loader that brought the
+		 * radio up on this phone sends a NEW_LOOKUP for 0x45 on the first hello and the modem
+		 * answers with a NEW_SERVER of its own. */
+		{
+			struct qrtr_control ask = { .command = QRTR_NEW_LOOKUP, .words = { 0x45, 0x01, 0xffffffff, 0 } };
+			int sent = qrtr_out_packet(QRTR_NEW_LOOKUP, QRTR_CONTROL, header->from_node, QRTR_CONTROL, &ask, sizeof(ask));
+
+			printf("wifi: qrtr: asked the modem for WLFW (0x45): %s\n", sent == 0 ? "SENT" : "NOT SENT");
+		}
 		break;
 	case QRTR_NEW_SERVER:
 		lck_mtx_lock(&qrtr_lock);
