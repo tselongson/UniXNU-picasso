@@ -3796,8 +3796,14 @@ mpss_storage_prepare(void)
 	 * the radio up on this phone reads the partitions straight from storage. Without them the
 	 * modem cannot read its own WLAN configuration, never starts wlan_pd, and its WLFW service
 	 * (0x45) never appears -- which is exactly what the driver's start then fails on. */
+	/* The cap is only there so a nonsense size cannot eat the kernel's memory; the partitions
+	 * are 8 MiB, 8 MiB, 1 MiB and 8 MiB on this phone (the loader expected 256 KiB for fsc,
+	 * which is what a different build of the same partition table gives). */
+	/* In the order rmtfs' own path table below asks for them: fs1, fs2, fsg, fsc. Getting fsg
+	 * and fsc the wrong way round hands the modem the wrong file system and it starts neither
+	 * wlan_pd nor WLFW. */
 	static const struct { const char *name; uint64_t cap; } parts[4] = {
-		{ "modemst1", 0x1000000 }, { "modemst2", 0x1000000 }, { "fsc", 0x40000 }, { "fsg", 0x1000000 },
+		{ "modemst1", 0x4000000 }, { "modemst2", 0x4000000 }, { "fsg", 0x4000000 }, { "fsc", 0x400000 },
 	};
 	vm_offset_t cached = 0;
 	kern_return_t allocation;
