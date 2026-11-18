@@ -171,6 +171,9 @@
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
+#include <vm/pmap.h>
+
+extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
@@ -3834,19 +3837,26 @@ mpss_storage_prepare(void)
 	 * that, and this phone's has none. bsd_init takes it instead, when a 3 MiB run is still
 	 * easy to find. */
 	cached = (vm_offset_t)hakios_rmtfs_memory(&rmtfs.physical);
-	if (cached == 0 || rmtfs.physical == 0) {
+	if (cached != 0 && rmtfs.physical != 0) {
+		/* Reserved with kmem_alloc_contig at bsd_init: in one physical piece by
+		 * construction. kvtophys() cannot confirm it -- that mapping is not in the
+		 * kernel's direct-mapped window and answers 0 for every page of it, which is
+		 * what made this function report "not prepared" with the memory in hand. */
+	} else {
 		allocation = kmem_alloc_contig(kernel_map, &cached, RMTFS_BYTES, PAGE_MASK, 0,
 		    (ppnum_t)(UINT32_MAX >> PAGE_SHIFT), KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT);
 		if (allocation != KERN_SUCCESS || cached == 0) {
 			printf("wifi: RMTFS: no memory in one piece below 4 GiB for %u bytes (%d)\n", RMTFS_BYTES, allocation);
 			return false;
 		}
-		rmtfs.physical = kvtophys(cached);
+		{
+			ppnum_t first = pmap_find_phys(kernel_pmap, (addr64_t)cached);
+
+			rmtfs.physical = first != 0 ? ptoa_64(first) : 0;
+		}
 	}
 	if (rmtfs.physical > UINT32_MAX - RMTFS_BYTES || (rmtfs.physical & PAGE_MASK)) return false;
-	for (vm_offset_t offset = 0; offset < RMTFS_BYTES; offset += PAGE_SIZE) {
-		if (kvtophys(cached + offset) != rmtfs.physical + offset) return false;
-	}
+	printf("wifi: RMTFS: %u bytes at physical %#llx\n", RMTFS_BYTES, rmtfs.physical);
 	for (vm_offset_t at = cached; at < cached + RMTFS_BYTES; at += 64) __asm__ volatile ("dc civac, %0" : : "r" (at));
 	settle();
 	rmtfs.memory = ml_io_map_unmappable(rmtfs.physical, RMTFS_BYTES, VM_WIMG_WCOMB);
