@@ -3616,6 +3616,9 @@ wlfw_receive(__unused void *context, uint32_t node, uint32_t port, const void *d
 }
 
 #define RMTFS_BYTES 0x300000u
+
+/* The window bsd_init reserved for it (picasso-wifi-glue.c). */
+extern void *hakios_rmtfs_memory(uint64_t *physical);
 static struct {
 	struct hakios_qrtr_port *port;
 	vm_offset_t memory, permission_page;
@@ -3828,14 +3831,18 @@ mpss_storage_prepare(void)
 	}
 	/* The modem's requests carry 32-bit addresses, so the buffer has to be physically in one
 	 * piece below 4 GiB; the firmware volume's own 0-rmtfs-ram was the loader's way of getting
-	 * that, and this phone's has none. */
-	allocation = kmem_alloc_contig(kernel_map, &cached, RMTFS_BYTES, PAGE_MASK, 0,
-	    (ppnum_t)(UINT32_MAX >> PAGE_SHIFT), KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT);
-	if (allocation != KERN_SUCCESS || cached == 0) {
-		printf("wifi: RMTFS: no memory in one piece below 4 GiB for %u bytes (%d)\n", RMTFS_BYTES, allocation);
-		return false;
+	 * that, and this phone's has none. bsd_init takes it instead, when a 3 MiB run is still
+	 * easy to find. */
+	cached = (vm_offset_t)hakios_rmtfs_memory(&rmtfs.physical);
+	if (cached == 0 || rmtfs.physical == 0) {
+		allocation = kmem_alloc_contig(kernel_map, &cached, RMTFS_BYTES, PAGE_MASK, 0,
+		    (ppnum_t)(UINT32_MAX >> PAGE_SHIFT), KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT);
+		if (allocation != KERN_SUCCESS || cached == 0) {
+			printf("wifi: RMTFS: no memory in one piece below 4 GiB for %u bytes (%d)\n", RMTFS_BYTES, allocation);
+			return false;
+		}
+		rmtfs.physical = kvtophys(cached);
 	}
-	rmtfs.physical = kvtophys(cached);
 	if (rmtfs.physical > UINT32_MAX - RMTFS_BYTES || (rmtfs.physical & PAGE_MASK)) return false;
 	for (vm_offset_t offset = 0; offset < RMTFS_BYTES; offset += PAGE_SIZE) {
 		if (kvtophys(cached + offset) != rmtfs.physical + offset) return false;

@@ -125,6 +125,38 @@ picasso_wlan_boot(void *argument, wait_result_t result)
 
 extern int hakios_lx_prepare(void);
 
+/* The modem's rmtfs window: 3 MiB of physical memory below 4 GiB that it reads and writes
+ * through 32-bit addresses. Taken here, at bsd_init, for the same reason the radio's 44 MB
+ * is: by the time the deferred thread runs (150 s in) the kernel's memory is in pieces and no
+ * 3 MiB run exists any more ("no memory in one piece below 4 GiB for 3145728 bytes"). */
+#define HAKIOS_RMTFS_BYTES      0x300000u
+static vm_offset_t hakios_rmtfs_buffer;
+static uint64_t hakios_rmtfs_physical;
+
+void *
+hakios_rmtfs_memory(uint64_t *physical)
+{
+	*physical = hakios_rmtfs_physical;
+	return (void *)hakios_rmtfs_buffer;
+}
+
+static void
+picasso_rmtfs_reserve(void)
+{
+	if (hakios_rmtfs_buffer != 0) {
+		return;
+	}
+	if (kmem_alloc_contig(kernel_map, &hakios_rmtfs_buffer, HAKIOS_RMTFS_BYTES, PAGE_MASK, 0,
+	    (ppnum_t)(UINT32_MAX >> PAGE_SHIFT), KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		printf("LX: no 3 MB in one piece below 4 GiB for the modem's file system\n");
+		hakios_rmtfs_buffer = 0;
+		return;
+	}
+	hakios_rmtfs_physical = kvtophys(hakios_rmtfs_buffer);
+	printf("LX: modem's file system memory: %u bytes at %#llx (physical %#llx)\n", HAKIOS_RMTFS_BYTES,
+	    (uint64_t)hakios_rmtfs_buffer, hakios_rmtfs_physical);
+}
+
 void
 picasso_wlan_deferred_start(void)
 {
@@ -142,6 +174,7 @@ picasso_wlan_deferred_start(void)
 	} else {
 		printf("LX: radio memory reserved at bsd_init\n");
 	}
+	picasso_rmtfs_reserve();
 
 	if (kernel_thread_start(picasso_wlan_boot, NULL, &thread) != KERN_SUCCESS) {
 		printf("LX: cannot start raphael WiFi deferred init thread\n");
