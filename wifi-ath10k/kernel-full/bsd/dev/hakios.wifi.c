@@ -4815,7 +4815,7 @@ static bool
 step_qrtr(void)
 {
 	struct hakios_qrtr_port *port;
-	uint32_t ask = 0, seconds = 3, services = 0;
+	uint32_t ask = 0, seconds = 20, services = 0;
 
 	if (!glink.open) {
 		return false;
@@ -4836,6 +4836,21 @@ step_qrtr(void)
 		return false;
 	}
 	for (unsigned ms = 0; ms < seconds * 1000 && !(wlfw_port != 0 && ms >= 500); ms++) {
+		/* This modem brought WLFW up as late as 42 s in the loader that worked, and it can
+		 * miss the one lookup sent on the first hello. Answer its hello once, then keep
+		 * asking until the service comes or the wait ends. */
+		if (wlfw_port == 0 && (ms == 500 || (ms > 500 && ms % 1000 == 0))) {
+			struct qrtr_control ask_wlfw = { .command = QRTR_NEW_LOOKUP, .words = { SERVICE_WLFW, 0x01, 0xffffffff, 0 } };
+			int sent;
+
+			lck_mtx_lock(&qrtr_lock);
+			sent = qrtr_peer == 0 ? ENOTCONN : qrtr_out_packet(QRTR_NEW_LOOKUP, QRTR_CONTROL, qrtr_peer, QRTR_CONTROL,
+			    &ask_wlfw, sizeof(ask_wlfw));
+			lck_mtx_unlock(&qrtr_lock);
+			if (sent == 0) qrtr_out++;
+			printf("wifi: %u: %u ms: asked again for the Wi-Fi firmware's service: %s\n", step, ms,
+			    sent == 0 ? "SENT" : "NOT SENT");
+		}
 		sleep_ms(1);
 	}
 	for (unsigned i = 0; i < sizeof(qrtr_servers) / sizeof(qrtr_servers[0]); i++) {
