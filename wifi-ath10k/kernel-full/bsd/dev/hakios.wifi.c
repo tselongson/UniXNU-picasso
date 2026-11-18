@@ -839,7 +839,13 @@ static struct block ipcc = { "ipcc", 0x00408000, 0x1000 };
 #define IPCC_CLEAR              0x1c            /* write: that one has been heard */
 #define IPCC_NOBODY             0xffffffffu
 #define IPCC_AOP                0u
-#define IPCC_WPSS               24u
+/* On this phone the WLAN lives in the modem, so the GLINK and SMP2P doorbells go to the MPSS
+ * client, not to raphael's separate WPSS client 24. picasso.dtb says the same thing twice:
+ *   /soc/qcom,glink/modem   mboxes = <&ipcc 2 0>, interrupts = <2 0 1>
+ *   /soc/qcom,smp2p-mpss    mboxes = <&ipcc 2 2>, interrupts = <2 2 1>
+ * and the self-developed loader, which brought the radio up, wrote 2<<16|0 to IPCC_SEND.
+ * With 24 the modem saw our queue but never a ring, so it never answered our GLINK version. */
+#define IPCC_WPSS               2u
 #define IPCC_SMP2P              2u              /* the signal */
 
 static bool
@@ -1536,15 +1542,11 @@ mailbox_wait(uint32_t offset, uint32_t value, uint32_t ms)
 static void
 ring(uint32_t client, uint32_t signal, const char *whose)
 {
-	if (hakios_is_raphael()) {
-		static vm_offset_t apcs;
-		if (!apcs) apcs = ml_io_map(0x17c00000, 0x1000);
-		settle();
-		if (client == IPCC_AOP) wr(apcs + 0xc, 1);
-		else if (signal == IPCC_SMP2P) wr(apcs + 0xc, 1u << 14);
-		else wr(apcs + 0xc, 1u << 12);
-		return;
-	}
+	/* Doorbells go through qcom,ipcc@408000 here. picasso.dtb gives the modem's GLINK edge
+	 * mboxes = <&ipcc 2 0> and its SMP2P edge <&ipcc 2 2>, and the self-developed loader
+	 * brought the radio up by writing 2<<16|signal to IPCC_SEND. The APCS shortcut that
+	 * raphael uses rings nothing on this phone: the modem saw our queue but never a ring,
+	 * answered no GLINK version and left the link down. */
 	put(&ipcc, whose, IPCC_SEND, client << 16 | signal);
 }
 
@@ -1562,7 +1564,8 @@ static struct {
 static void
 doorbells(void)
 {
-	if (hakios_is_raphael()) return; /* SM8150 uses APCS, and the shared queues are polled. */
+	/* Heard rings are read and cleared through IPCC, the same block the GLINK and SMP2P
+	 * edges name in the device tree. */
 	for (unsigned i = 0; i < 8; i++) {
 		uint32_t who = rd(ipcc.base + IPCC_RECEIVED);
 
@@ -2392,7 +2395,7 @@ step_start(void)
 	announce("tell the doorbells that rings from before this kernel have been heard and that the DSP's SMP2P ring is "
 	    "listened for, tell the always-on processor that the image is loaded, and ask TrustZone to authenticate it and let "
 	    "the DSP out of reset");
-	if (!hakios_is_raphael()) {
+	{
 		for (unsigned i = 0; i < 8 && (rang = rd(ipcc.base + IPCC_RECEIVED)) != IPCC_NOBODY; i++) {
 			put(&ipcc, "heard", IPCC_CLEAR, rang);
 		}
