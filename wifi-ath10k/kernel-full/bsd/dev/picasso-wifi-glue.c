@@ -31,6 +31,9 @@
 #include <sys/vfs_context.h>
 #include <kern/locks.h>
 #include <mach/vm_param.h>
+#include <vm/pmap.h>
+
+extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
 #include <sys/hakios.ipa.h>
 #include <sys/hakios.nas.h>
 
@@ -153,6 +156,17 @@ picasso_rmtfs_reserve(void)
 		return;
 	}
 	hakios_rmtfs_physical = kvtophys(hakios_rmtfs_buffer);
+	if (hakios_rmtfs_physical == 0) {
+		/* A kmem_alloc_contig mapping is not in the kernel's direct-mapped window, so
+		 * kvtophys() answers 0 for it; the page table still knows the page. */
+		ppnum_t page = pmap_find_phys(kernel_pmap, (addr64_t)hakios_rmtfs_buffer);
+
+		hakios_rmtfs_physical = page != 0 ? ptoa_64(page) : 0;
+	}
+	if (hakios_rmtfs_physical == 0) {
+		printf("LX: the modem's file system memory has no physical address\n");
+		return;
+	}
 	printf("LX: modem's file system memory: %u bytes at %#llx (physical %#llx)\n", HAKIOS_RMTFS_BYTES,
 	    (uint64_t)hakios_rmtfs_buffer, hakios_rmtfs_physical);
 }
