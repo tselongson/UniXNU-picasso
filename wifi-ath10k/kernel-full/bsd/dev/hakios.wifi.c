@@ -5339,12 +5339,44 @@ radio_space_off(void)
 static bool
 icnss_smmu_prepare(void)
 {
+	/* Raphael gives the radio's DMA stream its own stage-1 context and matches it with an
+	 * SMR. This phone's hypervisor keeps the SMMU's global registers: the SMR store is
+	 * dropped in silence (it reads back 0; only the S2CR store lands), so the stream can
+	 * never be matched and the build ends at "THE SMMU DID NOT TAKE WHAT WAS WRITTEN".
+	 *
+	 * The loader that brought Wi-Fi up here uses the SMMUv2 direct index instead
+	 * (Wcn3990Hif.cpp:5707): while sCR0.USFCFG is clear, a stream no SMR matches takes
+	 * S2CR[stream] itself, and S2CR[0x20] aimed at bank 61 -- whose MMU is switched off --
+	 * lets the firmware's addresses through untranslated. That is what this does. */
+	static volatile uint32_t *smmu;
 	bool good;
+
 	lck_mtx_lock(&hakios_smmu_lock);
-	if (radio_space.on) good = true;
-	else {
-		radio_space.wanted = 2;
-		good = radio_space_find() && radio_enter(0x8ba00000, 0x8ba00000, 0x1f0000, RADIO_PTE) && radio_space_on();
+	radio_space.wanted = 2;
+	if (smmu == NULL) {
+		vm_offset_t va = ml_io_map(apps_smmu.phys, 0x1000);
+		if (va == 0) {
+			printf("wifi: %u: the SMMU's first page cannot be mapped\n", step);
+		} else {
+			smmu = (volatile uint32_t *)va;
+		}
+	}
+	if (smmu != NULL) {
+		uint32_t scr0 = smmu[0], readback = 0;
+
+		if (scr0 == 0) {
+			printf("wifi: %u: the SMMU reads as if it were not up\n", step);
+		} else if ((scr0 >> 10 & 1) == 0) {
+			printf("wifi: %u: the SMMU's sCR0 is %#x with USFCFG clear: an unmatched stream already bypasses, and S2CR[0x20] "
+			    "needs nothing\n", step, scr0);
+			good = true;
+		} else {
+			smmu[(0xc00 >> 2) + 0x20] = 61;
+			__asm__ volatile ("dsb sy" ::: "memory");
+			readback = smmu[(0xc00 >> 2) + 0x20];
+			printf("wifi: %u: S2CR[0x20] := %#x (bank 61, its MMU is off), reads back %#x\n", step, 61u, readback);
+			good = readback == 61;
+		}
 	}
 	lck_mtx_unlock(&hakios_smmu_lock);
 	return good;
