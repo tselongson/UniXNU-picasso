@@ -4636,7 +4636,8 @@ retry:
 	    icnss_call(board_port, 0x24, NULL, 0) && icnss_default_board() && icnss_board_data(board_port);
 	if (!supplied) { qrtr_close(board_port); return false; }
 	(void)icnss_mac_address(board_port);
-	uint64_t until = now_us() + 30000000, said_at = now_us();
+	printf("wifi: ICNSS the station address is in; the wait for the firmware's own ready indication begins\n");
+	uint64_t until = now_us() + 30000000, said_at = 0;
 	while (!wlfw_ready && !wlfw_next_port && !raphael_wlan_crashed && now_us() < until) {
 		if (wlfw_rejuvenating) {
 			wlfw_rejuvenating = false;
@@ -4646,6 +4647,9 @@ retry:
 			printf("wifi: ICNSS still waiting for the firmware's ready indication, %llu s of 30 (answer %u, next port %u)\n",
 			    (uint64_t)(now_us() - until + 30000000) / 1000000, wlfw_answer, wlfw_next_port);
 			said_at = now_us();
+		}
+		if ((now_us() & 0xfffff) < 1000) {
+			printf("wifi: ICNSS the wait is alive (ready %u, rejuvenating %u)\n", wlfw_ready, wlfw_rejuvenating);
 		}
 		sleep_us(1000);
 	}
