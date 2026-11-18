@@ -34,6 +34,10 @@
 #include <vm/pmap.h>
 
 extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
+/* Without this the compiler takes kvtophys() to return int, and an address above 0x80000000
+ * comes back sign-extended: 0xccecf000 arrived as 0xffffffffccecf000 and every check on it
+ * failed while the memory was in fact a perfectly good 3.2 GB page. */
+extern uint64_t kvtophys(vm_offset_t va);
 #include <sys/hakios.ipa.h>
 #include <sys/hakios.nas.h>
 
