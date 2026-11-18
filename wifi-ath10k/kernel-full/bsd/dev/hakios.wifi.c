@@ -3669,7 +3669,7 @@ scm_memory_permission(uint64_t address, uint32_t size, uint32_t source_mask, uin
 			source[sources++] = vmid;
 		}
 		if (dest_mask & (1u << vmid)) {
-			if (destinations == 3) return false;
+			if (destinations == 4) return false;
 			dest[destinations++] = (struct permission){ .vmid = vmid, .perm = permissions };
 		}
 	}
@@ -4598,7 +4598,11 @@ retry:
 		printf("wifi: ICNSS MSA region %u: %#llx + %#x, secure %u\n", i, address, bytes, region[12]);
 	}
 	for (unsigned i = 0; i < regions[0]; i++) {
-		uint32_t owners = VM_MSS | VM_WLAN | (regions[1 + 13 * i + 12] ? 0 : VM_CE);
+		/* HLOS stays in the destination list beside the WLAN's VMs: the one handover this
+		 * monitor accepts (rmtfs: 0x8 -> 0x8008) keeps the processor's own VM in it, and the
+		 * one it refuses (0x8 -> 0x1008000, answer 0x56) does not. The loader that worked
+		 * puts HLOS first in its destination array for the same reason. */
+		uint32_t owners = VM_HLOS | VM_MSS | VM_WLAN | (regions[1 + 13 * i + 12] ? 0 : VM_CE);
 		if (icnss_regions[i].owners == owners) continue;
 		if (icnss_regions[i].owners) return false;
 		if (!scm_memory_permission(icnss_regions[i].address, icnss_regions[i].size, VM_HLOS, owners, 6)) {
