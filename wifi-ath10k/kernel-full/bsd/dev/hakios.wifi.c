@@ -3791,22 +3791,44 @@ mpss_storage_request(__unused void *context, uint32_t node, uint32_t port, const
 static bool
 mpss_storage_prepare(void)
 {
-	static const char *const files[] = { "nv-modemst1", "nv-modemst2", "nv-fsg", "nv-fsc" };
-	uint64_t pool_bytes = 0;
-	const uint8_t *pool = image_file("0-rmtfs-ram", &pool_bytes);
-	vm_offset_t cached = ((vm_offset_t)pool + PAGE_MASK) & ~PAGE_MASK;
-	cached += PAGE_SIZE;
+	/* The modem's file system lives in four UFS partitions, not in its FAT: this phone's
+	 * firmware_mnt carries no nv-modemst1 or 0-rmtfs-ram at all, and the loader that brought
+	 * the radio up on this phone reads the partitions straight from storage. Without them the
+	 * modem cannot read its own WLAN configuration, never starts wlan_pd, and its WLFW service
+	 * (0x45) never appears -- which is exactly what the driver's start then fails on. */
+	static const struct { const char *name; uint64_t cap; } parts[4] = {
+		{ "modemst1", 0x1000000 }, { "modemst2", 0x1000000 }, { "fsc", 0x40000 }, { "fsg", 0x1000000 },
+	};
+	vm_offset_t cached = 0;
+	kern_return_t allocation;
 
 	for (unsigned i = 0; i < 4; i++) {
 		uint64_t size = 0;
-		const uint8_t *data = image_file(files[i], &size);
-		uint32_t expected = i == 3 ? 0x40000 : 0x800000;
-		if (!data || size != expected || !(rmtfs.files[i].data = kalloc_data(size, Z_WAITOK))) return false;
-		memcpy(rmtfs.files[i].data, data, size); rmtfs.files[i].size = (uint32_t)size;
+		int error = hakios_ufs_read_partition(parts[i].name, 0, NULL, 0, &size);
+
+		if (error != 0 || size == 0 || size > parts[i].cap) {
+			printf("wifi: RMTFS: %s: %s (%d, %llu bytes)\n", parts[i].name,
+			    error != 0 ? "not read from storage" : "size out of range", error, size);
+			return false;
+		}
+		if (!(rmtfs.files[i].data = kalloc_data(size, Z_WAITOK | Z_ZERO))) return false;
+		error = hakios_ufs_read_partition(parts[i].name, 0, rmtfs.files[i].data, size, NULL);
+		if (error != 0) {
+			printf("wifi: RMTFS: %s: read error %d\n", parts[i].name, error);
+			return false;
+		}
+		rmtfs.files[i].size = (uint32_t)size;
+		printf("wifi: RMTFS: %s: %llu bytes of the modem's file system\n", parts[i].name, size);
 	}
-	/* The loader owns the static RAM image; this plain file reserves DMA pages below 4 GiB without borrowing firmware RAM. */
-	if (!pool || pool_bytes < RMTFS_BYTES + 3 * PAGE_SIZE || cached < (vm_offset_t)pool ||
-	    cached - (vm_offset_t)pool > pool_bytes - RMTFS_BYTES - PAGE_SIZE) return false;
+	/* The modem's requests carry 32-bit addresses, so the buffer has to be physically in one
+	 * piece below 4 GiB; the firmware volume's own 0-rmtfs-ram was the loader's way of getting
+	 * that, and this phone's has none. */
+	allocation = kmem_alloc_contig(kernel_map, &cached, RMTFS_BYTES, PAGE_MASK, 0,
+	    (ppnum_t)(UINT32_MAX >> PAGE_SHIFT), KMA_DATA | KMA_ZERO, VM_KERN_MEMORY_IOKIT);
+	if (allocation != KERN_SUCCESS || cached == 0) {
+		printf("wifi: RMTFS: no memory in one piece below 4 GiB for %u bytes (%d)\n", RMTFS_BYTES, allocation);
+		return false;
+	}
 	rmtfs.physical = kvtophys(cached);
 	if (rmtfs.physical > UINT32_MAX - RMTFS_BYTES || (rmtfs.physical & PAGE_MASK)) return false;
 	for (vm_offset_t offset = 0; offset < RMTFS_BYTES; offset += PAGE_SIZE) {
@@ -4844,7 +4866,9 @@ step_qrtr(void)
 			int sent;
 
 			lck_mtx_lock(&qrtr_lock);
-			sent = qrtr_peer == 0 ? ENOTCONN : qrtr_out_packet(QRTR_NEW_LOOKUP, QRTR_CONTROL, qrtr_peer, QRTR_CONTROL,
+			/* Node 0 is this modem's number, not "nobody": what says whether its hello has
+			 * come is qrtr_peer_known. */
+			sent = !qrtr_peer_known ? ENOTCONN : qrtr_out_packet(QRTR_NEW_LOOKUP, QRTR_CONTROL, qrtr_peer, QRTR_CONTROL,
 			    &ask_wlfw, sizeof(ask_wlfw));
 			lck_mtx_unlock(&qrtr_lock);
 			if (sent == 0) qrtr_out++;
