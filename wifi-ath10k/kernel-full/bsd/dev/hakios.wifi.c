@@ -3647,9 +3647,16 @@ scm_memory_permission(uint64_t address, uint32_t size, uint32_t source_mask, uin
 	const uint32_t allowed = VM_HLOS | VM_MSS | VM_WLAN | VM_CE;
 
 	if (!address || !size || (address & 4095) || (size & 4095) || address > UINT64_MAX - size ||
-	    !source_mask || !dest_mask || ((source_mask | dest_mask) & ~allowed) || (permissions != 6 && permissions != 7)) return false;
+	    !source_mask || !dest_mask || ((source_mask | dest_mask) & ~allowed) || (permissions != 6 && permissions != 7)) {
+		printf("wifi: RAM %#llx + %#x: the request is malformed (source %#x, destination %#x)\n", address, size,
+		    source_mask, dest_mask);
+		return false;
+	}
 	if (!page && kmem_alloc(kernel_map, &page, PAGE_SIZE, KMA_KOBJECT | KMA_ZERO | KMA_DATA,
-	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) return false;
+	    VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+		printf("wifi: RAM %#llx + %#x: no page for the hypervisor call\n", address, size);
+		return false;
+	}
 	rmtfs.permission_page = page;
 	uint64_t *region = (void *)page, *extra = (void *)(page + 256);
 	uint32_t *source = (void *)(page + 64);
@@ -4594,7 +4601,14 @@ retry:
 		uint32_t owners = VM_MSS | VM_WLAN | (regions[1 + 13 * i + 12] ? 0 : VM_CE);
 		if (icnss_regions[i].owners == owners) continue;
 		if (icnss_regions[i].owners) return false;
-		if (!scm_memory_permission(icnss_regions[i].address, icnss_regions[i].size, VM_HLOS, owners, 6)) return false;
+		if (!scm_memory_permission(icnss_regions[i].address, icnss_regions[i].size, VM_HLOS, owners, 6)) {
+			/* On this phone the hypervisor refuses the handover of the MSA to the WLAN
+			 * VMs that raphael names (24 and 25): picasso's WLAN lives inside the modem, so
+			 * those VMs need not exist. Say it and carry on -- the firmware is told the same
+			 * regions by 0x2e either way, and the driver's start says whether it matters. */
+			printf("wifi: ICNSS MSA region %u: the hypervisor refuses the handover to %#x; going on\n", i, owners);
+			continue;
+		}
 		icnss_regions[i].owners = owners;
 	}
 	if (!icnss_call(port, 0x2e, NULL, 0) || !icnss_call(port, 0x24, NULL, 0)) return false;
