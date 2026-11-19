@@ -5451,14 +5451,19 @@ radio_map(uint64_t physical, uint64_t size, uint64_t attributes, unsigned long l
 	if (radio_space.next + size > RADIO_ADDRESSES_SIZE) {
 		return false;
 	}
-	*address = RADIO_ADDRESSES + radio_space.next;
-	radio_space.next += size;
 	if (whole) {
 		radio_space.wanted = 2;
 	}
-	if (radio_space.wanted != 2) {
-		printf("wifi: %u: THE RADIO IS NOT SHOWN the %llu KB of ours at %#llx that the driver will know as %#llx: that takes "
-		    "a context of the SMMU (wifi_smmu=2)\n", step, size >> 10, physical, *address);
+	/* What the driver is told must be an address the firmware can use. With the stream left
+	 * bypassing -- this phone's hypervisor keeps the SMMU's match registers, so no page table
+	 * of ours is ever in the path -- that address is the pool's own physical one: an IOVA
+	 * that nothing translates would point the firmware's copy engines at nothing, which is
+	 * exactly where the rings sat before this line said so. */
+	*address = radio_space.on ? RADIO_ADDRESSES + radio_space.next : physical;
+	radio_space.next += size;
+	if (!radio_space.on) {
+		printf("wifi: %u: the radio is shown the %llu KB at %#llx by its own physical address (the SMMU stream bypasses; "
+		    "no page table translates it)\n", step, size >> 10, physical);
 		return true;
 	}
 	lck_mtx_lock(&hakios_smmu_lock);       /* (the sound may be looking for a free context at the same time) */
