@@ -4637,8 +4637,10 @@ retry:
 	if (!icnss_default_board()) return false;
 	if (!icnss_power(true)) return false;
 	icnss_rail_status();
-	const uint8_t feature[] = { 0x10, 8, 0, 1, 0, 0, 0, 0, 0, 0, 0 };
-	(void)icnss_call(port, 0x3b, feature, sizeof(feature));
+	/* No 0x3b (feature set) and no 0x33 (station address): the loader that worked says
+	 * ind_register, msa, cap, bdf, cal and nothing else before the firmware's own ready
+	 * indication, and every run here that sent either extra message never saw 0x2c or 0x21
+	 * again while the modem's WLAN PD came up and the phone died. */
 	/* One client only, as ath10k and the loader that worked have it. Raphael opens a second
 	 * port and registers it with 0x20 again -- the ath11k two-client habit -- but this
 	 * firmware is the WCN3990's: its indications then go to the newest registrant, the
@@ -4656,7 +4658,7 @@ retry:
 	 * IRQs and the copy engines, starts only at step 15, after this wait. Three seconds is
 	 * enough to say the firmware is not going to volunteer ready, and the driver brings the
 	 * interrupt handlers and the rings the rest of the way. */
-	uint64_t until = now_us() + 3000000, said_at = 0;
+	uint64_t until = now_us() + 30000000, said_at = 0;
 	while (!wlfw_ready && !wlfw_next_port && !raphael_wlan_crashed && now_us() < until) {
 		if (wlfw_rejuvenating) {
 			wlfw_rejuvenating = false;
