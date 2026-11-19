@@ -218,12 +218,6 @@ jobs:
           # Xcode clang on this macOS runner is too old, so we commit the
           # verified binary rather than rebuild it here. ath10k source is a
           # verbatim copy of raphael and does not change.
-          # ath10k's WCN3990 host metadata: a 60-byte QCA-ATH10K file the driver reads
-          # as firmware-5.bin (the WLAN firmware itself runs on the modem DSP).
-          mkdir -p out/picasso
-          curl -fsSL -o out/picasso/ath10k-firmware-5.bin \
-            "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/ath10k/WCN3990/hw1.0/firmware-5.bin"
-          test "$(wc -c < out/picasso/ath10k-firmware-5.bin)" -gt 40
           test -s wifi-ath10k/prebuilt/ath10k.o
           mkdir -p build/raphael-wifi
           python3 -c "import struct; d=open('wifi-ath10k/prebuilt/ath10k.o','rb').read(4); assert d==b'\xcf\xfa\xed\xfe', 'not arm64 Mach-O'"

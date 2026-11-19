@@ -217,13 +217,27 @@ hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_o
 {
 	static const char * const prefixes[] = {
 		"/fw/%s",
-		/* ath10k's WCN3990 host metadata (firmware-5.bin) rides in the Data seed
-		 * (skip-setup --inject-fw), which mounts at /private/var. */
-		"/private/var/picasso/fw/%s",
 		"/readonly/vendor/firmware_mnt/image/%s",
 		"/readonly/firmware/image/%s",
 		"/readonly/vendor/firmware/%s",
 	};
+	/* ath10k asks for its WCN3990 host metadata as "ath10k/WCN3990/hw1.0/firmware-5.bin";
+	 * kernel.org ships 60 bytes of QCA-ATH10K for that name and no volume here carries it,
+	 * so the fetch is answered from this table before the volume walk. */
+	static const uint8_t ath10k_fw5[60] = {
+		81, 67, 65, 45, 65, 84, 72, 49, 48, 75, 0, 119, 1, 0, 0, 0, 4, 0, 0, 0, 164, 228, 190, 91,
+		2, 0, 0, 0, 3, 0, 0, 0, 64, 0, 12, 119, 5, 0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0, 6, 0, 0, 0, 4,
+		0, 0, 0, 3, 0, 0, 0
+	};
+	if (strncmp(name, "ath10k/WCN3990/hw1.0/", 21) == 0) {
+		const char *base = name + 21;
+		if (strcmp(base, "firmware-5.bin") == 0 || strcmp(base, "firmware-4.bin") == 0 ||
+		    strcmp(base, "firmware-6.bin") == 0 || strcmp(base, "firmware-3.bin") == 0 ||
+		    strcmp(base, "firmware-2.bin") == 0) {
+			*size = sizeof(ath10k_fw5);
+			return ath10k_fw5;
+		}
+	}
 	vfs_context_t context = vfs_context_kernel();
 	char path[256];
 
