@@ -5637,11 +5637,11 @@ hakios_wifi_network(uint8_t *name, unsigned *name_length, uint8_t *passphrase, u
 		/* No file: take the two from the boot arguments, as the loader that worked on this
 		 * phone does (wifissid= and wpass=). Nothing secret lives in this source file, and
 		 * the log below says only how long they are. */
-		char ssid[64] = { 0 }, passphrase[128] = { 0 };
+		char ssid[64] = { 0 }, phrase[128] = { 0 };
 
-		if (PE_parse_boot_argn("wifissid", ssid, sizeof(ssid)) && PE_parse_boot_argn("wpass", passphrase, sizeof(passphrase)) &&
-		    ssid[0] != 0 && passphrase[0] != 0) {
-			unsigned name_bytes = (unsigned)strlen(ssid), pass_bytes = (unsigned)strlen(passphrase);
+		if (PE_parse_boot_argn("wifissid", ssid, sizeof(ssid)) && PE_parse_boot_argn("wpass", phrase, sizeof(phrase)) &&
+		    ssid[0] != 0 && phrase[0] != 0) {
+			unsigned name_bytes = (unsigned)strlen(ssid), pass_bytes = (unsigned)strlen(phrase);
 			bool good = name_bytes >= 1 && name_bytes <= 32 && pass_bytes >= 8 && pass_bytes <= 63;
 
 			printf("wifi: %u: which network to join: a name of %u bytes and a passphrase of %u bytes, from the boot "
@@ -5654,7 +5654,7 @@ hakios_wifi_network(uint8_t *name, unsigned *name_length, uint8_t *passphrase, u
 				return false;
 			}
 			memcpy(name, ssid, name_bytes);
-			memcpy(passphrase, passphrase, pass_bytes);
+			memcpy(passphrase, phrase, pass_bytes);
 			*name_length = name_bytes;
 			*passphrase_length = pass_bytes;
 			return true;
