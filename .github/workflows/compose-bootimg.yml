@@ -223,7 +223,7 @@ jobs:
           mkdir -p out/picasso
           curl -fsSL -o out/picasso/ath10k-firmware-5.bin \
             "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/ath10k/WCN3990/hw1.0/firmware-5.bin"
-          test "$(stat -c %s out/picasso/ath10k-firmware-5.bin)" -gt 40
+          test "$(wc -c < out/picasso/ath10k-firmware-5.bin)" -gt 40
           test -s wifi-ath10k/prebuilt/ath10k.o
           mkdir -p build/raphael-wifi
           python3 -c "import struct; d=open('wifi-ath10k/prebuilt/ath10k.o','rb').read(4); assert d==b'\xcf\xfa\xed\xfe', 'not arm64 Mach-O'"
