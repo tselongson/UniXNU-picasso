@@ -4551,9 +4551,20 @@ icnss_mac_address(struct hakios_qrtr_port *port)
 		memcpy(icnss_mac, reply.bytes, sizeof(icnss_mac)); icnss_mac_valid = true;
 		printf("wifi: DMS supplied a valid WLAN station address\n");
 	}
-	uint8_t request[9] = { 0x10, 6, 0 };
-	memcpy(request + 3, icnss_mac, sizeof(icnss_mac));
-	return icnss_call(port, 0x33, request, sizeof(request));
+	/* 0x33 (set the station address) is what the phone dies on: within seconds of its answer
+	 * the firmware brings the WLAN core up and the phone goes dark, twice in a row, with the
+	 * wait's own heartbeat unheard after the first one. The loader that brought Wi-Fi up on
+	 * this phone has no such step at all -- the firmware takes the address nobody set and
+	 * reports ready by itself. Skip it (wifi_setup_mac=1 puts it back). */
+	uint32_t want_setup = 0;
+	if (PE_parse_boot_argn("wifi_setup_mac", &want_setup, sizeof(want_setup)) && want_setup) {
+		uint8_t request[9] = { 0x10, 6, 0 };
+		memcpy(request + 3, icnss_mac, sizeof(icnss_mac));
+		return icnss_call(port, 0x33, request, sizeof(request));
+	}
+	printf("wifi: ICNSS the station address is held back (wifi_setup_mac=1 sends it): the firmware brings its WLAN core up "
+	    "by itself\n");
+	return true;
 }
 
 static bool icnss_smmu_prepare(void);
