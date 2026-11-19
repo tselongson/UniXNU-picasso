@@ -3638,6 +3638,9 @@ wlfw_receive(__unused void *context, uint32_t node, uint32_t port, const void *d
 
 #define RMTFS_BYTES 0x300000u
 
+/* pexpert's, as bsd_init and kern_sysctl use it: the boot arguments as the loader passed them. */
+extern char *PE_boot_args(void);
+
 /* The window bsd_init reserved for it (picasso-wifi-glue.c). */
 extern void *hakios_rmtfs_memory(uint64_t *physical);
 static struct {
@@ -5625,6 +5628,53 @@ hakios_wifi_radio_address(uint8_t *address)
  * fw-wifi/network, which is in no repository). Not a boot argument: those are echoed by the
  * loader and printed with a panic. The log says how long the two are, and nothing else of them.
  */
+/*
+ * A value out of the boot arguments, taken as text.
+ *
+ * PE_parse_boot_argn() reads a value that begins with a digit as a number and hands back the
+ * bytes of that number: a passphrase of "67557212" arrived as four bytes of binary rather than
+ * eight characters, and the same is true of a network whose name begins with a digit. The two
+ * strings below are therefore taken from the raw string the loader passed, where nothing is
+ * interpreted. A value ends at a space or a tab.
+ */
+static bool
+boot_arg_text(const char *key, char *out, size_t out_size)
+{
+	const char *args = PE_boot_args(), *at;
+	size_t key_length = strlen(key);
+
+	if (args == NULL || out_size == 0) {
+		return false;
+	}
+	for (at = args; *at != 0; ) {
+		const char *stop;
+
+		while (*at == ' ' || *at == '\t') {
+			at++;
+		}
+		if (*at == 0) {
+			break;
+		}
+		stop = at;
+		while (*stop != 0 && *stop != ' ' && *stop != '\t') {
+			stop++;
+		}
+		if ((size_t)(stop - at) > key_length && strncmp(at, key, key_length) == 0 && at[key_length] == '=') {
+			const char *value = at + key_length + 1;
+			size_t length = (size_t)(stop - value);
+
+			if (length == 0 || length >= out_size) {
+				return false;
+			}
+			memcpy(out, value, length);
+			out[length] = 0;
+			return true;
+		}
+		at = stop;
+	}
+	return false;
+}
+
 bool
 hakios_wifi_network(uint8_t *name, unsigned *name_length, uint8_t *passphrase, unsigned *passphrase_length)
 {
@@ -5639,7 +5689,7 @@ hakios_wifi_network(uint8_t *name, unsigned *name_length, uint8_t *passphrase, u
 		 * the log below says only how long they are. */
 		char ssid[64] = { 0 }, phrase[128] = { 0 };
 
-		if (PE_parse_boot_argn("wifissid", ssid, sizeof(ssid)) && PE_parse_boot_argn("wpass", phrase, sizeof(phrase)) &&
+		if (boot_arg_text("wifissid", ssid, sizeof(ssid)) && boot_arg_text("wpass", phrase, sizeof(phrase)) &&
 		    ssid[0] != 0 && phrase[0] != 0) {
 			unsigned name_bytes = (unsigned)strlen(ssid), pass_bytes = (unsigned)strlen(phrase);
 			bool good = name_bytes >= 1 && name_bytes <= 32 && pass_bytes >= 8 && pass_bytes <= 63;

@@ -114,6 +114,21 @@ def main():
     objects.append(wlan_o)
     print(f'compiled {wlan_cpp.name} (IO80211 integration)')
 
+    # The DHCP client from the stack that first had this phone's Wi-Fi running: raphael's net
+    # layer leaves the address to configd, and configd never starts one for en0 here.
+    dhcp_c = None
+    for parent in (DEVICE, ROOT, *Path(__file__).resolve().parents):
+        candidate = parent / 'wifi-wcn3990' / 'source' / 'hakios.dhcp.c'
+        if candidate.is_file():
+            dhcp_c = candidate
+            break
+    if dhcp_c is None:
+        raise SystemExit('cannot find wifi-wcn3990/source/hakios.dhcp.c')
+    dhcp_o = out / 'hakios_dhcp.o'
+    compile_file(dhcp_c, dhcp_o, record, inc + ['-I', str(dhcp_c.parent)])
+    objects.append(dhcp_o)
+    print(f'compiled {dhcp_c.name} (DHCP client)')
+
     archive = out / 'libRaphaelWifi.a'
     archive.unlink(missing_ok=True)
     subprocess.run(['xcrun', 'ar', 'rcs', str(archive), *map(str, objects)], check=True)

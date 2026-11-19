@@ -169,6 +169,55 @@ net_output(ifnet_t ifp, mbuf_t packet)
 	return 0;
 }
 
+/*
+ * The DHCP client, from the stack that first had this phone's Wi-Fi running
+ * (wifi-wcn3990/source/hakios.dhcp.c): raphael's own net layer leaves the address to iOS's
+ * configd, and on this phone configd never starts one for en0 -- nothing is sent at all, which
+ * is why the link comes up and stays without an address. The client below sends through the
+ * same link the interface's frames take, is fed from the same receive entry, and ticks on the
+ * interface's own thread.
+ */
+extern int picasso_dhcp_send(const uint8_t *eth, size_t len);
+extern void hakios_dhcp_input(const uint8_t *eth, size_t len);
+extern void hakios_dhcp_tick(uint32_t polls, int link_up, const uint8_t mac[6]);
+
+int
+picasso_dhcp_send(const uint8_t *eth, size_t len)
+{
+	struct net_if *n = net_if_unit(0);
+	mbuf_t packet = NULL;
+	unsigned chunks = 1;
+	bool sent;
+
+	if (n == NULL || !n->up || len > HAKIOS_NET_FRAME_MAX || mbuf_allocpacket(MBUF_DONTWAIT, len, &chunks, &packet) != 0) {
+		return -1;
+	}
+	if (mbuf_copyback(packet, 0, len, eth, MBUF_DONTWAIT) != 0) {
+		mbuf_freem(packet);
+		return -1;
+	}
+	lck_mtx_lock(&n->tx_lock);
+	sent = n->link->transmit(packet, len);
+	lck_mtx_unlock(&n->tx_lock);
+	mbuf_freem(packet);
+	if (!sent) {
+		n->count.dropped_out++;
+		ifnet_stat_increment_out(n->ifp, 0, 0, 1);
+		return -1;
+	}
+	n->count.sent++;
+	n->count.sent_bytes += len;
+	ifnet_stat_increment_out(n->ifp, 1, (uint32_t)len, 0);
+	return 0;
+}
+
+/* (the client's datapath probe asks the old stack's counter; nothing here needs it) */
+uint32_t
+wcn3990_hif_rx_unicast_count(void)
+{
+	return 0;
+}
+
 /* A frame has arrived on unit `unit`. */
 void
 hakios_net_input_unit(unsigned unit, const uint8_t *frame, size_t length)
@@ -181,6 +230,9 @@ hakios_net_input_unit(unsigned unit, const uint8_t *frame, size_t length)
 
 	if (n == NULL) {
 		return;
+	}
+	if (n->unit == 0) {
+		hakios_dhcp_input(frame, length);
 	}
 	trace_frame("in ", frame, length, length);
 	if (length < ETHER_HDR_LEN || length > HAKIOS_NET_FRAME_MAX || mbuf_allocpacket(MBUF_DONTWAIT, length, &chunks, &packet) != 0) {
@@ -312,6 +364,28 @@ hakios_net_link_state(bool up)
 }
 
 /* The interface's own thread: for a link that wants to be asked, and for the minute's line in the log. */
+static uint32_t net_tick_polls;
+
+/*
+ * dhcp=0 leaves the address to iOS's configd -- raphael's way, and the one to try first if the
+ * image ever lists en0 as a Wi-Fi service. Default is on: on this image configd has never made
+ * a service for en0 (SIOCSIFADDR / DHCP / inet are all zero in every boot since chain-580 of the
+ * stack that came before this one), so the client below is what gets an address at all.
+ */
+static bool
+net_dhcp_wanted(void)
+{
+	static int wanted = -1;
+
+	if (wanted < 0) {
+		uint32_t on = 1;
+
+		(void)PE_parse_boot_argn("dhcp", &on, sizeof(on));
+		wanted = on != 0;
+	}
+	return wanted != 0;
+}
+
 static void
 net_thread(void *parameter, __unused wait_result_t result)
 {
@@ -321,6 +395,9 @@ net_thread(void *parameter, __unused wait_result_t result)
 
 	for (unsigned tick = 1;; tick++) {
 		quiet = n->link->poll != NULL && n->link->poll() ? 0 : quiet + 1;
+		if (n->unit == 0 && net_dhcp_wanted()) {
+			hakios_dhcp_tick(net_tick_polls++, n->up, n->link->address);
+		}
 		/* about once a minute, if anything has moved since */
 		total = n->count.sent + n->count.received + n->count.dropped_out + n->count.dropped_in;
 		if (tick % 8192 == 0 && total != said) {
