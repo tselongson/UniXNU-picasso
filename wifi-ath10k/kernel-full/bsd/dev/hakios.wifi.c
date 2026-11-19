@@ -3572,18 +3572,7 @@ static volatile bool wlfw_ready, wlfw_msa_ready;
 /* The driver that runs beside the firmware's bring-up: its probe claims the WLAN core's
  * interrupt and builds the copy-engine rings while the bring-up thread finishes the QMI talk.
  * Its result stays INT_MIN until that thread is done. */
-#define LX_BESIDE_UNSET (-0x7fffffff)
-static int lx_beside_result = LX_BESIDE_UNSET;
-static bool lx_beside_running;
 
-static void
-lx_beside_thread(__unused void *context)
-{
-	int error = hakios_lx_start();
-
-	lx_beside_result = error;
-	printf("wifi: the driver beside the bring-up returns %d\n", error);
-}
 static volatile bool wlfw_rejuvenating;
 static bool wlfw_connected;
 static uint32_t wlfw_next_node, wlfw_next_port;
@@ -4680,22 +4669,10 @@ retry:
 	 * IRQs and the copy engines, starts only at step 15, after this wait. Three seconds is
 	 * enough to say the firmware is not going to volunteer ready, and the driver brings the
 	 * interrupt handlers and the rings the rest of the way. */
-	/* The phone used to die within seconds of the modem's WLAN PD coming up, whatever the
-	 * QMI sequence said: the WLAN core raises its interrupt the moment it is up and nothing
-	 * on this side had claimed it. Hand the radio over first, as a thread that runs beside
-	 * this one -- its probe claims the interrupt and builds the copy-engine rings the
-	 * firmware is about to use, and its own wait for WMI-ready is what the firmware
-	 * satisfies once the QMI talk below is done. Then keep waiting for the QMI ready
-	 * indication here. */
-	if (!lx_beside_running) {
-		thread_t thread;
-
-		if (kernel_thread_start(lx_beside_thread, NULL, &thread) == KERN_SUCCESS) {
-			thread_deallocate(thread);
-			lx_beside_running = true;
-			printf("wifi: ICNSS the driver's thread is up beside the bring-up\n");
-		}
-	}
+	/* With the MSA region named correctly (0x8ba00000) the firmware finishes its bring-up in
+	 * about four seconds and says so over QMI, and the phone no longer dies in this window:
+	 * the WLAN core's interrupt is raised only once its core is really up, which is also when
+	 * this wait ends. */
 	uint64_t until = now_us() + 30000000, said_at = 0;
 	while (!wlfw_ready && !wlfw_next_port && !raphael_wlan_crashed && now_us() < until) {
 		if (wlfw_rejuvenating) {
@@ -4831,17 +4808,7 @@ step_driver(uint32_t how)
 	    "REGISTERS ARE WRITTEN, by ce.c and hal.c: the copy engines' rings (every write is said as it is made)" :
 	    "hand the firmware to ath11k itself: its own exchange up to mission mode; the radio's registers are neither read "
 	    "nor written (wifi_lx=1), and nothing is written but datagrams");
-	if (lx_beside_running) {
-		/* The driver is already running in its own thread, beside the QMI talk: its probe
-		 * owns the interrupt and the rings, and it finishes when the firmware's WLAN core
-		 * answers its WMI. Wait for that thread here instead of probing twice. */
-		printf("wifi: %u: the driver is already running beside the bring-up; waiting for its thread\n", step);
-		uint64_t until = now_us() + 90000000;
-		while (lx_beside_result == LX_BESIDE_UNSET && now_us() < until) sleep_us(1000);
-		error = lx_beside_result == LX_BESIDE_UNSET ? ETIMEDOUT : lx_beside_result;
-	} else {
-		error = hakios_lx_start();
-	}
+	error = hakios_lx_start();
 	radio_space_faults();
 	printf("wifi: %u: the driver's start returns %d\n", step, error);
 	return error == 0;
