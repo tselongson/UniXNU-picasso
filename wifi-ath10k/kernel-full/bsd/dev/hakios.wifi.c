@@ -4639,20 +4639,21 @@ retry:
 	icnss_rail_status();
 	const uint8_t feature[] = { 0x10, 8, 0, 1, 0, 0, 0, 0, 0, 0, 0 };
 	(void)icnss_call(port, 0x3b, feature, sizeof(feature));
-	struct hakios_qrtr_port *board_port = qrtr_open(wlfw_receive, NULL, NULL);
-	if (!board_port) return false;
-	const uint8_t board_client[] = { 0x10, 1, 0, 1, 0x11, 1, 0, 1, 0x12, 1, 0, 1, 0x13, 1, 0, 1,
-	    0x15, 4, 0, 0x4e, 0x4f, 0x4d, 0x44 };
-	bool supplied = icnss_call(board_port, 0x20, board_client, sizeof(board_client)) &&
-	    icnss_call(board_port, 0x24, NULL, 0) && icnss_default_board() && icnss_board_data(board_port);
-	if (!supplied) { qrtr_close(board_port); return false; }
-	(void)icnss_mac_address(board_port);
+	/* One client only, as ath10k and the loader that worked have it. Raphael opens a second
+	 * port and registers it with 0x20 again -- the ath11k two-client habit -- but this
+	 * firmware is the WCN3990's: its indications then go to the newest registrant, the
+	 * main port's wlfw_receive() never sees the 0x2c and 0x21 indications again, and the
+	 * wait for ready can only run out its thirty seconds. BDF and MAC go through the main
+	 * port, which is already registered. */
+	bool supplied = icnss_call(port, 0x24, NULL, 0) && icnss_default_board() && icnss_board_data(port);
+	if (!supplied) return false;
+	(void)icnss_mac_address(port);
 	printf("wifi: ICNSS the station address is in; the wait for the firmware's own ready indication begins\n");
 	uint64_t until = now_us() + 30000000, said_at = 0;
 	while (!wlfw_ready && !wlfw_next_port && !raphael_wlan_crashed && now_us() < until) {
 		if (wlfw_rejuvenating) {
 			wlfw_rejuvenating = false;
-			if (!icnss_call(port, 0x3a, NULL, 0)) { qrtr_close(board_port); return false; }
+			if (!icnss_call(port, 0x3a, NULL, 0)) return false;
 		}
 		if (now_us() - said_at >= 1000000) {
 			printf("wifi: ICNSS the wait is alive, %llu s of 30 (answer %u, next port %u, rejuvenating %u)\n",
@@ -4667,8 +4668,6 @@ retry:
 	}
 	printf("wifi: ICNSS the wait for the ready indication is over: ready %u, next port %u, crashed %u\n", wlfw_ready,
 	    wlfw_next_port, raphael_wlan_crashed);
-	qrtr_close(board_port);
-	printf("wifi: ICNSS the board's port is closed; bootstrap %s\n", wlfw_ready ? "succeeded" : "did not finish");
 	if (!wlfw_ready && wlfw_next_port && !raphael_wlan_crashed) {
 		/* shortcut: one endpoint handoff per diagnostic run; continuous Wi-Fi needs driver lifecycle recovery. */
 		if (handoffs++ == 0) {
