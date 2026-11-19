@@ -1376,6 +1376,20 @@ extern const uint8_t *hakios_image_file(const char *dir, const char *name, uint6
 static const uint8_t *
 image_file(const char *name, uint64_t *size)
 {
+	/* ath10k's WCN3990 host metadata: kernel.org ships 60 bytes of QCA-ATH10K for the name
+	 * "firmware-5.bin", and the driver's fetch of it arrives here as exactly that bare name
+	 * (hakios_wifi_driver_file strips ath10k/WCN3990/hw1.0/). No volume on this phone has
+	 * the file -- the WLAN firmware itself runs on the modem DSP -- so it is answered from
+	 * this table. The values are those bytes, verbatim. */
+	static const uint8_t ath10k_fw5[60] = {
+		81, 67, 65, 45, 65, 84, 72, 49, 48, 75, 0, 119, 1, 0, 0, 0, 4, 0, 0, 0, 164, 228, 190, 91,
+		2, 0, 0, 0, 3, 0, 0, 0, 64, 0, 12, 119, 5, 0, 0, 0, 4, 0, 0, 0, 4, 0, 0, 0, 6, 0, 0, 0, 4,
+		0, 0, 0, 3, 0, 0, 0
+	};
+	if (name != NULL && !strcmp(name, "firmware-5.bin")) {
+		*size = sizeof(ath10k_fw5);
+		return ath10k_fw5;
+	}
 	const uint8_t *data = hakios_image_file("fw", name, size, NULL);  /* (hakios.image.c) */
 
 	if (data != NULL) {
