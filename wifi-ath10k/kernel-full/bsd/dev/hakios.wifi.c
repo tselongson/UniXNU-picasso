@@ -5779,17 +5779,17 @@ join_given(uint64_t began)
 	uint32_t given = 1;
 	int error;
 
-	if (image_file("network", &size) == NULL) {
-		tell("wifi: no network to join was given (fw-wifi/network, see the README): the radio waits to be asked\n");
-		return;
-	}
-	if (PE_parse_boot_argn("wifi_file", &given, sizeof(given)) && given == 0) {
+	/* The network may come from the small image's file or, when there is none, from the
+	 * boot arguments (hakios_wifi_network() knows both); only the file has the "join it at
+	 * the start or not" switch. */
+	if (image_file("network", &size) != NULL &&
+	    PE_parse_boot_argn("wifi_file", &given, sizeof(given)) && given == 0) {
 		tell("wifi: the network of the file is not joined at the start (wifi_file=0): the radio waits to be asked\n");
 		return;
 	}
 	bzero(&what, sizeof(what));
 	if (!hakios_wifi_network(what.ssid, &name_length, what.passphrase, &passphrase_length)) {
-		tell("wifi: the network given in fw/network is not a name and a passphrase: nothing is joined\n");
+		tell("wifi: no network to join was given (fw-wifi/network or wifissid= and wpass=): the radio waits to be asked\n");
 		return;
 	}
 	what.ssid_length = (uint8_t)name_length;
