@@ -4654,13 +4654,14 @@ retry:
 			wlfw_rejuvenating = false;
 			if (!icnss_call(port, 0x3a, NULL, 0)) { qrtr_close(board_port); return false; }
 		}
-		if (now_us() - said_at >= 5000000) {
-			printf("wifi: ICNSS still waiting for the firmware's ready indication, %llu s of 30 (answer %u, next port %u)\n",
-			    (uint64_t)(now_us() - until + 30000000) / 1000000, wlfw_answer, wlfw_next_port);
+		if (now_us() - said_at >= 1000000) {
+			printf("wifi: ICNSS the wait is alive, %llu s of 30 (answer %u, next port %u, rejuvenating %u)\n",
+			    (uint64_t)(now_us() - until + 30000000) / 1000000, wlfw_answer, wlfw_next_port, wlfw_rejuvenating);
+			/* The phone has died inside this wait twice, without a word; whatever kills it in
+			 * this second will be beside the modem's own last words. */
+			struct smp2p words;
+			if (dsp_words(&words)) show_words("the modem's words during the wait", &words);
 			said_at = now_us();
-		}
-		if ((now_us() & 0xfffff) < 1000) {
-			printf("wifi: ICNSS the wait is alive (ready %u, rejuvenating %u)\n", wlfw_ready, wlfw_rejuvenating);
 		}
 		sleep_us(1000);
 	}
