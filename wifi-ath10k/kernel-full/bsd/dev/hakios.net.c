@@ -286,11 +286,27 @@ net_ioctl(ifnet_t ifp, u_long command, void *data)
 		printf("net: en0 is asked %#lx by %s\n", command, who);
 	}
 	switch (command) {
-	case SIOCSIFADDR:
-		ifnet_set_flags(ifp, IFF_UP, IFF_UP);
+	case SIOCAIFADDR:
+	case SIOCSIFADDR: {
+		struct ifaliasreq *alias = data;
+		const uint8_t *a = (const uint8_t *)&((struct sockaddr_in *)(void *)&alias->ifra_addr)->sin_addr.s_addr;
+		char who[32] = "?";
+
+		proc_selfname(who, sizeof(who));
+		printf("net: %s on en0 by %s: %u.%u.%u.%u\n", command == SIOCAIFADDR ? "SIOCAIFADDR" : "SIOCSIFADDR",
+		    who, a[0], a[1], a[2], a[3]);
+		if (command == SIOCSIFADDR) {
+			ifnet_set_flags(ifp, IFF_UP, IFF_UP);
+			break;
+		}
+		/* SIOCAIFADDR from someone else (configd): let the kernel's own in_control do it. */
+		error = EOPNOTSUPP;
 		break;
+	}
 	case SIOCSIFFLAGS:
-		/* running whenever it is up: the link is there or it is not, nothing is switched on */
+		/* What is asked of the interface is applied (configd brings it up with this), and
+		 * "running" follows "up": the link is there or it is not, nothing is switched on. */
+		ifnet_set_flags(ifp, request->ifr_flags, IFF_UP | IFF_PROMISC | IFF_ALLMULTI);
 		ifnet_set_flags(ifp, (ifnet_flags(ifp) & IFF_UP) ? IFF_RUNNING : 0, IFF_RUNNING);
 		break;
 	case SIOCGIFMEDIA32:
@@ -450,6 +466,17 @@ hakios_net_attach(const struct hakios_net_link *link)
 	if (n == NULL) {
 		printf("net: there is no unit %u for %s\n", unit, link->name);
 		return false;
+	}
+	/* hakios_net_init() lives in hakios.input.c, which this build leaves out (it owns the
+	 * touchscreen), so the two tracing arguments are read here instead. */
+	{
+		static bool once;
+
+		if (!once) {
+			once = true;
+			PE_parse_boot_argn("net_trace", &net_trace, sizeof(net_trace));
+			PE_parse_boot_argn("net_names", &net_names, sizeof(net_names));
+		}
 	}
 	if (n->link != NULL) {
 		printf("net: en%u is on %s already; %s is not attached\n", unit, n->link->name, link->name);
