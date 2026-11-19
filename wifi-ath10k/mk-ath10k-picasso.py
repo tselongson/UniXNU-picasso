@@ -120,7 +120,9 @@ def driver_build():
     for root, _dirs, files in os.walk(s):
         for fn in files:
             options.extend(_re.findall(r'opt_[a-z0-9_]+\.h', fn))
-    for name in set(options + ['lkpi_iic_if.h']):
+    # The name scan above misses the ones FreeBSD's own headers include (acfreebsd.h wants
+    # opt_acpi.h); those are named here, empty, so the option is simply not set.
+    for name in set(options + ['lkpi_iic_if.h', 'opt_acpi.h', 'opt_platform.h']):
         (gen / name).touch()
     (gen / 'opt_global.h').write_text('#define SMP 1\n')
     (gen / 'opt_inet.h').write_text('#define INET 1\n#define INET6 1\n')
