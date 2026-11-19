@@ -24,6 +24,7 @@
  * The name of the network to join and its passphrase are never said, only their lengths.
  */
 #include <linux/kernel.h>
+
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
@@ -33,6 +34,11 @@
 
 #include <lx_os.h>
 #include "lx.h"
+
+/* The suite TKIP is named by, in case the kernel headers of the build do not carry it. */
+#ifndef WLAN_CIPHER_SUITE_TKIP
+#define WLAN_CIPHER_SUITE_TKIP 0x000fac02
+#endif
 #include "lx_wpa.h"
 #ifdef LX_HAVE_SAE
 #include "sae.h"
@@ -1467,8 +1473,8 @@ protection(const struct lx_target *target, unsigned *group_cipher, bool *sae, bo
 		passphrase |= at[0] == 0x00 && at[1] == 0x0f && at[2] == 0xac && at[3] == 2;
 		offers_sae |= at[0] == 0x00 && at[1] == 0x0f && at[2] == 0xac && at[3] == 8;
 	}
-	if (*group_cipher != 4) {
-		return ("it ciphers frames to everybody with something other than CCMP (TKIP, for old stations), which is not done here");
+	if (*group_cipher != 4 && *group_cipher != 2) {
+		return ("it ciphers frames to everybody with neither CCMP nor TKIP");
 	}
 	if (!ccmp) {
 		return ("it does not offer CCMP");
@@ -1502,22 +1508,23 @@ protection(const struct lx_target *target, unsigned *group_cipher, bool *sae, bo
 
 /* A key for the driver to give the firmware: CCMP, for frames between us and the access point or for the group's. */
 static struct ieee80211_key_conf *
-key_set(struct lx_radio *radio, const uint8_t *key, unsigned index, bool pairwise, int *error)
+key_set(struct lx_radio *radio, const uint8_t *key, unsigned key_length, unsigned index, bool pairwise, int *error)
 {
-	struct ieee80211_key_conf *conf = kzalloc(sizeof(*conf) + 16, GFP_KERNEL);
+	struct ieee80211_key_conf *conf = kzalloc(sizeof(*conf) + key_length, GFP_KERNEL);
 
 	if (conf == NULL) {
 		*error = -ENOMEM;
 		return (NULL);
 	}
-	conf->cipher = WLAN_CIPHER_SUITE_CCMP;
+	/* 32 bytes is TKIP's (temporal key, TX MIC, RX MIC); 16 is CCMP's. */
+	conf->cipher = key_length == 32 ? WLAN_CIPHER_SUITE_TKIP : WLAN_CIPHER_SUITE_CCMP;
 	conf->keyidx = (uint8_t)index;
-	conf->keylen = 16;
+	conf->keylen = (uint8_t)key_length;
 	conf->iv_len = 8;
 	conf->icv_len = 8;
 	conf->flags = pairwise ? IEEE80211_KEY_FLAG_PAIRWISE : 0;
 	conf->link_id = -1;
-	memcpy(conf->key, key, 16);
+	memcpy(conf->key, key, key_length);
 	mutex_lock(&radio->wiphy->mtx);
 	*error = radio->ops->set_key(&radio->hw, SET_KEY, radio->vif, pairwise ? radio->sta : NULL, conf);
 	mutex_unlock(&radio->wiphy->mtx);
@@ -1531,7 +1538,7 @@ key_drop(struct lx_radio *radio, struct ieee80211_key_conf **conf, bool pairwise
 		mutex_lock(&radio->wiphy->mtx);
 		radio->ops->set_key(&radio->hw, DISABLE_KEY, radio->vif, pairwise ? radio->sta : NULL, *conf);
 		mutex_unlock(&radio->wiphy->mtx);
-		explicit_bzero((*conf)->key, 16);
+		explicit_bzero((*conf)->key, (*conf)->keylen);
 		kfree(*conf);
 		*conf = NULL;
 	}
@@ -1545,10 +1552,11 @@ group_rekey(struct work_struct *work)
 	int error = 0;
 
 	if (radio->group_key && radio->group_key->keyidx == radio->wpa.group_index &&
-	    !memcmp(radio->group_key->key, radio->wpa.group, 16)) return;
+	    radio->group_key->keylen == radio->wpa.group_length &&
+	    !memcmp(radio->group_key->key, radio->wpa.group, radio->wpa.group_length)) return;
 	radio->rekeys++;
 	key_drop(radio, &radio->group_key, false);
-	radio->group_key = key_set(radio, radio->wpa.group, radio->wpa.group_index, false, &error);
+	radio->group_key = key_set(radio, radio->wpa.group, radio->wpa.group_length, radio->wpa.group_index, false, &error);
 	lx_tell("lx: the group's new key (number %u) is given to the driver: %d\n", radio->wpa.group_index, error);
 	if (error) {
 		radio->joined = false;
@@ -1950,9 +1958,9 @@ station_join(struct lx_radio *radio, const struct hakios_sta_join *what)
 		goto out;
 	}
 	lx_pause_ms(30);			/* (for message 4 to have left unciphered, before there is a key to cipher with) */
-	radio->pairwise_key = key_set(radio, radio->wpa.pairwise, 0, true, &ret);
+	radio->pairwise_key = key_set(radio, radio->wpa.pairwise, 16, 0, true, &ret);
 	if (ret == 0) {
-		radio->group_key = key_set(radio, radio->wpa.group, radio->wpa.group_index, false, &ret);
+		radio->group_key = key_set(radio, radio->wpa.group, radio->wpa.group_length, radio->wpa.group_index, false, &ret);
 	}
 	lx_tell("lx: THE KEYS ARE GIVEN TO THE DRIVER, %llu ms after the association: ours with the access point, and the group's "
 	    "(number %u, %u bytes): %d\n", (lx_os_nanoseconds() - began) / 1000000ull, radio->wpa.group_index,

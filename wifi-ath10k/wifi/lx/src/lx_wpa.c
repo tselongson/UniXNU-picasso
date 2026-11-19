@@ -445,12 +445,18 @@ group_key(struct lx_wpa *wpa, const uint8_t *data, unsigned length, const uint8_
 		}
 		if (length - at < 2 || e[1] > length - at - 2) return -1;
 		if (e[0] == 0xdd && e[1] >= 4 && e[2] == 0x00 && e[3] == 0x0f && e[4] == 0xac && e[5] == 1) {
-			if (e[1] != 22) return -1;
-			if (wpa->group_length != 16 || wpa->group_index != (e[6] & 3) || memcmp(wpa->group, e + 8, 16))
+			/* 22 is six bytes and a 16-byte CCMP key; 38 is six and a 32-byte TKIP one
+			 * (the temporal key, then the two MIC keys). Linux's mac80211 takes both. */
+			unsigned key_length;
+
+			if (e[1] != 22 && e[1] != 38) return -1;
+			key_length = e[1] - 6u;
+			if (wpa->group_length != key_length || wpa->group_index != (e[6] & 3) ||
+			    memcmp(wpa->group, e + 8, key_length))
 				memcpy(wpa->group_counter, counter, 8);
 			wpa->group_index = e[6] & 3;
-			wpa->group_length = e[1] - 6u;
-			memcpy(wpa->group, e + 8, wpa->group_length);
+			wpa->group_length = key_length;
+			memcpy(wpa->group, e + 8, key_length);
 			found = true;
 		}
 		if (e[0] == 0xdd && e[1] >= 4 && e[2] == 0 && e[3] == 0x0f && e[4] == 0xac && e[5] == 9) {
