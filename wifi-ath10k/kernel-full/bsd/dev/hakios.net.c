@@ -275,15 +275,15 @@ net_ioctl(ifnet_t ifp, u_long command, void *data)
 	user_addr_t list;
 	errno_t error = 0;
 
-	if (n->link->wireless && net_ioctls_said < 80) {
+	if (n->link->wireless && net_ioctls_said < 120) {
 		char who[32] = "?";
 
-		/* (while iOS's Wi-Fi side is being got to talk to this: who asks the interface what) */
+		/* Who asks the interface what: our own log used to keep configd out of it, and
+		 * whether configd ever touches en0 is exactly the question -- a network service
+		 * for it is what lets iOS applications send at all. */
 		proc_selfname(who, sizeof(who));
-		if (strcmp(who, "configd") != 0) {
-			net_ioctls_said++;
-			printf("net: en0 is asked %#lx by %s\n", command, who);
-		}
+		net_ioctls_said++;
+		printf("net: en0 is asked %#lx by %s\n", command, who);
 	}
 	switch (command) {
 	case SIOCSIFADDR:
