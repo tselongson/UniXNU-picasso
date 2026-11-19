@@ -49,13 +49,6 @@ def main():
         return
     statusbar_provider = consume_statusbar_provider(sys.argv)
     inject_lib = None
-    if '--inject-fw' in sys.argv:
-        at = sys.argv.index('--inject-fw')
-        if at + 1 >= len(sys.argv):
-            raise ValueError('--inject-fw requires a file path')
-        inject_fw = Path(sys.argv[at + 1])
-    else:
-        inject_fw = None
     if '--inject-lib' in sys.argv:
         at = sys.argv.index('--inject-lib')
         if at + 1 >= len(sys.argv):
@@ -94,17 +87,6 @@ def configure_seed(tool, inject_lib=None, statusbar_provider=None):
                     raise ValueError('Unreviewed status bar provider')
                 merge_pref(var, 'com.apple.UIKit', {'UIStatusBarVisualProviderClassName': statusbar_provider,
                                                   'StatusBarHidesDate': True})
-            if inject_fw is not None:
-                # ath10k's WCN3990 host metadata (firmware-5.bin, 60 bytes) reaches the
-                # runtime at /private/var/picasso/fw/..., where the wifi glue's image
-                # search looks for it.
-                fw_dir = Path(var) / 'picasso' / 'fw' / 'ath10k' / 'WCN3990' / 'hw1.0'
-                fw_dir.mkdir(parents=True, exist_ok=True)
-                os.chmod(fw_dir, 0o755)
-                fw_dest = fw_dir / 'firmware-5.bin'
-                shutil.copyfile(inject_fw, fw_dest)
-                os.chmod(fw_dest, 0o644)
-                print(f'picasso: wifi firmware metadata placed at /picasso/fw/ath10k/WCN3990/hw1.0/firmware-5.bin ({fw_dest.stat().st_size} bytes)')
             if inject_lib is not None:
                 dest_dir = Path(var) / INJECT_DIR
                 for directory in (Path(var) / 'picasso', dest_dir):
