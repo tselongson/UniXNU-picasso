@@ -4594,7 +4594,14 @@ retry:
 	wlfw_next_port = 0;
 	const uint8_t indications[] = { 0x10, 1, 0, 1, 0x13, 1, 0, 1, 0x14, 1, 0, 1, 0x15, 4, 0, 0x4c, 0x45, 0x4e, 0x4b,
 	    0x19, 4, 0, 1, 0, 0, 0 };
-	const uint8_t msa[] = { 1, 8, 0, 0, 0, 0xc0, 0x8b, 0, 0, 0, 0, 2, 4, 0, 0, 0, 0x18, 0 };
+	/* The MSA region this request names is where the firmware will put the WLAN core, and
+	 * raphael's table hard-codes 0x8bc00000 -- its own board's. This phone's device tree
+	 * puts the WLAN firmware's memory at 0x8ba00000, 2 MB (pil_wlan_fw_region), and the
+	 * loader that worked names exactly that; naming the other one sent the firmware to load
+	 * its core into memory that belongs to nobody here, which the hypervisor answers by
+	 * refusing the handover (result -2) and, once the WLAN core starts against it, by taking
+	 * the whole phone down. */
+	const uint8_t msa[] = { 1, 8, 0, 0, 0, 0xa0, 0x8b, 0, 0, 0, 0, 2, 4, 0, 0, 0, 0x20, 0 };
 	size_t size = 0;
 	if (!icnss_call(port, 0x20, indications, sizeof(indications))) return false;
 	const uint8_t *status = qmi_field(wlfw_answer_bytes, wlfw_answer, 0x10, &size);
