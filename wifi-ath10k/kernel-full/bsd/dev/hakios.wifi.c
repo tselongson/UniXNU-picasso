@@ -4649,7 +4649,14 @@ retry:
 	if (!supplied) return false;
 	(void)icnss_mac_address(port);
 	printf("wifi: ICNSS the station address is in; the wait for the firmware's own ready indication begins\n");
-	uint64_t until = now_us() + 30000000, said_at = 0;
+	/* Three runs in a row the phone has died here, five to ten seconds into this wait, with
+	 * the modem's WLAN PD just up (its SMP2P entry appears, then its 0x1003 service) and no
+	 * word from the firmware beyond that. The firm hypothesis is the WLAN core raising its
+	 * interrupt while nothing on this side is registered to take it -- the driver, with the
+	 * IRQs and the copy engines, starts only at step 15, after this wait. Three seconds is
+	 * enough to say the firmware is not going to volunteer ready, and the driver brings the
+	 * interrupt handlers and the rings the rest of the way. */
+	uint64_t until = now_us() + 3000000, said_at = 0;
 	while (!wlfw_ready && !wlfw_next_port && !raphael_wlan_crashed && now_us() < until) {
 		if (wlfw_rejuvenating) {
 			wlfw_rejuvenating = false;
@@ -4668,6 +4675,14 @@ retry:
 	}
 	printf("wifi: ICNSS the wait for the ready indication is over: ready %u, next port %u, crashed %u\n", wlfw_ready,
 	    wlfw_next_port, raphael_wlan_crashed);
+	if (!wlfw_ready && !raphael_wlan_crashed) {
+		/* Hand the radio to the driver anyway: its probe registers the interrupt handlers
+		 * the WLAN core is raising right now and builds the rings the firmware is waiting
+		 * for; the firmware's own ready arrives over WMI once the first buffers are posted. */
+		printf("wifi: ICNSS the ready indication is not there, but the interrupt that is being raised right now is the "
+		    "driver's to take: handing the radio over\n");
+		return true;
+	}
 	if (!wlfw_ready && wlfw_next_port && !raphael_wlan_crashed) {
 		/* shortcut: one endpoint handoff per diagnostic run; continuous Wi-Fi needs driver lifecycle recovery. */
 		if (handoffs++ == 0) {
