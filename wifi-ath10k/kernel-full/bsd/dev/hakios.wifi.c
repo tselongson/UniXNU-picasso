@@ -4658,7 +4658,12 @@ retry:
 	 * IRQs and the copy engines, starts only at step 15, after this wait. Three seconds is
 	 * enough to say the firmware is not going to volunteer ready, and the driver brings the
 	 * interrupt handlers and the rings the rest of the way. */
-	uint64_t until = now_us() + 30000000, said_at = 0;
+	/* Zero seconds: every run that waited here died within seconds of the modem's WLAN PD
+	 * coming up, whatever the QMI sequence said -- the WLAN core raises its interrupt the
+	 * moment it is up and nothing on this side has claimed it yet. The driver starts now,
+	 * its probe claims the interrupt and builds the rings, and the firmware's ready arrives
+	 * over WMI once the first buffers are posted. */
+	uint64_t until = now_us(), said_at = 0;
 	while (!wlfw_ready && !wlfw_next_port && !raphael_wlan_crashed && now_us() < until) {
 		if (wlfw_rejuvenating) {
 			wlfw_rejuvenating = false;
