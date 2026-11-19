@@ -217,6 +217,9 @@ hakios_image_file(const char *dir, const char *name, uint64_t *size, int *disk_o
 {
 	static const char * const prefixes[] = {
 		"/fw/%s",
+		/* ath10k's WCN3990 host metadata (firmware-5.bin) rides in the Data seed
+		 * (skip-setup --inject-fw), which mounts at /private/var. */
+		"/private/var/picasso/fw/%s",
 		"/readonly/vendor/firmware_mnt/image/%s",
 		"/readonly/firmware/image/%s",
 		"/readonly/vendor/firmware/%s",
