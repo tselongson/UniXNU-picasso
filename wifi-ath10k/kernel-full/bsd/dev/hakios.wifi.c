@@ -4808,6 +4808,36 @@ step_driver(uint32_t how)
 	error = hakios_lx_start();
 	radio_space_faults();
 	printf("wifi: %u: the driver's start returns %d\n", step, error);
+	if (error != 0 && !wlfw_ready) {
+		/* The driver's probe has claimed the WLAN core's interrupt now, which is what the
+		 * phone used to die for: within seconds of the modem's WLAN PD coming up the core
+		 * raises an interrupt that nothing had claimed, and every run that waited for the
+		 * firmware's QMI ready died in exactly that window. With the interrupt owned, the
+		 * firmware may yet finish its own bring-up -- the loader that worked saw its 0x2c
+		 * and 0x21 indications 0.8 s after the calibration report. Watch for it here, and
+		 * say plainly whether it ever comes. */
+		printf("wifi: %u: the radio's interrupt is claimed by the driver now; watching for the firmware's ready "
+		    "indication beside it\n", step);
+		uint64_t until = now_us() + 30000000;
+		while (!wlfw_ready && !raphael_wlan_crashed && now_us() < until) {
+			static uint64_t said_at;
+			if (now_us() - said_at >= 1000000) {
+				printf("wifi: %u: beside the driver, the wait is alive, %llu s of 30 (answer %u)\n", step,
+				    (uint64_t)(now_us() - until + 30000000) / 1000000, wlfw_answer);
+				struct smp2p words;
+				if (dsp_words(&words)) show_words("the modem's words beside the driver", &words);
+				said_at = now_us();
+			}
+			sleep_us(1000);
+		}
+		printf("wifi: %u: beside the driver, the wait ended: ready %u, crashed %u\n", step, wlfw_ready, raphael_wlan_crashed);
+		if (wlfw_ready) {
+			printf("wifi: %u: the firmware is ready; trying the driver again\n", step);
+			error = hakios_lx_start();
+			radio_space_faults();
+			printf("wifi: %u: the driver's second start returns %d\n", step, error);
+		}
+	}
 	return error == 0;
 }
 
