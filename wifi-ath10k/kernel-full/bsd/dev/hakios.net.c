@@ -304,9 +304,10 @@ net_ioctl(ifnet_t ifp, u_long command, void *data)
 		break;
 	}
 	case SIOCSIFFLAGS:
-		/* What is asked of the interface is applied (configd brings it up with this), and
-		 * "running" follows "up": the link is there or it is not, nothing is switched on. */
-		ifnet_set_flags(ifp, request->ifr_flags, IFF_UP | IFF_PROMISC | IFF_ALLMULTI);
+		/* running whenever it is up: the link is there or it is not, nothing is switched on.
+		 * (raphael's own handler, unchanged: applying the requested IFF_UP here -- as a
+		 * normal driver would -- panics the kernel the moment configd asks for it, with a
+		 * data abort at 0x10, and the interface is brought up through SIOCSIFADDR anyway.) */
 		ifnet_set_flags(ifp, (ifnet_flags(ifp) & IFF_UP) ? IFF_RUNNING : 0, IFF_RUNNING);
 		break;
 	case SIOCGIFMEDIA32:
