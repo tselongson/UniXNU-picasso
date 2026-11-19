@@ -3569,6 +3569,21 @@ static volatile uint32_t wlfw_answer;           /* bytes of an answer received; 
 static uint8_t wlfw_answer_bytes[1024];
 static uint16_t wlfw_transaction, wlfw_expected;
 static volatile bool wlfw_ready, wlfw_msa_ready;
+/* The driver that runs beside the firmware's bring-up: its probe claims the WLAN core's
+ * interrupt and builds the copy-engine rings while the bring-up thread finishes the QMI talk.
+ * Its result stays INT_MIN until that thread is done. */
+#define LX_BESIDE_UNSET (-0x7fffffff)
+static int lx_beside_result = LX_BESIDE_UNSET;
+static bool lx_beside_running;
+
+static void
+lx_beside_thread(__unused void *context)
+{
+	int error = hakios_lx_start();
+
+	lx_beside_result = error;
+	printf("wifi: the driver beside the bring-up returns %d\n", error);
+}
 static volatile bool wlfw_rejuvenating;
 static bool wlfw_connected;
 static uint32_t wlfw_next_node, wlfw_next_port;
@@ -4658,12 +4673,23 @@ retry:
 	 * IRQs and the copy engines, starts only at step 15, after this wait. Three seconds is
 	 * enough to say the firmware is not going to volunteer ready, and the driver brings the
 	 * interrupt handlers and the rings the rest of the way. */
-	/* Zero seconds: every run that waited here died within seconds of the modem's WLAN PD
-	 * coming up, whatever the QMI sequence said -- the WLAN core raises its interrupt the
-	 * moment it is up and nothing on this side has claimed it yet. The driver starts now,
-	 * its probe claims the interrupt and builds the rings, and the firmware's ready arrives
-	 * over WMI once the first buffers are posted. */
-	uint64_t until = now_us(), said_at = 0;
+	/* The phone used to die within seconds of the modem's WLAN PD coming up, whatever the
+	 * QMI sequence said: the WLAN core raises its interrupt the moment it is up and nothing
+	 * on this side had claimed it. Hand the radio over first, as a thread that runs beside
+	 * this one -- its probe claims the interrupt and builds the copy-engine rings the
+	 * firmware is about to use, and its own wait for WMI-ready is what the firmware
+	 * satisfies once the QMI talk below is done. Then keep waiting for the QMI ready
+	 * indication here. */
+	if (!lx_beside_running) {
+		thread_t thread;
+
+		if (kernel_thread_start(lx_beside_thread, NULL, &thread) == KERN_SUCCESS) {
+			thread_deallocate(thread);
+			lx_beside_running = true;
+			printf("wifi: ICNSS the driver's thread is up beside the bring-up\n");
+		}
+	}
+	uint64_t until = now_us() + 30000000, said_at = 0;
 	while (!wlfw_ready && !wlfw_next_port && !raphael_wlan_crashed && now_us() < until) {
 		if (wlfw_rejuvenating) {
 			wlfw_rejuvenating = false;
@@ -4682,14 +4708,7 @@ retry:
 	}
 	printf("wifi: ICNSS the wait for the ready indication is over: ready %u, next port %u, crashed %u\n", wlfw_ready,
 	    wlfw_next_port, raphael_wlan_crashed);
-	if (!wlfw_ready && !raphael_wlan_crashed) {
-		/* Hand the radio to the driver anyway: its probe registers the interrupt handlers
-		 * the WLAN core is raising right now and builds the rings the firmware is waiting
-		 * for; the firmware's own ready arrives over WMI once the first buffers are posted. */
-		printf("wifi: ICNSS the ready indication is not there, but the interrupt that is being raised right now is the "
-		    "driver's to take: handing the radio over\n");
-		return true;
-	}
+	(void)0;
 	if (!wlfw_ready && wlfw_next_port && !raphael_wlan_crashed) {
 		/* shortcut: one endpoint handoff per diagnostic run; continuous Wi-Fi needs driver lifecycle recovery. */
 		if (handoffs++ == 0) {
@@ -4805,39 +4824,19 @@ step_driver(uint32_t how)
 	    "REGISTERS ARE WRITTEN, by ce.c and hal.c: the copy engines' rings (every write is said as it is made)" :
 	    "hand the firmware to ath11k itself: its own exchange up to mission mode; the radio's registers are neither read "
 	    "nor written (wifi_lx=1), and nothing is written but datagrams");
-	error = hakios_lx_start();
+	if (lx_beside_running) {
+		/* The driver is already running in its own thread, beside the QMI talk: its probe
+		 * owns the interrupt and the rings, and it finishes when the firmware's WLAN core
+		 * answers its WMI. Wait for that thread here instead of probing twice. */
+		printf("wifi: %u: the driver is already running beside the bring-up; waiting for its thread\n", step);
+		uint64_t until = now_us() + 90000000;
+		while (lx_beside_result == LX_BESIDE_UNSET && now_us() < until) sleep_us(1000);
+		error = lx_beside_result == LX_BESIDE_UNSET ? ETIMEDOUT : lx_beside_result;
+	} else {
+		error = hakios_lx_start();
+	}
 	radio_space_faults();
 	printf("wifi: %u: the driver's start returns %d\n", step, error);
-	if (error != 0 && !wlfw_ready) {
-		/* The driver's probe has claimed the WLAN core's interrupt now, which is what the
-		 * phone used to die for: within seconds of the modem's WLAN PD coming up the core
-		 * raises an interrupt that nothing had claimed, and every run that waited for the
-		 * firmware's QMI ready died in exactly that window. With the interrupt owned, the
-		 * firmware may yet finish its own bring-up -- the loader that worked saw its 0x2c
-		 * and 0x21 indications 0.8 s after the calibration report. Watch for it here, and
-		 * say plainly whether it ever comes. */
-		printf("wifi: %u: the radio's interrupt is claimed by the driver now; watching for the firmware's ready "
-		    "indication beside it\n", step);
-		uint64_t until = now_us() + 30000000;
-		while (!wlfw_ready && !raphael_wlan_crashed && now_us() < until) {
-			static uint64_t said_at;
-			if (now_us() - said_at >= 1000000) {
-				printf("wifi: %u: beside the driver, the wait is alive, %llu s of 30 (answer %u)\n", step,
-				    (uint64_t)(now_us() - until + 30000000) / 1000000, wlfw_answer);
-				struct smp2p words;
-				if (dsp_words(&words)) show_words("the modem's words beside the driver", &words);
-				said_at = now_us();
-			}
-			sleep_us(1000);
-		}
-		printf("wifi: %u: beside the driver, the wait ended: ready %u, crashed %u\n", step, wlfw_ready, raphael_wlan_crashed);
-		if (wlfw_ready) {
-			printf("wifi: %u: the firmware is ready; trying the driver again\n", step);
-			error = hakios_lx_start();
-			radio_space_faults();
-			printf("wifi: %u: the driver's second start returns %d\n", step, error);
-		}
-	}
 	return error == 0;
 }
 
