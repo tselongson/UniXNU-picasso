@@ -32,7 +32,7 @@ def main():
     compile_cmd = [clang, '-arch', 'arm64', '-isysroot', sdk, '-miphoneos-version-min=16.0',
                    '-dynamiclib', '-Wl,-install_name,/usr/lib/libpicasso-sb.dylib', '-fobjc-arc', '-framework', 'Foundation',
                    '-framework', 'CoreFoundation', '-framework', 'UIKit', '-framework', 'Metal', '-framework', 'Security',
-                   '-O2', '-Wall', '-Wextra', '-Werror',
+                   '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations',
                    '-o', str(output), str(source)]
     subprocess.run(compile_cmd, check=True)
     # The payload's scoped UI trust module must match this final signature.
