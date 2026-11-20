@@ -83,12 +83,24 @@ extern int picasso_dhcp_send(const uint8_t *eth, size_t len);
 /* Defined below, called from dhcp_install() on the driver thread. */
 static void dhcp_publish_dns(void);
 
+/* Defined at the bottom of this file; called from every received frame,
+ * before DHCP's own filter, so a probe answer is never mistaken for DHCP. */
+int hakios_netprobe_input(const uint8_t *eth, size_t len);
+/* Driven from hakios_dhcp_tick() once the address is bound. */
+static void netprobe_tick(uint32_t polls);
+
 #define DHCP_TICK_RETRY   500u    /* polls between retransmits (~0.5-2 s) */
 #define DHCP_MAX_RETRY    12u
 #define DHCP_XID          0x50494341u   /* "PICA" */
 #define DHCP_BOOTP_LEN    300u    /* 236 fixed + 4 cookie + options + padding */
 #define DHCP_CLIENT_PORT  68
 #define DHCP_SERVER_PORT  67
+
+/* netprobe: our own source port, and the public address the ICMP probe
+ * aims at.  AliDNS is reachable without any name resolution, which is the
+ * point: it isolates "the return path works" from "DNS works". */
+#define NETPROBE_PORT     40001
+#define NETPROBE_ICMP_ID  0x4e50
 
 enum dhcp_state {
 	DHCP_IDLE = 0,
@@ -557,6 +569,9 @@ hakios_dhcp_input(const uint8_t *eth, size_t len)
 	uint8_t msgtype = 0;
 	unsigned i;
 
+	if (hakios_netprobe_input(eth, len)) {
+		return;                 /* an answer the probe was waiting for */
+	}
 	if (dhcp_st == DHCP_BOUND || len < 14 + 20 + 8 + 240) {
 		return;
 	}
@@ -640,6 +655,7 @@ hakios_dhcp_tick(uint32_t polls, int link_up, const uint8_t mac[6])
 		dhcp_mac[i] = mac[i];
 	}
 	if (dhcp_st == DHCP_BOUND) {
+		netprobe_tick(polls);
 		return;
 	}
 	if (dhcp_next != 0 && (int32_t)(polls - dhcp_next) < 0) {
@@ -737,4 +753,334 @@ int
 hakios_dhcp_datapath_stuck(void)
 {
 	return dhcp_datapath_stuck;
+}
+
+/* ---- netprobe: does the phone itself reach the internet? --------------
+ * Gate: netprobe=1 (default off).  "Safari sent nothing" is not evidence
+ * about the datapath: it is evidence about what userland believes.  This
+ * puts two frames on the air from inside the kernel, through the very same
+ * picasso_dhcp_send() path DHCP already proved:
+ *
+ *   1. a DNS A query for apple.com, sent to the resolver DHCP handed us
+ *   2. an ICMP echo to 223.5.5.5, a public address that needs no DNS
+ *
+ * Each answer is printed.  "NETPROBE:" is the checkpoint: an A record or an
+ * echo reply there means the radio, firmware, AP, NAT and the return path
+ * all work, whatever userland thinks of the interface.
+ *
+ * The Ethernet destination is the gateway's MAC once an ARP reply has told
+ * us what it is (the DHCP datapath probe asks for it every ~43 s); until
+ * then broadcast, which every AP forwards. */
+static int netprobe_on;
+static int netprobe_inited;
+static int netprobe_stage;         /* 0 idle, 5 arp sent, 1 dns out, 3 icmp out, 4 done */
+static uint32_t netprobe_at;
+static unsigned netprobe_try;
+static uint8_t netprobe_dns_ip[4];
+static uint8_t netprobe_gw_mac[6];
+
+static void
+netprobe_eth(uint8_t *frame)
+{
+	unsigned i;
+
+	for (i = 0; i < 6; i++) {
+		frame[i] = netprobe_gw_mac[i] ? netprobe_gw_mac[i] : 0xff;
+		frame[6 + i] = dhcp_mac[i];
+	}
+	frame[12] = 0x08;
+	frame[13] = 0x00;
+}
+
+/* One broadcast ARP "who has the gateway", sent before the probes so the
+ * gateway's MAC is known: a broadcast Ethernet destination works in
+ * principle, but an AP with multicast filtering can drop it. */
+static void
+netprobe_arp_gateway(void)
+{
+	uint8_t fr[42];
+	unsigned i;
+
+	if (dhcp_router[0] == 0) {
+		return;
+	}
+	bzero(fr, sizeof(fr));
+	for (i = 0; i < 6; i++) {
+		fr[i] = 0xff;
+		fr[6 + i] = dhcp_mac[i];
+	}
+	fr[12] = 0x08; fr[13] = 0x06;
+	fr[14] = 0x00; fr[15] = 0x01;
+	fr[16] = 0x08; fr[17] = 0x00;
+	fr[18] = 6; fr[19] = 4;
+	fr[20] = 0x00; fr[21] = 0x01;
+	for (i = 0; i < 6; i++) {
+		fr[22 + i] = dhcp_mac[i];
+	}
+	for (i = 0; i < 4; i++) {
+		fr[28 + i] = dhcp_yiaddr[i];
+		fr[38 + i] = dhcp_router[i];
+	}
+	(void)picasso_dhcp_send(fr, sizeof(fr));
+}
+
+static void
+netprobe_send_dns(void)
+{
+	uint8_t frame[14 + 20 + 8 + 48];
+	uint8_t *ip = frame + 14, *udp = ip + 20, *dns = udp + 8, *q;
+	const uint8_t *resolver = dhcp_dns[0] ? dhcp_dns : dhcp_router;
+	size_t dns_len, udp_len;
+	uint32_t pseudo;
+	uint16_t sum;
+	unsigned i;
+
+	bzero(frame, sizeof(frame));
+	netprobe_eth(frame);
+
+	bzero(dns, 48);
+	dhcp_put16(dns + 0, NETPROBE_ICMP_ID);
+	dhcp_put16(dns + 2, 0x0100);        /* standard query, recursion desired */
+	dhcp_put16(dns + 4, 1);             /* one question */
+	q = dns + 12;
+	*q++ = 5; memcpy(q, "apple", 5); q += 5;
+	*q++ = 3; memcpy(q, "com", 3); q += 3;
+	*q++ = 0;
+	dhcp_put16(q, 1); q += 2;           /* A */
+	dhcp_put16(q, 1); q += 2;           /* IN */
+	dns_len = (size_t)(q - dns);
+
+	ip[0] = 0x45;
+	dhcp_put16(ip + 2, (uint16_t)(20 + 8 + dns_len));
+	dhcp_put16(ip + 4, NETPROBE_ICMP_ID);
+	ip[8] = 64;
+	ip[9] = 17;                         /* UDP */
+	for (i = 0; i < 4; i++) {
+		ip[12 + i] = dhcp_yiaddr[i];
+		ip[16 + i] = resolver[i];
+	}
+	dhcp_put16(ip + 10, dhcp_checksum(ip, 20, 0));
+
+	udp_len = 8 + dns_len;
+	dhcp_put16(udp + 0, NETPROBE_PORT);
+	dhcp_put16(udp + 2, 53);
+	dhcp_put16(udp + 4, (uint16_t)udp_len);
+	pseudo = 0;
+	pseudo += (uint32_t)(dhcp_yiaddr[0] << 8 | dhcp_yiaddr[1]);
+	pseudo += (uint32_t)(dhcp_yiaddr[2] << 8 | dhcp_yiaddr[3]);
+	pseudo += (uint32_t)(resolver[0] << 8 | resolver[1]);
+	pseudo += (uint32_t)(resolver[2] << 8 | resolver[3]);
+	pseudo += 17u + (uint32_t)udp_len;
+	sum = dhcp_checksum(udp, udp_len, pseudo);
+	if (sum == 0) {
+		sum = 0xffff;
+	}
+	dhcp_put16(udp + 6, sum);
+
+	printf("NETPROBE: DNS query apple.com -> %u.%u.%u.%u (try %u)\n",
+	    resolver[0], resolver[1], resolver[2], resolver[3], netprobe_try);
+	(void)picasso_dhcp_send(frame, 14 + 20 + udp_len);
+}
+
+static void
+netprobe_send_icmp(void)
+{
+	uint8_t frame[14 + 20 + 8 + 16];
+	uint8_t *ip = frame + 14, *icmp = ip + 20;
+	static const uint8_t dst[4] = { 223, 5, 5, 5 };
+	unsigned i;
+
+	bzero(frame, sizeof(frame));
+	netprobe_eth(frame);
+
+	ip[0] = 0x45;
+	dhcp_put16(ip + 2, (uint16_t)(20 + 8 + 16));
+	dhcp_put16(ip + 4, NETPROBE_ICMP_ID);
+	ip[8] = 64;
+	ip[9] = 1;                          /* ICMP */
+	for (i = 0; i < 4; i++) {
+		ip[12 + i] = dhcp_yiaddr[i];
+		ip[16 + i] = dst[i];
+	}
+	dhcp_put16(ip + 10, dhcp_checksum(ip, 20, 0));
+
+	icmp[0] = 8;                        /* echo request */
+	icmp[1] = 0;
+	dhcp_put16(icmp + 4, NETPROBE_ICMP_ID);
+	dhcp_put16(icmp + 6, 1);
+	for (i = 0; i < 16; i++) {
+		icmp[8 + i] = (uint8_t)('a' + i);
+	}
+	dhcp_put16(icmp + 2, dhcp_checksum(icmp, 8 + 16, 0));
+
+	printf("NETPROBE: ICMP echo 223.5.5.5 (try %u)\n", netprobe_try);
+	(void)picasso_dhcp_send(frame, 14 + 20 + 8 + 16);
+}
+
+/* Walk one DNS name at off; returns the offset just past it. */
+static size_t
+netprobe_skip_name(const uint8_t *dns, size_t dns_len, size_t off)
+{
+	if (off >= dns_len) {
+		return dns_len;
+	}
+	if ((dns[off] & 0xc0) == 0xc0) {
+		return off + 2 <= dns_len ? off + 2 : dns_len;
+	}
+	while (off < dns_len && dns[off] != 0) {
+		off += 1 + (size_t)dns[off];
+	}
+	return off < dns_len ? off + 1 : dns_len;
+}
+
+static void
+netprobe_dns_answer(const uint8_t *dns, size_t dns_len)
+{
+	unsigned qd = (unsigned)(dns[4] << 8 | dns[5]);
+	unsigned an = (unsigned)(dns[6] << 8 | dns[7]);
+	unsigned k;
+	size_t off = 12;
+
+	for (k = 0; k < qd && off < dns_len; k++) {
+		off = netprobe_skip_name(dns, dns_len, off) + 4;
+	}
+	for (k = 0; k < an && off + 10 <= dns_len; k++) {
+		unsigned type, rdlen;
+
+		off = netprobe_skip_name(dns, dns_len, off);
+		if (off + 10 > dns_len) {
+			break;
+		}
+		type = (unsigned)(dns[off] << 8 | dns[off + 1]);
+		rdlen = (unsigned)(dns[off + 8] << 8 | dns[off + 9]);
+		off += 10;
+		if (type == 1 && rdlen == 4 && off + 4 <= dns_len) {
+			memcpy(netprobe_dns_ip, dns + off, 4);
+			printf("NETPROBE: apple.com is %u.%u.%u.%u (dns answered)\n",
+			    netprobe_dns_ip[0], netprobe_dns_ip[1],
+			    netprobe_dns_ip[2], netprobe_dns_ip[3]);
+			return;
+		}
+		off += rdlen;
+	}
+	printf("NETPROBE: DNS reply with no A record (qd=%u an=%u)\n", qd, an);
+}
+
+static void
+netprobe_tick(uint32_t polls)
+{
+	if (!netprobe_inited) {
+		int on = 0;
+
+		netprobe_inited = 1;
+		if (PE_parse_boot_argn("netprobe", &on, sizeof(on))) {
+			netprobe_on = on;
+		}
+		printf("NETPROBE: %s (netprobe=%d)\n", netprobe_on ? "on" : "off", netprobe_on);
+	}
+	if (!netprobe_on || dhcp_yiaddr[0] == 0) {
+		return;
+	}
+	if (netprobe_stage == 0) {
+		/* Ask for the gateway's MAC first, then let the stack finish
+		 * installing the address before the first probe goes out. */
+		netprobe_stage = 5;
+		netprobe_at = polls + 500u;
+		netprobe_arp_gateway();
+		return;
+	}
+	if ((int32_t)(polls - netprobe_at) < 0) {
+		return;
+	}
+	if (netprobe_stage == 5) {
+		netprobe_stage = 1;
+		netprobe_try = 1;
+		netprobe_at = polls;
+		return;
+	}
+	if (netprobe_stage == 1) {
+		if (netprobe_try > 3) {
+			const uint8_t *r = dhcp_dns[0] ? dhcp_dns : dhcp_router;
+
+			printf("NETPROBE: DNS unanswered after 3 tries (resolver %u.%u.%u.%u)\n",
+			    r[0], r[1], r[2], r[3]);
+			netprobe_stage = 3;
+			netprobe_try = 1;
+			netprobe_at = polls + 1000u;
+			return;
+		}
+		netprobe_send_dns();
+		netprobe_try++;
+		netprobe_at = polls + 2000u;
+		return;
+	}
+	if (netprobe_stage == 3) {
+		if (netprobe_try > 3) {
+			printf("NETPROBE: ICMP echo unanswered after 3 tries\n");
+			netprobe_stage = 4;
+			return;
+		}
+		netprobe_send_icmp();
+		netprobe_try++;
+		netprobe_at = polls + 2000u;
+	}
+}
+
+/* Returns 1 when the frame was a probe answer (so DHCP ignores it). */
+int
+hakios_netprobe_input(const uint8_t *eth, size_t len)
+{
+	const uint8_t *ip, *l4;
+	size_t ip_hlen;
+	uint16_t ip_total;
+
+	/* Remember the gateway's MAC from an ARP reply: the DHCP datapath probe
+	 * asks for it every ~43 s, long before a probe frame is due, and then
+	 * the probes stop going out broadcast.  Independent of netprobe=1. */
+	if (len >= 14 + 28 && eth[12] == 0x08 && eth[13] == 0x06 &&
+	    eth[20] == 0x00 && eth[21] == 0x02 && dhcp_router[0] != 0 &&
+	    eth[28] == dhcp_router[0] && eth[29] == dhcp_router[1] &&
+	    eth[30] == dhcp_router[2] && eth[31] == dhcp_router[3]) {
+		memcpy(netprobe_gw_mac, eth + 22, 6);
+	}
+	if (!netprobe_on || len < 14 + 20 + 8) {
+		return 0;
+	}
+	if (eth[12] != 0x08 || eth[13] != 0x00) {
+		return 0;
+	}
+	ip = eth + 14;
+	if ((ip[0] >> 4) != 4) {
+		return 0;
+	}
+	ip_hlen = (size_t)(ip[0] & 0x0f) * 4;
+	if (ip_hlen < 20 || len < 14 + ip_hlen + 8) {
+		return 0;
+	}
+	ip_total = (uint16_t)(ip[2] << 8 | ip[3]);
+	if (ip_total < ip_hlen + 8 || 14 + ip_total > len) {
+		return 0;
+	}
+	l4 = ip + ip_hlen;
+
+	if (ip[9] == 17 &&
+	    (uint16_t)(l4[0] << 8 | l4[1]) == 53 &&
+	    (uint16_t)(l4[2] << 8 | l4[3]) == NETPROBE_PORT) {
+		if (netprobe_stage == 1 && ip_total >= ip_hlen + 8 + 12) {
+			netprobe_dns_answer(l4 + 8, (size_t)(ip_total - ip_hlen - 8));
+			netprobe_stage = 3;
+			netprobe_try = 1;
+			netprobe_at = 0;         /* ICMP goes out on the next tick */
+		}
+		return 1;
+	}
+	if (ip[9] == 1 && netprobe_stage == 3 &&
+	    len >= 14 + ip_hlen + 8 &&
+	    l4[0] == 0 && (uint16_t)(l4[4] << 8 | l4[5]) == NETPROBE_ICMP_ID) {
+		printf("NETPROBE: ICMP reply from %u.%u.%u.%u (the internet answers)\n",
+		    ip[12], ip[13], ip[14], ip[15]);
+		netprobe_stage = 4;
+		return 1;
+	}
+	return 0;
 }
