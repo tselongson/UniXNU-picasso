@@ -11,3 +11,7 @@ policy/verified-root-picasso/*.bin binary
 # workspace by work/publish-wifi-handoff.py, which writes LF.  Pin the newline
 # so a Windows checkout does not turn every re-publish into a whole-tree diff.
 docs/wifi-handoff/** text eol=lf
+
+# Patch files are applied with git apply, which treats every byte of a context
+# line literally: a CRLF conversion on checkout breaks the hunk. Pin them.
+patches/*.patch text eol=lf
