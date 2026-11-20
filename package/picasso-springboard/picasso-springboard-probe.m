@@ -732,6 +732,50 @@ static void picasso_statusbar_start(void)
     }
 }
 
+
+/* ---------------------------------------------------------------------------
+ * TLS trust bypass (diagnostic only).
+ *
+ * picasso has no AppleSPUTimesync and the wall clock may still be wrong, so
+ * every https handshake stops right after the server's certificate chain
+ * (1510 + 1198 + 66 bytes arrive, then the client sends nothing).  Interposing
+ * SecTrustEvaluate / SecTrustEvaluateWithError makes the system accept what the
+ * server presents, which separates "certificate/trust problem" from
+ * "TLS or transport problem" on this port.  Remove once time or the trust
+ * store is fixed.
+ * ------------------------------------------------------------------------- */
+#include <Security/Security.h>
+
+static OSStatus
+picasso_trust_evaluate(SecTrustRef trust, SecTrustResultType *result)
+{
+    (void)trust;
+    if (result != NULL) {
+        *result = kSecTrustResultProceed;
+    }
+    printf("PICASSO_TRUST bypass SecTrustEvaluate\n");
+    return errSecSuccess;
+}
+
+static bool
+picasso_trust_evaluate_with_error(SecTrustRef trust, CFErrorRef *error)
+{
+    (void)trust;
+    if (error != NULL) {
+        *error = NULL;
+    }
+    printf("PICASSO_TRUST bypass SecTrustEvaluateWithError\n");
+    return true;
+}
+
+__attribute__((used)) static struct {
+    const void *replacement;
+    const void *original;
+} picasso_trust_interpose[] __attribute__((section("__DATA,__interpose"))) = {
+    { (const void *)picasso_trust_evaluate, (const void *)SecTrustEvaluate },
+    { (const void *)picasso_trust_evaluate_with_error, (const void *)SecTrustEvaluateWithError },
+};
+
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
