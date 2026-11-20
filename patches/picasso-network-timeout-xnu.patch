@@ -476,3 +476,22 @@
  
  /* PICASSO_SERVICE_TRACE_BEGIN */
  #if DEVELOPMENT || DEBUG
+diff --git a/bsd/kern/uipc_socket.c b/bsd/kern/uipc_socket.c
+--- a/bsd/kern/uipc_socket.c
++++ b/bsd/kern/uipc_socket.c
+@@ -1896,6 +1896,14 @@
+ 			error = (*so->so_proto->pr_usrreqs->pru_connectx)
+ 			    (so, src, dst, p, ifscope, aid, pcid,
+ 			    flags, arg, arglen, auio, bytes_written);
+ 			if (error != 0) {
++				{
++					static unsigned connectx_said;
++
++					if (__atomic_fetch_add(&connectx_said, 1, __ATOMIC_RELAXED) < 32) {
++						printf("PICASSO_NET connectx failed error=%d ifscope=%u flags=%#x pid=%d\n",
++						    error, ifscope, flags, proc_pid(p));
++					}
++				}
+ 				so->so_state &= ~SS_ISCONNECTING;
+ 				if (error != EINPROGRESS) {
+ 					so->so_flags1 &= ~SOF1_PRECONNECT_DATA;

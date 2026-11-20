@@ -76,7 +76,7 @@ net_if_unit(unsigned unit)
  * with it (up to NAMES_MAX lines).
  */
 #define NAMES_MAX       3000
-static uint32_t net_trace, net_names;
+static uint32_t net_trace, net_names, net_ports;
 
 static void
 trace_frame(const char *way, const uint8_t *frame, size_t length, size_t whole)
@@ -86,12 +86,31 @@ trace_frame(const char *way, const uint8_t *frame, size_t length, size_t whole)
 	uint16_t type;
 	bool ports;
 
-	if (length < ETHER_HDR_LEN + 28 || (said >= net_trace && (!net_names || names >= NAMES_MAX))) {
+	if (length < ETHER_HDR_LEN + 28) {
 		return;
 	}
 	type = (uint16_t)(frame[12] << 8 | frame[13]);
 	l4 = ip + 4 * (ip[0] & 0xf);
 	ports = type == ETHERTYPE_IP && (ip[9] == IPPROTO_TCP || ip[9] == IPPROTO_UDP) && l4 + 4 <= end;
+	/* net_ports=1: every IPv4 TCP/UDP frame regardless of net_trace, so a
+	 * daemon that does try to talk (timed's NTP, mDNSResponder) is visible
+	 * even after the boot budget was spent on ARP and IPv6.  This is the
+	 * only way to see "does anything on this device open a socket at all"
+	 * without a user touching the screen. */
+	if (net_ports && ports) {
+		static uint32_t port_said;
+
+		if (port_said < 96) {
+			port_said++;
+			printf("net: %s IPv4 %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u (%lu bytes)\n",
+			    way, ip[12], ip[13], ip[14], ip[15], l4[0] << 8 | l4[1],
+			    ip[16], ip[17], ip[18], ip[19], l4[2] << 8 | l4[3],
+			    (unsigned long)whole);
+		}
+	}
+	if (said >= net_trace && (!net_names || names >= NAMES_MAX)) {
+		return;
+	}
 	if (net_names && names < NAMES_MAX && ports && way[0] == 'o') {
 		if (ip[9] == IPPROTO_UDP && (l4[2] << 8 | l4[3]) == 53 && l4 + 8 + 12 < end) {
 			char name[128];
@@ -498,6 +517,7 @@ hakios_net_attach(const struct hakios_net_link *link)
 			once = true;
 			PE_parse_boot_argn("net_trace", &net_trace, sizeof(net_trace));
 			PE_parse_boot_argn("net_names", &net_names, sizeof(net_names));
+			PE_parse_boot_argn("net_ports", &net_ports, sizeof(net_ports));
 		}
 	}
 	if (n->link != NULL) {
@@ -554,5 +574,6 @@ hakios_net_init(void)
 {
 	PE_parse_boot_argn("net_trace", &net_trace, sizeof(net_trace));
 	PE_parse_boot_argn("net_names", &net_names, sizeof(net_names));
+	PE_parse_boot_argn("net_ports", &net_ports, sizeof(net_ports));
 	hakios_virtio_net_init();
 }
