@@ -13,6 +13,7 @@
 #include <string.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+#include <sys/time.h>
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -732,50 +733,6 @@ static void picasso_statusbar_start(void)
     }
 }
 
-
-/* ---------------------------------------------------------------------------
- * TLS trust bypass (diagnostic only).
- *
- * picasso has no AppleSPUTimesync and the wall clock may still be wrong, so
- * every https handshake stops right after the server's certificate chain
- * (1510 + 1198 + 66 bytes arrive, then the client sends nothing).  Interposing
- * SecTrustEvaluate / SecTrustEvaluateWithError makes the system accept what the
- * server presents, which separates "certificate/trust problem" from
- * "TLS or transport problem" on this port.  Remove once time or the trust
- * store is fixed.
- * ------------------------------------------------------------------------- */
-#include <Security/Security.h>
-
-static OSStatus
-picasso_trust_evaluate(SecTrustRef trust, SecTrustResultType *result)
-{
-    (void)trust;
-    if (result != NULL) {
-        *result = kSecTrustResultProceed;
-    }
-    printf("PICASSO_TRUST bypass SecTrustEvaluate\n");
-    return errSecSuccess;
-}
-
-static bool
-picasso_trust_evaluate_with_error(SecTrustRef trust, CFErrorRef *error)
-{
-    (void)trust;
-    if (error != NULL) {
-        *error = NULL;
-    }
-    printf("PICASSO_TRUST bypass SecTrustEvaluateWithError\n");
-    return true;
-}
-
-__attribute__((used)) static struct {
-    const void *replacement;
-    const void *original;
-} picasso_trust_interpose[] __attribute__((section("__DATA,__interpose"))) = {
-    { (const void *)picasso_trust_evaluate, (const void *)SecTrustEvaluate },
-    { (const void *)picasso_trust_evaluate_with_error, (const void *)SecTrustEvaluateWithError },
-};
-
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
@@ -787,6 +744,26 @@ static void picasso_springboard_probe(void)
         pthread_t worker, dns_worker;
 
         wifiui_log("PICASSO_WIFIUI loaded in configd\n");
+    /* picasso has no AppleSPUTimesync: nothing in the system moves the wall
+     * clock, TLS certificate checks then fail and every https page stalls
+     * right after the server certificate chain.  configd runs as root here,
+     * so one settimeofday() is enough to put the calendar into the range
+     * Apple's certificates are valid for.  Idempotent: only moves it once,
+     * and only when the clock is still clearly before 2024. */
+    {
+        struct timeval now, want;
+
+        if (gettimeofday(&now, NULL) == 0 && now.tv_sec < 1704067200) {   /* 2024-01-01 */
+            want.tv_sec = 1795219200;   /* 2026-11-21 00:00:00 UTC */
+            want.tv_usec = 0;
+            if (settimeofday(&want, NULL) == 0) {
+                printf("PICASSO_WIFIUI wall clock set to 2026-11-21\n");
+            } else {
+                printf("PICASSO_WIFIUI wall clock settimeofday failed\n");
+            }
+        }
+    }
+
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
         /* Independent of the bootstrap path on purpose (chain-607). */
