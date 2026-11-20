@@ -288,16 +288,37 @@ net_ioctl(ifnet_t ifp, u_long command, void *data)
 	switch (command) {
 	case SIOCAIFADDR:
 	case SIOCSIFADDR: {
-		struct ifaliasreq *alias = data;
-		const uint8_t *a = (const uint8_t *)&((struct sockaddr_in *)(void *)&alias->ifra_addr)->sin_addr.s_addr;
+		static int hand_to_stack = -1;
 		char who[32] = "?";
 
+		if (hand_to_stack < 0) {
+			unsigned on = 0;
+
+			(void)PE_parse_boot_argn("ifaddr", &on, sizeof(on));
+			hand_to_stack = on != 0;
+		}
 		proc_selfname(who, sizeof(who));
-		printf("net: %s on en0 by %s: %u.%u.%u.%u\n", command == SIOCAIFADDR ? "SIOCAIFADDR" : "SIOCSIFADDR",
-		    who, a[0], a[1], a[2], a[3]);
 		if (command == SIOCSIFADDR) {
+			/* data here is struct ifreq, not ifaliasreq: printing
+			 * ifra_addr read past the useful part and produced a bogus
+			 * address (67.0.0.0).  Only the caller is worth naming. */
+			printf("net: SIOCSIFADDR on en0 by %s (hand_to_stack=%d)\n", who, hand_to_stack);
+			if (hand_to_stack) {
+				/* Answering "ok" without installing an address makes
+				 * configd's IPConfiguration believe the interface is
+				 * already configured, so it never reaches SIOCAIFADDR and
+				 * no IPv4 service is ever published.  Returning
+				 * EOPNOTSUPP hands the command to in_control instead. */
+				error = EOPNOTSUPP;
+				break;
+			}
 			ifnet_set_flags(ifp, IFF_UP, IFF_UP);
 			break;
+		}
+		{
+			const uint8_t *a = (const uint8_t *)&((struct sockaddr_in *)(void *)&((struct ifaliasreq *)data)->ifra_addr)->sin_addr.s_addr;
+
+			printf("net: SIOCAIFADDR on en0 by %s: %u.%u.%u.%u\n", who, a[0], a[1], a[2], a[3]);
 		}
 		/* SIOCAIFADDR from someone else (configd): let the kernel's own in_control do it. */
 		error = EOPNOTSUPP;
