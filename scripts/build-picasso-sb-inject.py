@@ -32,6 +32,7 @@ def main():
     compile_cmd = [clang, '-arch', 'arm64', '-isysroot', sdk, '-miphoneos-version-min=16.0',
                    '-dynamiclib', '-Wl,-install_name,/usr/lib/libpicasso-sb.dylib', '-fobjc-arc', '-framework', 'Foundation',
                    '-framework', 'CoreFoundation', '-framework', 'UIKit', '-framework', 'Metal', '-framework', 'Security',
+                   '-Wl,-no_shared_cache_eligible',
                    '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations',
                    '-o', str(output), str(source)]
     subprocess.run(compile_cmd, check=True)
