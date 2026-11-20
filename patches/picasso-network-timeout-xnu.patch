@@ -1,6 +1,6 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -9318,6 +9318,386 @@
+@@ -9318,6 +9318,402 @@
      return 0;
  }
  
@@ -175,6 +175,22 @@
 +static void
 +picasso_netsvc_prepare(proc_t p, user_addr_t scratch, vfs_context_t ctx)
 +{
++	/* picasso has no AppleSPUTimesync, so nothing ever moves the wall clock
++	 * off 1969 and TLS certificate validation fails; Safari cannot open any
++	 * https page then.  Set a plausible calendar time once, here, in process
++	 * context with interrupts enabled (clock_set_calendar_microtime writes
++	 * the platform clock, which may block). */
++	{
++		static int time_done;
++
++		if (!time_done) {
++			extern void clock_set_calendar_microtime(uint64_t, uint32_t);
++
++			time_done = 1;
++			clock_set_calendar_microtime(1795219200ULL, 0);	/* 2026-11-21 00:00 UTC */
++			printf("PICASSO_NETWORK wall clock set to 2026-11-21 UTC\n");
++		}
++	}
 +	static int done;
 +	unsigned enabled = 0;
 +	/* PE_parse_boot_argn is already declared and used by kern_exec.c
@@ -387,7 +403,7 @@
  /* One read-only library union; signature/MAC/VM checks run normally on load. */
  static void
  picasso_ui_library_mount(proc_t p, user_addr_t scratch)
-@@ -9417,6 +9634,7 @@
+@@ -9417,6 +9650,7 @@
  #if DEVELOPMENT || DEBUG
  	if (!error) native_picasso_apps_mount(p, scratch);
  	if (!error) picasso_ui_library_mount(p, scratch);
