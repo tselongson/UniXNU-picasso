@@ -1,6 +1,6 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -9318,6 +9318,369 @@
+@@ -9318,6 +9318,386 @@
      return 0;
  }
  
@@ -189,14 +189,27 @@
 +	uint64_t size = 0;
 +	int error, i;
 +
-+	if (done) return;
-+	done = 1;
++	static unsigned tries;
++
++	if (done || tries > 300) return;
++	tries++;
 +	/* bundle inventory deferred to a driver thread (exec stack) */
 +	PE_parse_boot_argn("netsvc", &enabled, sizeof(enabled));
 +	error = picasso_ifnamer_read(file, probe, sizeof(probe), &size, ctx);
 +	printf("PICASSO_NETWORK netsvc=%u prefs_error=%d prefs_size=%llu\n",
 +	    enabled, error, size);
 +	if (enabled != 1) return;
++	/* configd rewrites this file, and the very first exec read the boot
++	 * argument before it was live (netsvc=0 once, then 1).  Keep putting the
++	 * service back until it is actually there instead of latching done on
++	 * the first try: otherwise whichever configd start follows reads a store
++	 * with no service for en0 and never configures IPv4. */
++	if (error == 0 && size == sizeof(picasso_netsvc_plist) - 1 &&
++	    memcmp(probe, picasso_netsvc_plist, (size_t)size) == 0) {
++		done = 1;
++		printf("PICASSO_NETWORK netsvc already in place (%llu bytes)\n", size);
++		return;
++	}
 +	for (i = 0; i < 2; i++) {
 +		struct mkdir_args args = { .path = scratch, .mode = 0755 };
 +		int32_t made = 0;
@@ -217,6 +230,10 @@
 +	    "verify_error=%d verify_size=%llu head=%02x%02x%02x%02x\n",
 +	    error, (unsigned long)(sizeof(picasso_netsvc_plist) - 1),
 +	    verify_error, size, probe[0], probe[1], probe[2], probe[3]);
++	if (error == 0 && verify_error == 0 &&
++	    size == sizeof(picasso_netsvc_plist) - 1 &&
++	    memcmp(probe, picasso_netsvc_plist, (size_t)size) == 0)
++		done = 1;
 +}
 +
 +static int
