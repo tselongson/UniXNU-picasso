@@ -172,21 +172,6 @@ bind_interface_user_client_enabled(void)
 	return enabled == 1;
 }
 
-/* SystemConfiguration classifies an interface by this number: 6 is IFT_ETHER,
- * 71 is IFT_IEEE80211.  en0 has always been published as 6, so although the
- * service in preferences.plist says AirPort, the interface it names describes
- * itself as wired Ethernet -- and configd therefore never creates an IPv4
- * service for it, which is the last reason no application sends a packet.
- * Gate: iface80211=1, an exact single-variable A/B. */
-static unsigned long long
-iface_type(void)
-{
-	unsigned wifi = 0;
-
-	PE_parse_boot_argn("iface80211", &wifi, sizeof(wifi));
-	return wifi == 1 ? 71ULL : 6ULL;
-}
-
 class IO80211Controller : public IOService
 {
 	OSDeclareDefaultStructors(IO80211Controller);
@@ -340,7 +325,7 @@ HakiosWLANStart(const char * interface, const uint8_t * address)
 	wlan->setProperty("IOInterfaceName", interface);
 	wlan->setProperty("BSD Name", interface);
 	wlan->setProperty("IOInterfaceNamePrefix", "en");
-	if ((number = OSNumber::withNumber(iface_type(), 32)) != NULL) {
+	if ((number = OSNumber::withNumber(6ULL, 32)) != NULL) {        /* IFT_ETHER */
 		wlan->setProperty("IOInterfaceType", number);
 		number->release();
 	}
