@@ -6268,7 +6268,7 @@ new file mode 100644
 ++		if (error && __atomic_fetch_add(&picassoExecFailures, 1, __ATOMIC_RELAXED) < 48) {
 ++			printf("PICASSO_EXEC failed error=%d path=%.200s\n", error,
 ++			    imgp->ip_strings + strlen(EXECUTABLE_KEY));
-++		} else if (!error && __atomic_fetch_add(&picassoExecs, 1, __ATOMIC_RELAXED) < 200) {
+++		} else if (!error && __atomic_fetch_add(&picassoExecs, 1, __ATOMIC_RELAXED) < 600) {
 ++			printf("PICASSO_EXEC ok pid=%d path=%.200s\n", proc_getpid(p),
 ++			    imgp->ip_strings + strlen(EXECUTABLE_KEY));
 ++		}
