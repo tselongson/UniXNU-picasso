@@ -215,7 +215,8 @@ jobs:
           mkdir -p "$MNT"
           echo "--- hdiutil attach (no mount) ---"
           hdiutil attach -nomount -readonly "$APP" 2>&1 | tee /tmp/appcryptex-attach.log
-          DEV=$(awk '/^\/dev\/disk/{print $1; exit}' /tmp/appcryptex-attach.log)
+          DEV=$(awk '/^\/dev\/disk[0-9]+s[0-9]+/{print $1; exit}' /tmp/appcryptex-attach.log)
+          if [ -z "$DEV" ]; then DEV=$(awk '/^\/dev\/disk/{print $1; exit}' /tmp/appcryptex-attach.log); fi
           echo "APP_DEV=$DEV"
           if [ -z "$DEV" ]; then
             echo "APP_DEV_MISSING"
