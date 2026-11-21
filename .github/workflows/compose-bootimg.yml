@@ -215,7 +215,7 @@ jobs:
           mkdir -p "$MNT"
           echo "--- hdiutil attach ---"
           hdiutil attach "$APP" -nobrowse -readonly 2>&1 | tee /tmp/appcryptex-attach.log
-          MP=$(sed -n 's|^\(/dev/[^ ]*\)[[:space:]]*\(/Volumes/.*\)$|\2|p' /tmp/appcryptex-attach.log | head -1)
+          MP=$(awk '{for(i=1;i<=NF;i++) if ($i ~ /^\/Volumes\//) print $i}' /tmp/appcryptex-attach.log | head -1)
           echo "APP_MOUNTPOINT=$MP"
           if [ -z "$MP" ]; then
             echo "--- hdiutil info ---"
