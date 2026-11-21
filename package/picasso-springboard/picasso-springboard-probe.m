@@ -1068,6 +1068,23 @@ picasso_web_probe_start(void)
             Class fb = NSClassFromString(@"FBSystemService");
             picasso_probe_log("PICASSO_WEBPROBE fb=%s (class only, signature not safe)\n",
                               fb != nil ? "yes" : "no");
+
+            /* SpringBoard's own launch path: SpringBoardServices/SBSLaunchApplicationWithIdentifier.
+             * LSApplicationWorkspace and UIApplication openURL both refused (ls=0 / ok=0),
+             * but this is the call the Home screen icon ends up in. */
+            {
+                void *sbs = dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_LAZY);
+                int (*sbs_launch)(CFStringRef, unsigned char) =
+                    sbs != NULL ? (int (*)(CFStringRef, unsigned char))dlsym(sbs, "SBSLaunchApplicationWithIdentifier") : NULL;
+
+                picasso_probe_log("PICASSO_WEBPROBE sbs=%s sym=%s\n",
+                                  sbs != NULL ? "ok" : "fail", sbs_launch != NULL ? "ok" : "no");
+                if (sbs_launch != NULL) {
+                    int rc = sbs_launch(CFSTR("com.apple.mobilesafari"), 0);
+
+                    picasso_probe_log("PICASSO_WEBPROBE sbs-launch rc=%d\n", rc);
+                }
+            }
         });
     });
 }
