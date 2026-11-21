@@ -753,7 +753,25 @@ static void picasso_statusbar_start(void)
  * No interposing tuples and no Security.framework: the library stays
  * shared-cache eligible, so the build behaves exactly like the image that
  * already boots.
+ *
+ * IMPORTANT: printf() goes to the process stdout, which is NOT the serial
+ * console for SpringBoard or apps; every line this project can see on COM5 is
+ * written by wifiui_log() -> /dev/console.  The probe therefore has to use
+ * picasso_probe_log(), otherwise the whole run is invisible on the console
+ * (that is exactly what happened with build=3).
  * ------------------------------------------------------------------------- */
+static void
+picasso_probe_log(const char *fmt, ...)
+{
+    char line[512];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    wifiui_log(line);
+}
+
 static void
 picasso_net_probe_one(const char *who, const char *label, const char *url)
 {
@@ -790,10 +808,9 @@ picasso_net_probe_one(const char *who, const char *label, const char *url)
     dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 30ull * NSEC_PER_SEC));
     [session finishTasksAndInvalidate];
 
-    printf("PICASSO_NETPROBE [%s] %s err=%ld domain=%s status=%ld bytes=%lu desc=%s\n",
+    picasso_probe_log("PICASSO_NETPROBE [%s] %s err=%ld domain=%s status=%ld bytes=%lu desc=%s\n",
            who, label, err_code, domain ? domain : "-", status, nbytes,
            desc ? desc : "-");
-    fflush(stdout);
     if (domain != NULL) {
         free(domain);
     }
@@ -828,17 +845,15 @@ picasso_net_probe_thread(void *arg)
             };
             unsigned i;
 
-            printf("PICASSO_NETPROBE build=3 process=%s clock=%ld\n", who, (long)tv.tv_sec);
-            fflush(stdout);
+            picasso_probe_log("PICASSO_NETPROBE build=4 process=%s clock=%ld\n", who, (long)tv.tv_sec);
             for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
                 struct stat st;
                 if (stat(paths[i], &st) == 0) {
-                    printf("PICASSO_NETPROBE path=%s exists=1 size=%lld mode=%o\n",
+                    picasso_probe_log("PICASSO_NETPROBE path=%s exists=1 size=%lld mode=%o\n",
                            paths[i], (long long)st.st_size, (unsigned)st.st_mode & 07777);
                 } else {
-                    printf("PICASSO_NETPROBE path=%s exists=0 errno=%d\n", paths[i], errno);
+                    picasso_probe_log("PICASSO_NETPROBE path=%s exists=0 errno=%d\n", paths[i], errno);
                 }
-                fflush(stdout);
             }
 
             /* 信任锚数量：0 = 系统没有任何根证书，https 必然失败 */
@@ -850,19 +865,18 @@ picasso_net_probe_thread(void *arg)
                     if (copy_anchors != NULL) {
                         CFArrayRef anchors = copy_anchors();
                         if (anchors != NULL) {
-                            printf("PICASSO_NETPROBE trust_anchors=%ld\n",
+                            picasso_probe_log("PICASSO_NETPROBE trust_anchors=%ld\n",
                                    (long)CFArrayGetCount(anchors));
                             CFRelease(anchors);
                         } else {
-                            printf("PICASSO_NETPROBE trust_anchors=null\n");
+                            picasso_probe_log("PICASSO_NETPROBE trust_anchors=null\n");
                         }
                     } else {
-                        printf("PICASSO_NETPROBE trust_anchors=symbol_missing\n");
+                        picasso_probe_log("PICASSO_NETPROBE trust_anchors=symbol_missing\n");
                     }
                 } else {
-                    printf("PICASSO_NETPROBE trust_anchors=framework_missing\n");
+                    picasso_probe_log("PICASSO_NETPROBE trust_anchors=framework_missing\n");
                 }
-                fflush(stdout);
             }
         }
 
@@ -909,6 +923,8 @@ static void picasso_springboard_probe(void)
     }
     // Record entry before either installation path can fail.
     picasso_ack("kern.picasso_inject_ack");
+    /* Immediate proof that THIS build of the library is the one loaded. */
+    picasso_probe_log("PICASSO_NETPROBE build=4 armed in %s\n", program ? program : "app");
     picasso_net_probe_start(program ? program : "app");
     @autoreleasepool {
         picasso_statusbar_start();
