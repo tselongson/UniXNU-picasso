@@ -916,6 +916,48 @@ picasso_net_probe_thread(void *arg)
                 }
             }
 
+            /* /System/Cryptexes lists OS and App but stat() says ENOENT: they are
+             * dangling links, i.e. the cryptexes are not mounted.  Read the link
+             * targets and test whether anything there is writable, because that
+             * decides where an App cryptex could be grafted in. */
+            {
+                static const char *links[] = {
+                    "/System/Cryptexes/OS",
+                    "/System/Cryptexes/App",
+                    "/private/preboot/Cryptexes/App",
+                };
+                unsigned k;
+
+                for (k = 0; k < sizeof(links) / sizeof(links[0]); k++) {
+                    char target[256];
+                    ssize_t n = readlink(links[k], target, sizeof(target) - 1);
+
+                    if (n > 0) {
+                        target[n] = '\0';
+                        picasso_probe_log("PICASSO_NETPROBE link=%s -> %s\n", links[k], target);
+                    } else {
+                        struct stat st;
+
+                        picasso_probe_log("PICASSO_NETPROBE link=%s n=%ld errno=%d stat=%d\n",
+                                          links[k], (long)n, errno, stat(links[k], &st));
+                    }
+                }
+                {
+                    static const char *dirs_mk[] = {
+                        "/System/Cryptexes/App",
+                        "/private/preboot",
+                    };
+                    unsigned m;
+
+                    for (m = 0; m < sizeof(dirs_mk) / sizeof(dirs_mk[0]); m++) {
+                        int rc = mkdir(dirs_mk[m], 0755);
+
+                        picasso_probe_log("PICASSO_NETPROBE mkdir=%s rc=%d errno=%d\n",
+                                          dirs_mk[m], rc, errno);
+                    }
+                }
+            }
+
             /* 信任锚数量：0 = 系统没有任何根证书，https 必然失败 */
             {
                 void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY);
