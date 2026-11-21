@@ -136,6 +136,20 @@ jobs:
           ls -lh "$IPSW"
           echo "UNIXNU_IPSW=$PWD/$IPSW" >> "$GITHUB_ENV"
 
+      # The App cryptex holds Safari's WebKit services (WebContent/Networking/GPU);
+      # without it a page can never render (measured on device: the XPCServices
+      # directory does not exist anywhere and /System/Cryptexes/App is a dangling
+      # link).  Print every cryptex/dmg member so the exact name can be pinned.
+      - name: List the cryptex members of the IPSW
+        run: |
+          python3 - "$UNIXNU_IPSW" <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if 'Cryptex' in n or n.lower().endswith('.dmg'):
+                      print('IPSW_MEMBER', n)
+          PY
+
       # The root volume the ADT's root-matching UUID selects comes from the
       # unchanged OS/SystemOS windows of the target IPSW (docs/guide/userdata).
       # Built here, converted to Android sparse (fastboot's streaming path),
