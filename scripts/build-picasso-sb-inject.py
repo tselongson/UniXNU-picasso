@@ -31,7 +31,7 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     compile_cmd = [clang, '-arch', 'arm64', '-isysroot', sdk, '-miphoneos-version-min=16.0',
                    '-dynamiclib', '-Wl,-install_name,/usr/lib/libpicasso-sb.dylib', '-fobjc-arc', '-framework', 'Foundation',
-                   '-framework', 'CoreFoundation', '-framework', 'UIKit', '-framework', 'Metal',
+                   '-framework', 'CoreFoundation', '-framework', 'UIKit', '-framework', 'Metal', '-framework', 'WebKit',
                    '-O2', '-Wall', '-Wextra', '-Werror',
                    '-o', str(output), str(source)]
     subprocess.run(compile_cmd, check=True)
