@@ -203,11 +203,14 @@ jobs:
         run: |
           set -u
           OS="out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER"
-          python3 ./unixnu ipsw fetch Cryptex1,AppOS 2>&1 | tee -a out/picasso/logs/actions-ipsw.log || true
-          echo "--- fetched members ---"
-          ls -1 "out/ipsw/$PICASSO_IPSW_BUILD" | head -40
-          APP=$(find "out/ipsw/$PICASSO_IPSW_BUILD" -maxdepth 2 -iname '*AppOS*' | head -1)
+          # The fetch prints the extracted member's path as its last line; the file
+          # itself is named by number (087-86715-047.dmg), so a name search misses it.
+          APP=$(python3 ./unixnu ipsw fetch Cryptex1,AppOS 2>&1 | tee -a out/picasso/logs/actions-ipsw.log | grep -v '^$' | tail -1)
           echo "APP_CANDIDATE=$APP"
+          if [ ! -e "$APP" ]; then
+            APP=$(find "out/ipsw/$PICASSO_IPSW_BUILD" -maxdepth 1 -name '*.dmg' -size -20M | head -1)
+            echo "APP_FALLBACK=$APP"
+          fi
           if [ -z "$APP" ]; then
             echo "APP_CRYPTEX_MISSING"
             exit 0
