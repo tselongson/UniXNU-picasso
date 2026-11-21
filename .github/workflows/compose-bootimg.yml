@@ -199,6 +199,36 @@ jobs:
           cp "out/ipsw/$PICASSO_BACKEND_BUILD/report.json" out/picasso/logs/kernel-donor.json
           echo "UNIXNU_KERNELCACHE=$PWD/out/ipsw/$PICASSO_BACKEND_BUILD/kernelcache.decompressed" >> "$GITHUB_ENV"
 
+      - name: Stage the App cryptex (Safari's WebKit services) into the seed source
+        run: |
+          set -u
+          OS="out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER"
+          python3 ./unixnu ipsw fetch Cryptex1,AppOS 2>&1 | tee -a out/picasso/logs/actions-ipsw.log || true
+          echo "--- fetched members ---"
+          ls -1 "out/ipsw/$PICASSO_IPSW_BUILD" | head -40
+          APP=$(find "out/ipsw/$PICASSO_IPSW_BUILD" -maxdepth 2 -iname '*AppOS*' | head -1)
+          echo "APP_CANDIDATE=$APP"
+          if [ -z "$APP" ]; then
+            echo "APP_CRYPTEX_MISSING"
+            exit 0
+          fi
+          MNT=""
+          if [ -d "$APP" ]; then
+            SRC="$APP"
+          else
+            MNT="$RUNNER_TEMP/appcryptex"
+            mkdir -p "$MNT"
+            hdiutil attach "$APP" -nobrowse -readonly -mountpoint "$MNT" >/dev/null
+            SRC="$MNT"
+          fi
+          echo "--- app cryptex root ---"
+          ls -1 "$SRC" | head -20
+          rm -rf "$OS/private/var/appcryptex"
+          mkdir -p "$OS/private/var/appcryptex"
+          ditto "$SRC" "$OS/private/var/appcryptex"
+          echo "APP_CRYPTEX_STAGED files=$(find "$OS/private/var/appcryptex" -type f | wc -l)"
+          if [ -n "$MNT" ]; then hdiutil detach "$MNT" >/dev/null 2>&1 || true; fi
+
       - name: Reuse persistent Data seed (new seed requires explicit input)
         env:
           GITHUB_TOKEN: ${{ github.token }}
