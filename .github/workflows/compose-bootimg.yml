@@ -239,6 +239,18 @@ jobs:
             hdiutil detach "$DEV" >/dev/null 2>&1
             exit 0
           fi
+          # The OS member is a read-only DMG mount, so the seed source has to become
+          # a writable clone before the App cryptex can join it.  cp -c is an APFS
+          # copy-on-write clone: instant, no extra space.
+          if [ ! -w "$OS/private/var" ]; then
+            SRC_OS="$RUNNER_TEMP/os-member"
+            rm -rf "$SRC_OS"
+            mkdir -p "$SRC_OS"
+            cp -cR "$OS"/. "$SRC_OS"/ 2>/dev/null || cp -R "$OS"/. "$SRC_OS"/
+            OS="$SRC_OS"
+            echo "PICASSO_OS_SOURCE=$SRC_OS" >> "$GITHUB_ENV"
+            echo "OS_CLONED=$SRC_OS"
+          fi
           rm -rf "$OS/private/var/appcryptex"
           mkdir -p "$OS/private/var/appcryptex"
           ditto "$MNT" "$OS/private/var/appcryptex"
@@ -265,7 +277,7 @@ jobs:
             cp out/picasso/ui-trust.json out/picasso/logs/ui-trust.json
           else
             sudo "$(command -v python3)" scripts/prepare-picasso-ram-data.py \
-              --tree "$UNIXNU_TREE" --source "out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER" \
+              --tree "$UNIXNU_TREE" --source "${PICASSO_OS_SOURCE:-out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER}" \
               --output out/picasso/ram-data --config out/picasso/.config \
               2>&1 | tee out/picasso/logs/actions-ram-data.log
           fi
