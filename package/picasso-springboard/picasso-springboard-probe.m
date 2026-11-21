@@ -17,6 +17,8 @@
 #include <unistd.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <sys/mount.h>
+#include <sys/param.h>
 #include <errno.h>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -954,6 +956,27 @@ picasso_net_probe_thread(void *arg)
 
                         picasso_probe_log("PICASSO_NETPROBE mkdir=%s rc=%d errno=%d\n",
                                           dirs_mk[m], rc, errno);
+                    }
+                }
+            }
+
+            /* The real mount layout: stat() cannot tell a missing path from an
+             * unmounted cryptex, getfsstat() can. */
+            {
+                struct statfs *mnt = NULL;
+                int count = getfsstat(NULL, 0, MNT_NOWAIT);
+                int i;
+
+                picasso_probe_log("PICASSO_NETPROBE mounts=%d\n", count);
+                if (count > 0) {
+                    mnt = (struct statfs *)calloc((size_t)count, sizeof(*mnt));
+                    if (mnt != NULL) {
+                        count = getfsstat(mnt, count * (int)sizeof(*mnt), MNT_NOWAIT);
+                        for (i = 0; i < count && i < 24; i++) {
+                            picasso_probe_log("PICASSO_NETPROBE mount[%d] %s on %s\n",
+                                              i, mnt[i].f_fstypename, mnt[i].f_mntonname);
+                        }
+                        free(mnt);
                     }
                 }
             }
