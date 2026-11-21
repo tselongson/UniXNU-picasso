@@ -14,6 +14,8 @@
 #include <sys/sysctl.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <sys/stat.h>
+#include <errno.h>
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -811,10 +813,59 @@ picasso_net_probe_thread(void *arg)
     sleep(150);
 
     gettimeofday(&tv, NULL);
-    printf("PICASSO_NETPROBE build=2 process=%s clock=%ld\n", who, (long)tv.tv_sec);
-    fflush(stdout);
 
     @autoreleasepool {
+        /* ---- 实测信任库，不靠推断 ---- */
+        {
+            static const char *paths[] = {
+                "/private/var/protected/trustd",
+                "/private/var/protected/trustd/TrustStore.sqlite3",
+                "/System/Library/Security/Certificates.bundle",
+                "/System/Library/Frameworks/Security.framework/Security",
+                "/usr/lib/libcorecrypto.dylib",
+                "/usr/lib/libnetwork.dylib",
+                "/usr/lib/libpicasso-sb.dylib",
+            };
+            unsigned i;
+
+            printf("PICASSO_NETPROBE build=3 process=%s clock=%ld\n", who, (long)tv.tv_sec);
+            fflush(stdout);
+            for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+                struct stat st;
+                if (stat(paths[i], &st) == 0) {
+                    printf("PICASSO_NETPROBE path=%s exists=1 size=%lld mode=%o\n",
+                           paths[i], (long long)st.st_size, (unsigned)st.st_mode & 07777);
+                } else {
+                    printf("PICASSO_NETPROBE path=%s exists=0 errno=%d\n", paths[i], errno);
+                }
+                fflush(stdout);
+            }
+
+            /* 信任锚数量：0 = 系统没有任何根证书，https 必然失败 */
+            {
+                void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY);
+                if (sec != NULL) {
+                    CFArrayRef (*copy_anchors)(void) =
+                        (CFArrayRef (*)(void))dlsym(sec, "SecTrustCopyAnchorCertificates");
+                    if (copy_anchors != NULL) {
+                        CFArrayRef anchors = copy_anchors();
+                        if (anchors != NULL) {
+                            printf("PICASSO_NETPROBE trust_anchors=%ld\n",
+                                   (long)CFArrayGetCount(anchors));
+                            CFRelease(anchors);
+                        } else {
+                            printf("PICASSO_NETPROBE trust_anchors=null\n");
+                        }
+                    } else {
+                        printf("PICASSO_NETPROBE trust_anchors=symbol_missing\n");
+                    }
+                } else {
+                    printf("PICASSO_NETPROBE trust_anchors=framework_missing\n");
+                }
+                fflush(stdout);
+            }
+        }
+
         picasso_net_probe_one(who, "https", "https://www.apple.com/library/test/success.html");
         picasso_net_probe_one(who, "https2", "https://captive.apple.com/hotspot-detect.html");
         picasso_net_probe_one(who, "http", "http://neverssl.com/");
@@ -849,7 +900,6 @@ static void picasso_springboard_probe(void)
         pthread_t worker, dns_worker;
 
         wifiui_log("PICASSO_WIFIUI loaded in configd\n");
-        picasso_net_probe_start("configd");
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
         /* Independent of the bootstrap path on purpose (chain-607). */
