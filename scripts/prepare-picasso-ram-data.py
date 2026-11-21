@@ -437,7 +437,7 @@ def mounted(image, target, readonly=False):
         subprocess.run(['hdiutil', 'detach', device], check=True)
 
 
-def prepare(tree, source, output, config):
+def prepare(tree, source, output, config, extra_var=None):
     if sys.platform != 'darwin' or os.geteuid() != 0:
         raise ValueError('APFS Data preparation requires macOS and root')
     if not source.is_file() or output.exists():
@@ -473,6 +473,20 @@ def prepare(tree, source, output, config):
         with mounted(image, target) as info:
             identity = canonical_uuid(info['VolumeUUID'])
             copy_var(source_var, target, manifest)
+            # Optional extra tree (the App cryptex): the OS member is a read-only
+            # DMG, so it cannot carry this itself.  It is not part of the original
+            # var manifest; verify_var() only checks the entries it lists.
+            if extra_var is not None and Path(extra_var).is_dir():
+                destination = target / 'private/var/appcryptex'
+                copied = 0
+                for root, _dirs, names in os.walk(extra_var):
+                    relative = os.path.relpath(root, extra_var)
+                    out_dir = destination if relative == '.' else destination / relative
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    for name in names:
+                        shutil.copy2(Path(root) / name, out_dir / name, follow_symlinks=False)
+                        copied += 1
+                print(f'PICASSO_EXTRA_VAR files={copied}', flush=True)
             created = add_directories(target)
             verify_var(target, manifest)
             launch_policy = install_offline_policy(target, jobs)
@@ -520,5 +534,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('tree', 'source', 'output', 'config'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--extra-var', type=Path, default=None,
+                        help='optional tree copied into private/var/appcryptex (App cryptex)')
     args = parser.parse_args()
-    prepare(*(getattr(args, name).resolve() for name in ('tree', 'source', 'output', 'config')))
+    prepare(*(getattr(args, name).resolve() for name in ('tree', 'source', 'output', 'config')),
+            extra_var=args.extra_var.resolve() if args.extra_var else None)
