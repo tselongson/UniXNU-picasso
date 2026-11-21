@@ -733,6 +733,111 @@ static void picasso_statusbar_start(void)
     }
 }
 
+
+/* ---------------------------------------------------------------------------
+ * TLS reachability probe (diagnostic, no hooks).
+ *
+ * Every https connection on this port stops right after the server's
+ * certificate chain (74/66/1510/1510/1408 bytes in, then nothing), so the
+ * failure lives in userland and never reaches the serial console.  This probe
+ * makes the same request the browser would make and prints the exact error
+ * domain/code, which separates "no trust anchors", "signature/decrypt error"
+ * and "socket problem".
+ *
+ *   PICASSO_NETPROBE build=2 process=... clock=...
+ *   PICASSO_NETPROBE ... https err=<code> domain=<domain> status=<http> bytes=<n>
+ *   PICASSO_NETPROBE ... http  err=<code> domain=<domain> status=<http> bytes=<n>
+ *
+ * No interposing tuples and no Security.framework: the library stays
+ * shared-cache eligible, so the build behaves exactly like the image that
+ * already boots.
+ * ------------------------------------------------------------------------- */
+static void
+picasso_net_probe_one(const char *who, const char *label, const char *url)
+{
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+    NSURLSession *session;
+    NSURLSessionDataTask *task;
+    dispatch_semaphore_t done;
+    __block long err_code = 0;
+    __block long status = 0;
+    __block unsigned long nbytes = 0;
+    __block char *domain = NULL;
+    __block char *desc = NULL;
+    cfg.timeoutIntervalForRequest = 15;
+    cfg.timeoutIntervalForResource = 25;
+    cfg.waitsForConnectivity = NO;
+    session = [NSURLSession sessionWithConfiguration:cfg];
+    done = dispatch_semaphore_create(0);
+
+    task = [session dataTaskWithURL:[NSURL URLWithString:[NSString stringWithUTF8String:url]]
+                 completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+        if (err != nil) {
+            const char *d = [[err domain] UTF8String];
+            const char *m = [[err localizedDescription] UTF8String];
+            err_code = (long)[err code];
+            domain = strdup(d ? d : "?");
+            desc = strdup(m ? m : "?");
+        } else {
+            status = (long)[(NSHTTPURLResponse *)resp statusCode];
+            nbytes = (unsigned long)[data length];
+        }
+        dispatch_semaphore_signal(done);
+    }];
+    [task resume];
+    dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 30ull * NSEC_PER_SEC));
+    [session finishTasksAndInvalidate];
+
+    printf("PICASSO_NETPROBE [%s] %s err=%ld domain=%s status=%ld bytes=%lu desc=%s\n",
+           who, label, err_code, domain ? domain : "-", status, nbytes,
+           desc ? desc : "-");
+    fflush(stdout);
+    if (domain != NULL) {
+        free(domain);
+    }
+    if (desc != NULL) {
+        free(desc);
+    }
+}
+
+static void *
+picasso_net_probe_thread(void *arg)
+{
+    char who[64];
+    struct timeval tv;
+
+    snprintf(who, sizeof(who), "%s", (const char *)arg);
+    /* Give the boot-time interface setup and DNS publication time to finish. */
+    sleep(150);
+
+    gettimeofday(&tv, NULL);
+    printf("PICASSO_NETPROBE build=2 process=%s clock=%ld\n", who, (long)tv.tv_sec);
+    fflush(stdout);
+
+    @autoreleasepool {
+        picasso_net_probe_one(who, "https", "https://www.apple.com/library/test/success.html");
+        picasso_net_probe_one(who, "https2", "https://captive.apple.com/hotspot-detect.html");
+        picasso_net_probe_one(who, "http", "http://neverssl.com/");
+    }
+    return NULL;
+}
+
+static void
+picasso_net_probe_start(const char *who)
+{
+    pthread_t t;
+    char *copy = strdup(who);
+
+    if (copy == NULL) {
+        return;
+    }
+    if (pthread_create(&t, NULL, picasso_net_probe_thread, copy) == 0) {
+        pthread_detach(t);
+    } else {
+        free(copy);
+    }
+}
+
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
@@ -744,26 +849,7 @@ static void picasso_springboard_probe(void)
         pthread_t worker, dns_worker;
 
         wifiui_log("PICASSO_WIFIUI loaded in configd\n");
-    /* picasso has no AppleSPUTimesync: nothing in the system moves the wall
-     * clock, TLS certificate checks then fail and every https page stalls
-     * right after the server certificate chain.  configd runs as root here,
-     * so one settimeofday() is enough to put the calendar into the range
-     * Apple's certificates are valid for.  Idempotent: only moves it once,
-     * and only when the clock is still clearly before 2024. */
-    {
-        struct timeval now, want;
-
-        if (gettimeofday(&now, NULL) == 0 && now.tv_sec < 1704067200) {   /* 2024-01-01 */
-            want.tv_sec = 1795219200;   /* 2026-11-21 00:00:00 UTC */
-            want.tv_usec = 0;
-            if (settimeofday(&want, NULL) == 0) {
-                printf("PICASSO_WIFIUI wall clock set to 2026-11-21\n");
-            } else {
-                printf("PICASSO_WIFIUI wall clock settimeofday failed\n");
-            }
-        }
-    }
-
+        picasso_net_probe_start("configd");
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
         /* Independent of the bootstrap path on purpose (chain-607). */
@@ -773,6 +859,7 @@ static void picasso_springboard_probe(void)
     }
     // Record entry before either installation path can fail.
     picasso_ack("kern.picasso_inject_ack");
+    picasso_net_probe_start(program ? program : "app");
     @autoreleasepool {
         picasso_statusbar_start();
         picasso_install_astc_guard();
