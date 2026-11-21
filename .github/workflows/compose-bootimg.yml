@@ -213,25 +213,36 @@ jobs:
           MNT="$RUNNER_TEMP/appcryptex"
           rm -rf "$MNT"
           mkdir -p "$MNT"
-          echo "--- hdiutil attach ---"
-          hdiutil attach "$APP" -nobrowse -readonly 2>&1 | tee /tmp/appcryptex-attach.log
-          MP=$(awk '{for(i=1;i<=NF;i++) if ($i ~ /^\/Volumes\//) print $i}' /tmp/appcryptex-attach.log | head -1)
-          echo "APP_MOUNTPOINT=$MP"
-          if [ -z "$MP" ]; then
-            echo "--- hdiutil info ---"
-            hdiutil info | tail -20
-            echo "--- ls /Volumes ---"
-            ls -1 /Volumes
-            echo "APP_MOUNT_MISSING"
+          echo "--- hdiutil attach (no mount) ---"
+          hdiutil attach -nomount -readonly "$APP" 2>&1 | tee /tmp/appcryptex-attach.log
+          DEV=$(awk '/^\/dev\/disk/{print $1; exit}' /tmp/appcryptex-attach.log)
+          echo "APP_DEV=$DEV"
+          if [ -z "$DEV" ]; then
+            echo "APP_DEV_MISSING"
             exit 0
           fi
+          echo "--- snapshots ---"
+          diskutil apfs listSnapshots "$DEV" 2>&1 | tee /tmp/appcryptex-snap.log | head -20
+          SNAP=$(awk -F': ' '/Name:/{print $2; exit}' /tmp/appcryptex-snap.log)
+          echo "APP_SNAP=$SNAP"
+          if [ -n "$SNAP" ]; then
+            mount_apfs -o ro -s "$SNAP" "$DEV" "$MNT" 2>&1 | head -5
+          else
+            mount_apfs -o ro "$DEV" "$MNT" 2>&1 | head -5
+          fi
           echo "--- app cryptex root ---"
-          ls -1 "$MP" | head -20
+          ls -1 "$MNT" | head -20
+          echo "APP_CRYPTEX_STAGED files=$(find "$MNT" -type f | wc -l)"
+          if [ ! -e "$MNT/System" ]; then
+            echo "APP_CRYPTEX_INCOMPLETE"
+            hdiutil detach "$DEV" >/dev/null 2>&1
+            exit 0
+          fi
           rm -rf "$OS/private/var/appcryptex"
           mkdir -p "$OS/private/var/appcryptex"
-          ditto "$MP" "$OS/private/var/appcryptex"
-          echo "APP_CRYPTEX_STAGED files=$(find "$OS/private/var/appcryptex" -type f | wc -l)"
-          hdiutil detach "$MP" >/dev/null 2>&1
+          ditto "$MNT" "$OS/private/var/appcryptex"
+          echo "APP_CRYPTEX_COPIED files=$(find "$OS/private/var/appcryptex" -type f | wc -l)"
+          hdiutil detach "$DEV" >/dev/null 2>&1
           exit 0
 
       - name: Reuse persistent Data seed (new seed requires explicit input)
