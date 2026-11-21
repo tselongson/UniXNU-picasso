@@ -8,6 +8,7 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <dispatch/dispatch.h>
@@ -848,6 +849,11 @@ picasso_net_probe_thread(void *arg)
                 "/System/Library/PrivateFrameworks/WebKit.framework/XPCServices",
                 "/System/Library/PrivateFrameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc",
                 "/System/Library/PrivateFrameworks/WebKit.framework/XPCServices/com.apple.WebKit.Networking.xpc",
+                "/System/Cryptexes",
+                "/System/Cryptexes/OS",
+                "/System/Cryptexes/App",
+                "/System/Cryptexes/OS/System/Library/PrivateFrameworks/WebKit.framework/XPCServices",
+                "/System/Cryptexes/App/System/Library/PrivateFrameworks/WebKit.framework/XPCServices",
                 "/System/Library/ExtensionKit/Extensions",
                 "/usr/libexec/runningboardd",
             };
@@ -861,6 +867,52 @@ picasso_net_probe_thread(void *arg)
                            paths[i], (long long)st.st_size, (unsigned)st.st_mode & 07777);
                 } else {
                     picasso_probe_log("PICASSO_NETPROBE path=%s exists=0 errno=%d\n", paths[i], errno);
+                }
+            }
+
+            /* What is actually under /System/Cryptexes?  The OS volume has no
+             * WebKit XPCServices, so either the cryptex holds them or they are
+             * absent from the image altogether. */
+            {
+                static const char *dirs[] = {
+                    "/System/Cryptexes",
+                    "/System/Cryptexes/App",
+                    "/System/Library/PrivateFrameworks/WebKit.framework",
+                    "/Applications",
+                };
+                unsigned d;
+
+                for (d = 0; d < sizeof(dirs) / sizeof(dirs[0]); d++) {
+                    DIR *dp = opendir(dirs[d]);
+                    char names[320];
+                    size_t used = 0;
+                    struct dirent *de;
+                    int n = 0;
+
+                    if (dp == NULL) {
+                        picasso_probe_log("PICASSO_NETPROBE dir=%s open=0 errno=%d\n", dirs[d], errno);
+                        continue;
+                    }
+                    names[0] = '\0';
+                    while ((de = readdir(dp)) != NULL && n < 10) {
+                        size_t len;
+
+                        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
+                            continue;
+                        }
+                        len = strlen(de->d_name);
+                        if (used + len + 2 >= sizeof(names)) {
+                            break;
+                        }
+                        memcpy(names + used, de->d_name, len);
+                        used += len;
+                        names[used++] = ',';
+                        names[used] = '\0';
+                        n++;
+                    }
+                    closedir(dp);
+                    picasso_probe_log("PICASSO_NETPROBE dir=%s open=1 n=%d list=%s\n",
+                                      dirs[d], n, names);
                 }
             }
 
