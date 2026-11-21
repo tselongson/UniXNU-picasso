@@ -201,36 +201,30 @@ jobs:
 
       - name: Stage the App cryptex (Safari's WebKit services) into the seed source
         run: |
-          set -u
+          set +e
           OS="out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER"
-          # The fetch prints the extracted member's path as its last line; the file
-          # itself is named by number (087-86715-047.dmg), so a name search misses it.
-          APP=$(python3 ./unixnu ipsw fetch Cryptex1,AppOS 2>&1 | tee -a out/picasso/logs/actions-ipsw.log | grep -v '^$' | tail -1)
+          python3 ./unixnu ipsw fetch Cryptex1,AppOS 2>&1 | tee -a out/picasso/logs/actions-ipsw.log
+          APP=$(find "out/ipsw/$PICASSO_IPSW_BUILD" -maxdepth 1 -name '*.dmg' -size -20M | head -1)
           echo "APP_CANDIDATE=$APP"
-          if [ ! -e "$APP" ]; then
-            APP=$(find "out/ipsw/$PICASSO_IPSW_BUILD" -maxdepth 1 -name '*.dmg' -size -20M | head -1)
-            echo "APP_FALLBACK=$APP"
-          fi
           if [ -z "$APP" ]; then
             echo "APP_CRYPTEX_MISSING"
             exit 0
           fi
-          MNT=""
-          if [ -d "$APP" ]; then
-            SRC="$APP"
-          else
-            MNT="$RUNNER_TEMP/appcryptex"
-            mkdir -p "$MNT"
-            hdiutil attach "$APP" -nobrowse -readonly -mountpoint "$MNT" >/dev/null
-            SRC="$MNT"
+          MNT="$RUNNER_TEMP/appcryptex"
+          rm -rf "$MNT"
+          mkdir -p "$MNT"
+          if ! hdiutil attach "$APP" -nobrowse -readonly -mountpoint "$MNT" >/dev/null 2>&1; then
+            echo "APP_ATTACH_FAILED"
+            exit 0
           fi
           echo "--- app cryptex root ---"
-          ls -1 "$SRC" | head -20
+          ls -1 "$MNT" | head -20
           rm -rf "$OS/private/var/appcryptex"
           mkdir -p "$OS/private/var/appcryptex"
-          ditto "$SRC" "$OS/private/var/appcryptex"
+          ditto "$MNT" "$OS/private/var/appcryptex"
           echo "APP_CRYPTEX_STAGED files=$(find "$OS/private/var/appcryptex" -type f | wc -l)"
-          if [ -n "$MNT" ]; then hdiutil detach "$MNT" >/dev/null 2>&1 || true; fi
+          hdiutil detach "$MNT" >/dev/null 2>&1
+          exit 0
 
       - name: Reuse persistent Data seed (new seed requires explicit input)
         env:
