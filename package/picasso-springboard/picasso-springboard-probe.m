@@ -1154,6 +1154,40 @@ picasso_web_probe_start(void)
     });
 }
 
+/* ---------------------------------------------------------------------------
+ * App cryptex bridge.
+ *
+ * Measured on device: /System/Cryptexes/App is a symlink to
+ * ../../private/preboot/Cryptexes/App, and that target does not exist, so the
+ * App cryptex -- where Safari's WebKit services (WebContent/Networking/GPU)
+ * live -- is unreachable and a page can never render.  The seed can carry the
+ * cryptex tree under /private/var/appcryptex; this makes the stock symlink
+ * resolve to it.  Runs in configd (root, early), before any app is launched.
+ * ------------------------------------------------------------------------- */
+static void
+picasso_cryptex_bridge(void)
+{
+    static const char target[] = "/private/preboot/Cryptexes/App";
+    struct stat st;
+
+    if (stat("/private/var/appcryptex", &st) != 0) {
+        return;
+    }
+    (void)mkdir("/private/preboot", 0755);
+    (void)mkdir("/private/preboot/Cryptexes", 0755);
+    if (lstat(target, &st) == 0) {
+        picasso_probe_log("PICASSO_CRYPTEX target exists mode=%o\n", (unsigned)st.st_mode);
+        return;
+    }
+    if (symlink("/private/var/appcryptex", target) == 0) {
+        picasso_probe_log("PICASSO_CRYPTEX linked /private/preboot/Cryptexes/App -> /private/var/appcryptex\n");
+    } else {
+        int rc = errno;
+
+        picasso_probe_log("PICASSO_CRYPTEX link failed errno=%d\n", rc);
+    }
+}
+
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
@@ -1165,6 +1199,7 @@ static void picasso_springboard_probe(void)
         pthread_t worker, dns_worker;
 
         wifiui_log("PICASSO_WIFIUI loaded in configd\n");
+        picasso_cryptex_bridge();
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
         /* Independent of the bootstrap path on purpose (chain-607). */
