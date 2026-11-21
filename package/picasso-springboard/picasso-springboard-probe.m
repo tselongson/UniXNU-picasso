@@ -5,6 +5,7 @@
 // Reserve another 14.5 mm at the right for the panel's camera area. Hook only
 // this provider's metric; UIKit still owns item placement and animations.
 #import <UIKit/UIKit.h>
+#import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -903,6 +904,75 @@ picasso_net_probe_start(const char *who)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * WebKit end-to-end probe.
+ *
+ * The system stack is already proven: NSURLSession inside SpringBoard gets
+ * HTTP 200 from https://www.apple.com.  What is still unproven is the WebKit
+ * path (WKWebView -> WebContent/Networking XPC) that Safari itself uses, so a
+ * failing Safari cannot yet be told apart from a failing browser engine.  This
+ * probe loads the same URL through WebKit and prints the navigation result.
+ * ------------------------------------------------------------------------- */
+@interface PicassoWebProbe : NSObject <WKNavigationDelegate>
+@end
+
+static PicassoWebProbe *g_web_probe;
+static WKWebView *g_web_view;
+
+@implementation PicassoWebProbe
+
+- (void)webView:(WKWebView *)view didFinishNavigation:(WKNavigation *)navigation
+{
+    NSString *url = [[view URL] absoluteString];
+    NSString *title = [view title];
+
+    picasso_probe_log("PICASSO_WEBPROBE didFinish url=%s title=%s\n",
+                      url != nil ? [url UTF8String] : "-",
+                      title != nil ? [title UTF8String] : "-");
+}
+
+- (void)webView:(WKWebView *)view didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error
+{
+    const char *desc = [[error localizedDescription] UTF8String];
+
+    (void)view;
+    (void)navigation;
+    picasso_probe_log("PICASSO_WEBPROBE didFailProvisional err=%ld domain=%s desc=%s\n",
+                      (long)[error code], [[error domain] UTF8String], desc != NULL ? desc : "-");
+}
+
+- (void)webView:(WKWebView *)view didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error
+{
+    const char *desc = [[error localizedDescription] UTF8String];
+
+    (void)view;
+    (void)navigation;
+    picasso_probe_log("PICASSO_WEBPROBE didFail err=%ld domain=%s desc=%s\n",
+                      (long)[error code], [[error domain] UTF8String], desc != NULL ? desc : "-");
+}
+
+@end
+
+static void
+picasso_web_probe_start(void)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        picasso_probe_log("PICASSO_WEBPROBE start\n");
+        g_web_probe = [[PicassoWebProbe alloc] init];
+        g_web_view = [[WKWebView alloc] initWithFrame:CGRectMake(0, 0, 320, 480)];
+        g_web_view.navigationDelegate = g_web_probe;
+        [g_web_view loadRequest:[NSURLRequest requestWithURL:
+            [NSURL URLWithString:@"https://www.apple.com/library/test/success.html"]]];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60ull * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            NSString *url = [[g_web_view URL] absoluteString];
+
+            picasso_probe_log("PICASSO_WEBPROBE timeout60 url=%s\n",
+                              url != nil ? [url UTF8String] : "-");
+        });
+    });
+}
+
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
@@ -926,6 +996,9 @@ static void picasso_springboard_probe(void)
     /* Immediate proof that THIS build of the library is the one loaded. */
     picasso_probe_log("PICASSO_NETPROBE build=4 armed in %s\n", program ? program : "app");
     picasso_net_probe_start(program ? program : "app");
+    if (program != NULL && (!strcmp(program, "SpringBoard") || !strcmp(program, "MobileSafari"))) {
+        picasso_web_probe_start();
+    }
     @autoreleasepool {
         picasso_statusbar_start();
         picasso_install_astc_guard();
