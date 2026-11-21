@@ -199,62 +199,31 @@ jobs:
           cp "out/ipsw/$PICASSO_BACKEND_BUILD/report.json" out/picasso/logs/kernel-donor.json
           echo "UNIXNU_KERNELCACHE=$PWD/out/ipsw/$PICASSO_BACKEND_BUILD/kernelcache.decompressed" >> "$GITHUB_ENV"
 
-      - name: Stage the App cryptex (Safari's WebKit services) into the seed source
+      - name: Stage the App cryptex (Safari's WebKit services) for the seed
         run: |
           set +e
-          OS="out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER"
           python3 ./unixnu ipsw fetch Cryptex1,AppOS 2>&1 | tee -a out/picasso/logs/actions-ipsw.log
           APP=$(find "out/ipsw/$PICASSO_IPSW_BUILD" -maxdepth 1 -name '*.dmg' -size -20M | head -1)
           echo "APP_CANDIDATE=$APP"
-          if [ -z "$APP" ]; then
-            echo "APP_CRYPTEX_MISSING"
-            exit 0
-          fi
-          MNT="$RUNNER_TEMP/appcryptex"
-          rm -rf "$MNT"
-          mkdir -p "$MNT"
-          echo "--- hdiutil attach (no mount) ---"
+          if [ -z "$APP" ]; then echo "APP_CRYPTEX_MISSING"; exit 0; fi
+          echo "--- attach ---"
           hdiutil attach -nomount -readonly "$APP" 2>&1 | tee /tmp/appcryptex-attach.log
           DEV=$(awk '/^\/dev\/disk[0-9]+s[0-9]+/{print $1; exit}' /tmp/appcryptex-attach.log)
           if [ -z "$DEV" ]; then DEV=$(awk '/^\/dev\/disk/{print $1; exit}' /tmp/appcryptex-attach.log); fi
           echo "APP_DEV=$DEV"
-          if [ -z "$DEV" ]; then
-            echo "APP_DEV_MISSING"
-            exit 0
-          fi
-          echo "--- snapshots ---"
-          diskutil apfs listSnapshots "$DEV" 2>&1 | tee /tmp/appcryptex-snap.log | head -20
-          SNAP=$(awk -F': ' '/Name:/{print $2; exit}' /tmp/appcryptex-snap.log)
-          echo "APP_SNAP=$SNAP"
-          if [ -n "$SNAP" ]; then
-            mount_apfs -o ro -s "$SNAP" "$DEV" "$MNT" 2>&1 | head -5
-          else
-            mount_apfs -o ro "$DEV" "$MNT" 2>&1 | head -5
-          fi
-          echo "--- app cryptex root ---"
-          ls -1 "$MNT" | head -20
-          echo "APP_CRYPTEX_STAGED files=$(find "$MNT" -type f | wc -l)"
+          MNT="$RUNNER_TEMP/appcryptex"
+          rm -rf "$MNT"; mkdir -p "$MNT"
+          mount_apfs -o ro "$DEV" "$MNT" 2>&1 | head -5
+          echo "APP_MOUNTED files=$(find "$MNT" -type f | wc -l)"
           if [ ! -e "$MNT/System" ]; then
             echo "APP_CRYPTEX_INCOMPLETE"
             hdiutil detach "$DEV" >/dev/null 2>&1
             exit 0
           fi
-          # The OS member is a read-only DMG mount, so the seed source has to become
-          # a writable clone before the App cryptex can join it.  cp -c is an APFS
-          # copy-on-write clone: instant, no extra space.
-          if [ ! -w "$OS/private/var" ]; then
-            SRC_OS="$RUNNER_TEMP/os-member"
-            rm -rf "$SRC_OS"
-            mkdir -p "$SRC_OS"
-            cp -cR "$OS"/. "$SRC_OS"/ 2>/dev/null || cp -R "$OS"/. "$SRC_OS"/
-            OS="$SRC_OS"
-            echo "PICASSO_OS_SOURCE=$SRC_OS" >> "$GITHUB_ENV"
-            echo "OS_CLONED=$SRC_OS"
-          fi
-          rm -rf "$OS/private/var/appcryptex"
-          mkdir -p "$OS/private/var/appcryptex"
-          ditto "$MNT" "$OS/private/var/appcryptex"
-          echo "APP_CRYPTEX_COPIED files=$(find "$OS/private/var/appcryptex" -type f | wc -l)"
+          rm -rf out/picasso/app-cryptex
+          mkdir -p out/picasso/app-cryptex
+          ditto "$MNT" out/picasso/app-cryptex
+          echo "APP_CRYPTEX_STAGED files=$(find out/picasso/app-cryptex -type f | wc -l)"
           hdiutil detach "$DEV" >/dev/null 2>&1
           exit 0
 
@@ -277,8 +246,9 @@ jobs:
             cp out/picasso/ui-trust.json out/picasso/logs/ui-trust.json
           else
             sudo "$(command -v python3)" scripts/prepare-picasso-ram-data.py \
-              --tree "$UNIXNU_TREE" --source "${PICASSO_OS_SOURCE:-out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER}" \
+              --tree "$UNIXNU_TREE" --source "out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER" \
               --output out/picasso/ram-data --config out/picasso/.config \
+              --extra-var out/picasso/app-cryptex \
               2>&1 | tee out/picasso/logs/actions-ram-data.log
           fi
 
