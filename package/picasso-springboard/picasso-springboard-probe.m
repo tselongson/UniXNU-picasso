@@ -827,8 +827,10 @@ picasso_net_probe_thread(void *arg)
     struct timeval tv;
 
     snprintf(who, sizeof(who), "%s", (const char *)arg);
-    /* Give the boot-time interface setup and DNS publication time to finish. */
-    sleep(150);
+    /* At boot the interface setup and DNS publication take ~130 s; an app that
+     * starts later (Safari, opened after boot) already has them, so probe it
+     * sooner instead of waiting pointlessly. */
+    sleep(strcmp(who, "MobileSafari") == 0 ? 45 : 150);
 
     gettimeofday(&tv, NULL);
 
@@ -957,18 +959,44 @@ static void
 picasso_web_probe_start(void)
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        picasso_probe_log("PICASSO_WEBPROBE start\n");
-        g_web_probe = [[PicassoWebProbe alloc] init];
-        g_web_view = [[WKWebView alloc] initWithFrame:CGRectMake(0, 0, 320, 480)];
-        g_web_view.navigationDelegate = g_web_probe;
-        [g_web_view loadRequest:[NSURLRequest requestWithURL:
-            [NSURL URLWithString:@"https://www.apple.com/library/test/success.html"]]];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60ull * NSEC_PER_SEC),
-                       dispatch_get_main_queue(), ^{
-            NSString *url = [[g_web_view URL] absoluteString];
+        Class wk = NSClassFromString(@"WKWebView");
+        void *image = dlopen("/System/Library/Frameworks/WebKit.framework/WebKit", RTLD_LAZY);
+        const char *err = dlerror();
 
-            picasso_probe_log("PICASSO_WEBPROBE timeout60 url=%s\n",
-                              url != nil ? [url UTF8String] : "-");
+        picasso_probe_log("PICASSO_WEBPROBE start class=%s dlopen=%s err=%s\n",
+                          wk != nil ? "yes" : "no",
+                          image != NULL ? "ok" : "fail",
+                          err != NULL ? err : "-");
+        g_web_probe = [[PicassoWebProbe alloc] init];
+        if (wk != nil) {
+            g_web_view = [[WKWebView alloc] initWithFrame:CGRectMake(0, 0, 320, 480)];
+        }
+        picasso_probe_log("PICASSO_WEBPROBE view=%s\n", g_web_view != nil ? "ok" : "nil");
+        if (g_web_view != nil) {
+            g_web_view.navigationDelegate = g_web_probe;
+            [g_web_view loadRequest:[NSURLRequest requestWithURL:
+                [NSURL URLWithString:@"https://www.apple.com/library/test/success.html"]]];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 60ull * NSEC_PER_SEC),
+                           dispatch_get_main_queue(), ^{
+                NSString *url = [[g_web_view URL] absoluteString];
+
+                picasso_probe_log("PICASSO_WEBPROBE timeout60 url=%s\n",
+                                  url != nil ? [url UTF8String] : "-");
+            });
+        }
+
+        /* The WKWebView above may be refused in SpringBoard; the real question is
+         * whether Safari itself can show the page.  Ask the system to open the
+         * URL exactly as a tap would, then the library injected into MobileSafari
+         * reports the same probes from inside the browser process. */
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20ull * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            NSURL *url = [NSURL URLWithString:@"https://www.apple.com/"];
+
+            [[UIApplication sharedApplication] openURL:url options:@{}
+                completionHandler:^(BOOL ok) {
+                picasso_probe_log("PICASSO_WEBPROBE openURL ok=%d\n", ok ? 1 : 0);
+            }];
         });
     });
 }
