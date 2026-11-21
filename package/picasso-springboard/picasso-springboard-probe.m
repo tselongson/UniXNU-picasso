@@ -845,6 +845,11 @@ picasso_net_probe_thread(void *arg)
                 "/usr/lib/libcorecrypto.dylib",
                 "/usr/lib/libnetwork.dylib",
                 "/usr/lib/libpicasso-sb.dylib",
+                "/System/Library/PrivateFrameworks/WebKit.framework/XPCServices",
+                "/System/Library/PrivateFrameworks/WebKit.framework/XPCServices/com.apple.WebKit.WebContent.xpc",
+                "/System/Library/PrivateFrameworks/WebKit.framework/XPCServices/com.apple.WebKit.Networking.xpc",
+                "/System/Library/ExtensionKit/Extensions",
+                "/usr/libexec/runningboardd",
             };
             unsigned i;
 
@@ -986,17 +991,31 @@ picasso_web_probe_start(void)
         }
 
         /* The WKWebView above may be refused in SpringBoard; the real question is
-         * whether Safari itself can show the page.  Ask the system to open the
-         * URL exactly as a tap would, then the library injected into MobileSafari
-         * reports the same probes from inside the browser process. */
+         * whether Safari itself can show the page.  Try the same path the Home
+         * screen icon uses: LaunchServices first, FrontBoard as the fallback.
+         * openURL was refused (ok=0), so UIApplication is not the way in here. */
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 20ull * NSEC_PER_SEC),
                        dispatch_get_main_queue(), ^{
-            NSURL *url = [NSURL URLWithString:@"https://www.apple.com/"];
+            Class ls = NSClassFromString(@"LSApplicationWorkspace");
+            id workspace = ls != nil ? [ls performSelector:@selector(defaultWorkspace)] : nil;
 
-            [[UIApplication sharedApplication] openURL:url options:@{}
-                completionHandler:^(BOOL ok) {
-                picasso_probe_log("PICASSO_WEBPROBE openURL ok=%d\n", ok ? 1 : 0);
-            }];
+            picasso_probe_log("PICASSO_WEBPROBE ls=%s ws=%s\n",
+                              ls != nil ? "yes" : "no", workspace != nil ? "ok" : "nil");
+            if (workspace != nil) {
+                BOOL ok = NO;
+                @try {
+                    ok = (BOOL)[workspace performSelector:@selector(openApplicationWithBundleID:)
+                                              withObject:@"com.apple.mobilesafari"];
+                } @catch (NSException *e) {
+                    picasso_probe_log("PICASSO_WEBPROBE ls-exception %s\n",
+                                      [[e reason] UTF8String]);
+                }
+                picasso_probe_log("PICASSO_WEBPROBE launch-safari ls=%d\n", ok ? 1 : 0);
+            }
+
+            Class fb = NSClassFromString(@"FBSystemService");
+            picasso_probe_log("PICASSO_WEBPROBE fb=%s (class only, signature not safe)\n",
+                              fb != nil ? "yes" : "no");
         });
     });
 }
