@@ -23,6 +23,7 @@
 static void picasso_ls_dump(void);
 static void picasso_cryptex_dump(void);
 static void picasso_webkit_start(void);
+static void picasso_path_dump(void);
 #include <errno.h>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -1153,6 +1154,7 @@ picasso_web_probe_start(void)
 
                     picasso_probe_log("PICASSO_WEBPROBE sbs-launch rc=%d\n", rc);
                     picasso_ls_dump();
+                    picasso_path_dump();
                 }
             }
         });
@@ -1349,6 +1351,65 @@ picasso_ls_dump(void)
             picasso_probe_log("PICASSO_LS refresh=available\n");
         }
     }
+}
+
+
+/* ---------------------------------------------------------------------------
+ * What does the system think the network path is?
+ *
+ * Time sync works (a daemon opening a raw socket), yet apps behave as if there
+ * is no network.  Those are two different questions in iOS: a daemon can put
+ * bytes on the wire while Network.framework reports the path as unsatisfied,
+ * because path evaluation comes from NECP policy, not from "can I connect".
+ * Safari consults exactly this before it even starts a load.  Log it.
+ *
+ * Network.framework lives only in the dyld shared cache on this image, so the
+ * symbols are resolved with dlsym rather than linked.
+ * ------------------------------------------------------------------------- */
+
+typedef void *picasso_nw_path_monitor;
+typedef void *picasso_nw_path;
+typedef void (^picasso_path_handler)(picasso_nw_path);
+
+static void
+picasso_path_dump(void)
+{
+    void *framework = dlopen("/System/Library/Frameworks/Network.framework/Network", RTLD_LAZY);
+    picasso_nw_path_monitor (*monitor_create)(void);
+    void (*set_handler)(picasso_nw_path_monitor, picasso_path_handler);
+    void (*set_queue)(picasso_nw_path_monitor, dispatch_queue_t);
+    void (*monitor_start)(picasso_nw_path_monitor);
+    int (*get_status)(picasso_nw_path);
+    char description[256];
+    picasso_nw_path_monitor monitor;
+
+    picasso_probe_log("PICASSO_PATH dlopen=%s\n", framework != NULL ? "ok" : "fail");
+    if (framework == NULL) {
+        return;
+    }
+    monitor_create = (picasso_nw_path_monitor (*)(void))dlsym(framework, "nw_path_monitor_create");
+    set_handler = (void (*)(picasso_nw_path_monitor, picasso_path_handler))dlsym(framework, "nw_path_monitor_set_update_handler");
+    set_queue = (void (*)(picasso_nw_path_monitor, dispatch_queue_t))dlsym(framework, "nw_path_monitor_set_queue");
+    monitor_start = (void (*)(picasso_nw_path_monitor))dlsym(framework, "nw_path_monitor_start");
+    get_status = (int (*)(picasso_nw_path))dlsym(framework, "nw_path_get_status");
+    if (monitor_create == NULL || set_handler == NULL || monitor_start == NULL || get_status == NULL) {
+        picasso_probe_log("PICASSO_PATH symbols missing create=%d handler=%d start=%d status=%d\n",
+                          monitor_create != NULL, set_handler != NULL,
+                          monitor_start != NULL, get_status != NULL);
+        return;
+    }
+    snprintf(description, sizeof(description), "PICASSO_PATH");
+    monitor = monitor_create();
+    set_handler(monitor, ^(picasso_nw_path path) {
+        /* 1 = satisfied, 2 = unsatisfied, 3 = satisfiable */
+        picasso_probe_log("PICASSO_PATH status=%d\n", get_status(path));
+    });
+    if (set_queue != NULL) {
+        set_queue(monitor, dispatch_get_global_queue(0, 0));
+    }
+    monitor_start(monitor);
+    sleep(6);
+    picasso_probe_log("PICASSO_PATH done\n");
 }
 
 
