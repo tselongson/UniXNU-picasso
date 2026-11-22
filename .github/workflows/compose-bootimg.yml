@@ -227,6 +227,14 @@ jobs:
           hdiutil detach "$DEV" >/dev/null 2>&1
           exit 0
 
+      - name: Upload the App cryptex for device-side download
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: picasso-app-cryptex
+          path: out/picasso/app-cryptex
+          if-no-files-found: warn
+
       - name: Reuse persistent Data seed (new seed requires explicit input)
         env:
           GITHUB_TOKEN: ${{ github.token }}
