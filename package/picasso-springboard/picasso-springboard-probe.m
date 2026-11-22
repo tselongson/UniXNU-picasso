@@ -866,7 +866,7 @@ picasso_net_probe_thread(void *arg)
             };
             unsigned i;
 
-            picasso_probe_log("PICASSO_NETPROBE build=6 process=%s clock=%ld\n", who, (long)tv.tv_sec);
+            picasso_probe_log("PICASSO_NETPROBE build=7 process=%s clock=%ld\n", who, (long)tv.tv_sec);
             for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
                 struct stat st;
                 if (stat(paths[i], &st) == 0) {
@@ -1874,6 +1874,62 @@ picasso_webkit_chain(void)
     }
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Rebuild the LaunchServices database once, now that WebKit is reachable.
+ *
+ * lsd built its store while /System/Cryptexes/OS led nowhere, so it never
+ * registered what sits behind it -- WebKit's extensions among them -- and it
+ * does not re-register system content on a later boot of the same OS build.
+ * Deleting the store once makes it rebuild with the path in place; a marker
+ * keeps later boots from repeating it.
+ * ------------------------------------------------------------------------- */
+
+static void
+picasso_ls_store_drop(void)
+{
+    static const char marker[] = "/private/var/ngpu/ls-store-rebuilt-1";
+    static const char caches[] =
+        "/private/var/mobile/Containers/Data/InternalDaemon/"
+        "5C583048-0C53-456F-B110-BB12068B787F/Library/Caches";
+    DIR *dp;
+    struct dirent *entry;
+    unsigned removed = 0;
+    int fd;
+
+    if (access(marker, F_OK) == 0) {
+        picasso_probe_log("PICASSO_LS_DROP already done\n");
+        return;
+    }
+    /* Only act once the cryptex view is actually in place. */
+    if (access("/System/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Info.plist", F_OK) != 0) {
+        picasso_probe_log("PICASSO_LS_DROP skipped webkit=absent\n");
+        return;
+    }
+    dp = opendir(caches);
+    if (dp == NULL) {
+        picasso_probe_log("PICASSO_LS_DROP caches errno=%d\n", errno);
+        return;
+    }
+    while ((entry = readdir(dp)) != NULL) {
+        char path[1024];
+
+        if (strncmp(entry->d_name, "com.apple.LaunchServices-", 25) != 0) {
+            continue;
+        }
+        snprintf(path, sizeof(path), "%s/%s", caches, entry->d_name);
+        if (unlink(path) == 0) {
+            removed++;
+        }
+    }
+    closedir(dp);
+    fd = open(marker, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd >= 0) {
+        close(fd);
+    }
+    picasso_probe_log("PICASSO_LS_DROP removed=%u\n", removed);
+}
+
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
@@ -1891,6 +1947,7 @@ static void picasso_springboard_probe(void)
         picasso_preboot_probe();
         picasso_mount_probe();
         picasso_webkit_chain();
+        picasso_ls_store_drop();
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
         /* Independent of the bootstrap path on purpose (chain-607). */
@@ -1901,7 +1958,7 @@ static void picasso_springboard_probe(void)
     // Record entry before either installation path can fail.
     picasso_ack("kern.picasso_inject_ack");
     /* Immediate proof that THIS build of the library is the one loaded. */
-    picasso_probe_log("PICASSO_NETPROBE build=6 armed in %s\n", program ? program : "app");
+    picasso_probe_log("PICASSO_NETPROBE build=7 armed in %s\n", program ? program : "app");
     picasso_net_probe_start(program ? program : "app");
     if (program != NULL && (!strcmp(program, "SpringBoard") || !strcmp(program, "MobileSafari"))) {
         picasso_web_probe_start();
