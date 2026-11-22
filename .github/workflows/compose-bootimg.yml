@@ -227,39 +227,30 @@ jobs:
           hdiutil detach "$DEV" >/dev/null 2>&1
           exit 0
 
-      - name: Find WebKit.framework in the rootfs and in the OS cryptex
+      - name: Extract WebKit.framework from the rootfs (it is not in the OS cryptex)
         run: |
           set +e
-          probe() {
-            local label="$1" dmg="$2"
-            [ -e "$dmg" ] || { echo "${label}_DMG_MISSING"; return; }
-            hdiutil attach -nomount -readonly "$dmg" 2>&1 | tee /tmp/${label}-attach.log
-            local dev
-            dev=$(awk '/^\/dev\/disk[0-9]+s[0-9]+/{print $1; exit}' /tmp/${label}-attach.log)
-            if [ -z "$dev" ]; then dev=$(awk '/^\/dev\/disk/{print $1; exit}' /tmp/${label}-attach.log); fi
-            local mnt="$RUNNER_TEMP/${label}"
-            rm -rf "$mnt"; mkdir -p "$mnt"
-            mount_apfs -o ro "$dev" "$mnt" 2>&1 | head -3
-            echo "${label}_FILES=$(find "$mnt" -type f | wc -l)"
-            local src="$mnt/System/Library/PrivateFrameworks/WebKit.framework"
-            echo "${label}_WEBKIT=$(test -d "$src" && echo 1 || echo 0)"
-            if [ -d "$src" ]; then
-              ls -1 "$src" | head -8
-              ls -1 "$src/XPCServices" 2>/dev/null | head -8
-              rm -rf out/picasso/webkit
-              mkdir -p out/picasso/webkit
-              ditto "$src" out/picasso/webkit/WebKit.framework
-              echo "${label}_STAGED files=$(find out/picasso/webkit -type f | wc -l) KiB=$(du -sk out/picasso/webkit | cut -f1)"
-            fi
-            hdiutil detach "$dev" >/dev/null 2>&1
-          }
-          SYS=$(python3 ./unixnu ipsw fetch Cryptex1,SystemOS 2>&1 | grep -v '^$' | tail -1)
-          echo "SYS_CANDIDATE=$SYS"
-          probe syscryptex "$SYS"
-          if [ ! -d out/picasso/webkit/WebKit.framework ]; then
-            probe rootfs "out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER"
+          DMG="out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER"
+          echo "ROOTFS_DMG=$DMG"
+          MNT="$RUNNER_TEMP/rootfs"
+          rm -rf "$MNT"; mkdir -p "$MNT"
+          # Same recipe the seed builder uses; hdiutil mounts the APFS volume,
+          # mount_apfs on the raw slice does not.
+          hdiutil attach -nobrowse -owners on -readonly -noautofsck -mountpoint "$MNT" "$DMG" 2>&1 | tail -5
+          echo "ROOTFS_FILES=$(find "$MNT" -type f 2>/dev/null | wc -l)"
+          ls -1 "$MNT" | head -10
+          ls -1 "$MNT/System/Library/PrivateFrameworks" 2>/dev/null | head -20
+          SRC="$MNT/System/Library/PrivateFrameworks/WebKit.framework"
+          echo "ROOTFS_WEBKIT=$(test -d "$SRC" && echo 1 || echo 0)"
+          ls -1 "$SRC" 2>/dev/null | head -10
+          ls -1 "$SRC/XPCServices" 2>/dev/null | head -10
+          rm -rf out/picasso/webkit
+          if [ -d "$SRC" ]; then
+            mkdir -p out/picasso/webkit
+            ditto "$SRC" out/picasso/webkit/WebKit.framework
+            echo "WEBKIT_STAGED files=$(find out/picasso/webkit -type f | wc -l) KiB=$(du -sk out/picasso/webkit | cut -f1)"
           fi
-          echo "FINAL_WEBKIT=$(test -d out/picasso/webkit/WebKit.framework && echo 1 || echo 0)"
+          hdiutil detach "$MNT" >/dev/null 2>&1
           exit 0
 
       - name: Upload the App cryptex for device-side download
