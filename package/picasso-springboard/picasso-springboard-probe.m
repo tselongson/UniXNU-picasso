@@ -1770,6 +1770,47 @@ picasso_preboot_probe(void)
     }
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Can configd (root) mount by itself?
+ *
+ * /private/preboot is on the read-only root, and the rootfs keeps WebKit behind
+ * a symlink chain that ends there:
+ *   /System/Library/Frameworks/WebKit.framework
+ *     -> /System/Cryptexes/OS/... -> /private/preboot/Cryptexes/OS/...
+ * So the directory has to be grafted in.  If mount(2) is permitted here the
+ * whole fix is userland; if it returns EPERM it needs a kernel hook.
+ * The bindfs type is the one this port already uses for /Applications.
+ * ------------------------------------------------------------------------- */
+
+static void
+picasso_mount_probe(void)
+{
+    static const char *source = "/private/var/ngpu/preboot";
+    int rc;
+
+    (void)mkdir("/private/var/ngpu", 0755);
+    (void)mkdir("/private/var/ngpu/preboot", 0755);
+    (void)mkdir("/private/var/ngpu/preboot/Cryptexes", 0755);
+    picasso_probe_log("PICASSO_MOUNT source_ok=%d\n", access(source, F_OK) == 0);
+
+    errno = 0;
+    rc = mount("bindfs", "/private/preboot", MNT_RDONLY | MNT_UNION, (void *)source);
+    picasso_probe_log("PICASSO_MOUNT union rc=%d errno=%d\n", rc, errno);
+
+    if (rc != 0) {
+        errno = 0;
+        rc = mount("bindfs", "/private/preboot", MNT_RDONLY, (void *)source);
+        picasso_probe_log("PICASSO_MOUNT plain rc=%d errno=%d\n", rc, errno);
+    }
+    {
+        struct stat st;
+
+        picasso_probe_log("PICASSO_MOUNT after cryptexes=%d errno=%d\n",
+                          stat("/private/preboot/Cryptexes", &st), errno);
+    }
+}
+
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
@@ -1785,6 +1826,7 @@ static void picasso_springboard_probe(void)
         picasso_cryptex_dump();
         picasso_fs_write_probe();
         picasso_preboot_probe();
+        picasso_mount_probe();
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
         /* Independent of the bootstrap path on purpose (chain-607). */
