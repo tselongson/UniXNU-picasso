@@ -1454,6 +1454,104 @@ picasso_appcryptex_start(void)
     }
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Cryptex reality check, from configd (root) instead of SpringBoard.
+ *
+ * Every earlier "exists=0" came from a sandboxed SpringBoard lookup, and the
+ * sandbox answers ENOENT for paths it does not own -- /private/preboot is one
+ * of them.  So those results never proved the cryptex was absent.  This dump
+ * is the durable record: the real mount table plus stat()/readdir() of the
+ * cryptex trees, taken by a root daemon.
+ * ------------------------------------------------------------------------- */
+
+static void
+picasso_cryptex_dump(void)
+{
+    static const char *paths[] = {
+        "/private/preboot",
+        "/private/preboot/Cryptexes",
+        "/private/preboot/Cryptexes/OS",
+        "/private/preboot/Cryptexes/App",
+        "/System/Cryptexes",
+        "/System/Cryptexes/OS",
+        "/System/Cryptexes/App",
+        "/private/preboot/Cryptexes/OS/System/Library/PrivateFrameworks/WebKit.framework",
+        "/private/preboot/Cryptexes/OS/System/Library/PrivateFrameworks/WebKit.framework/XPCServices",
+        "/System/Library/PrivateFrameworks/WebKit.framework",
+        "/System/Library/PrivateFrameworks",
+        "/usr/libexec/webinspectord",
+    };
+    struct statfs *mounts = NULL;
+    int count = getfsstat(NULL, 0, MNT_NOWAIT);
+    int i;
+    unsigned k;
+
+    picasso_probe_log("PICASSO_CRYPTEX mounts=%d\n", count);
+    if (count > 0) {
+        mounts = (struct statfs *)calloc((size_t)count, sizeof(*mounts));
+        if (mounts != NULL) {
+            count = getfsstat(mounts, count * (int)sizeof(*mounts), MNT_NOWAIT);
+            for (i = 0; i < count && i < 32; i++) {
+                picasso_probe_log("PICASSO_CRYPTEX mount[%d] %s on %s\n",
+                                  i, mounts[i].f_fstypename, mounts[i].f_mntonname);
+            }
+            free(mounts);
+        }
+    }
+    for (k = 0; k < sizeof(paths) / sizeof(paths[0]); k++) {
+        struct stat st;
+
+        if (stat(paths[k], &st) == 0) {
+            picasso_probe_log("PICASSO_CRYPTEX stat=%s ok mode=%o type=%s\n",
+                              paths[k], (unsigned)st.st_mode,
+                              S_ISDIR(st.st_mode) ? "dir" : (S_ISREG(st.st_mode) ? "file" : "other"));
+        } else {
+            picasso_probe_log("PICASSO_CRYPTEX stat=%s errno=%d\n", paths[k], errno);
+        }
+    }
+    {
+        static const char *dirs[] = {
+            "/private/preboot",
+            "/private/preboot/Cryptexes",
+            "/System/Cryptexes",
+            "/System/Library/PrivateFrameworks",
+        };
+
+        for (k = 0; k < sizeof(dirs) / sizeof(dirs[0]); k++) {
+            DIR *dp = opendir(dirs[k]);
+            char names[400];
+            size_t used = 0;
+            struct dirent *entry;
+            unsigned n = 0;
+
+            if (dp == NULL) {
+                picasso_probe_log("PICASSO_CRYPTEX dir=%s open=0 errno=%d\n", dirs[k], errno);
+                continue;
+            }
+            names[0] = '\0';
+            while ((entry = readdir(dp)) != NULL && n < 12) {
+                size_t len;
+
+                if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+                    continue;
+                }
+                len = strlen(entry->d_name);
+                if (used + len + 2 >= sizeof(names)) {
+                    break;
+                }
+                memcpy(names + used, entry->d_name, len);
+                used += len;
+                names[used++] = ',';
+                names[used] = '\0';
+                n++;
+            }
+            closedir(dp);
+            picasso_probe_log("PICASSO_CRYPTEX dir=%s open=1 n=%u list=%s\n", dirs[k], n, names);
+        }
+    }
+}
+
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
@@ -1466,6 +1564,7 @@ static void picasso_springboard_probe(void)
 
         wifiui_log("PICASSO_WIFIUI loaded in configd\n");
         picasso_cryptex_bridge();
+        picasso_cryptex_dump();
         picasso_appcryptex_start();
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
