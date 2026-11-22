@@ -98,16 +98,20 @@ func_anchor = 'static int\nnative_owner_data_prepare(proc_t p, user_addr_t scrat
 func = (
     '#if DEVELOPMENT || DEBUG\n'
     'static volatile int native_picasso_preboot_stage = 0, native_picasso_preboot_status = -1;\n'
+    'static int native_picasso_preboot_done = 0;\n'
     'static void\n'
     'picasso_preboot_graft(proc_t p, user_addr_t scratch)\n'
     '{\n'
     '\textern volatile int native_bindfs_boot_mount;\n'
+    '\tstruct stat probe_st;\n'
+    '\tif (native_picasso_preboot_done) { return; }\n'
     '\tstruct mount_args request = {.type = scratch + 0xa00, .path = scratch + 0xa20,\n'
     '\t    .flags = MNT_RDONLY | MNT_UNION, .data = scratch + 0xb00};\n'
     '\tstatic const char point[] = "/private/preboot";\n'
     '\tstatic const char source[] = "/private/var/ngpu/preboot";\n'
     '\tint32_t result = 0;\n'
     '\tint error;\n'
+    '\tif (stat("/private/preboot/Cryptexes", &probe_st) == 0) { native_picasso_preboot_done = 1; return; }\n'
     '\tif ((error = copyout("bindfs", request.type, 7)) ||\n'
     '\t    (error = copyout(point, request.path, sizeof(point))) ||\n'
     '\t    (error = copyout(source, request.data, sizeof(source)))) {\n'
@@ -120,6 +124,7 @@ func = (
     '\tnative_bindfs_boot_mount = 0;\n'
     '\tnative_picasso_preboot_status = error;\n'
     '\tnative_picasso_preboot_stage = 2;\n'
+    '\tif (error == 0) { native_picasso_preboot_done = 1; }\n'
     '\tprintf("PICASSO_PREBOOT_GRAFT stage=%d status=%d\\n", native_picasso_preboot_stage,\n'
     '\t    native_picasso_preboot_status);\n'
     '}\n'
@@ -127,7 +132,7 @@ func = (
 )
 if 'picasso_preboot_graft' not in s and func_anchor in s and call_anchor in s:
     s = s.replace(func_anchor, func + func_anchor, 1)
-    s = s.replace(call_anchor, call_anchor + '#if DEVELOPMENT || DEBUG\n\tif (!error) picasso_preboot_graft(p, scratch);\n#endif\n', 1)
+    s = s.replace(call_anchor, call_anchor + '#if DEVELOPMENT || DEBUG\n\tpicasso_preboot_graft(p, scratch);\n#endif\n', 1)
     p.write_text(s)
     print('picasso-preboot: volatile flag + raw mount inserted')
 else:
