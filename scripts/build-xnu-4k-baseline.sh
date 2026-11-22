@@ -81,6 +81,46 @@ if 'picasso_wlan_deferred_start' not in s and old in s:
     p.write_text(s)
     print('picasso-wlan: init hook inserted into bsd_init.c')
 PY_WLAN_INIT
+
+# The rootfs keeps WebKit behind a symlink chain that ends at
+# /private/preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework, and
+# /private/preboot is on the read-only root, so the path never exists and Safari
+# cannot start WebContent.  The framework rides in the seed at
+# /private/var/ngpu/preboot; graft that tree over /private/preboot as a
+# read-only union, which is the same call this port already makes for
+# /Applications.  Userland mount(2) is refused (EPERM), so it happens here.
+python3 - <<'PY_PREBOOT_GRAFT'
+from pathlib import Path
+p = Path('.cache/xnu-work/bsd/kern/kern_exec.c')
+s = p.read_text()
+call_anchor = '\tif (!error) native_picasso_apps_mount(p, scratch);\n'
+func_anchor = 'static int\nnative_owner_data_prepare(proc_t p, user_addr_t scratch)\n{\n'
+func = (
+    '#if DEVELOPMENT || DEBUG\n'
+    'static volatile int native_picasso_preboot_stage = 0, native_picasso_preboot_status = -1;\n'
+    'static void\n'
+    'picasso_preboot_graft(proc_t p, user_addr_t scratch)\n'
+    '{\n'
+    '\textern int native_gpu_addon_mount(proc_t, user_addr_t, uint32_t, const char *, size_t,\n'
+    '\t    const char *, size_t, const char *, const char *, volatile int *, volatile int *);\n'
+    '\tstatic const char source[] = "/private/var/ngpu/preboot";\n'
+    '\tstatic const char point[] = "/private/preboot";\n'
+    '\tnative_gpu_addon_mount(p, scratch, 0xc00 | MNT_UNION, source, sizeof(source), point, sizeof(point),\n'
+    '\t    "/private/preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Info.plist", NULL,\n'
+    '\t    &native_picasso_preboot_stage, &native_picasso_preboot_status);\n'
+    '\tprintf("PICASSO_PREBOOT_GRAFT stage=%d status=%d\\n", native_picasso_preboot_stage,\n'
+    '\t    native_picasso_preboot_status);\n'
+    '}\n'
+    '#endif\n'
+)
+if 'picasso_preboot_graft' not in s and func_anchor in s and call_anchor in s:
+    s = s.replace(func_anchor, func + func_anchor, 1)
+    s = s.replace(call_anchor, call_anchor + '#if DEVELOPMENT || DEBUG\n\tif (!error) picasso_preboot_graft(p, scratch);\n#endif\n', 1)
+    p.write_text(s)
+    print('picasso-preboot: graft hook inserted into kern_exec.c')
+else:
+    print('picasso-preboot: anchors missing, skipped')
+PY_PREBOOT_GRAFT
 # A Linux host builds with upstream clang and GNU tools (scripts/linux): rewrite the few sources that assume
 # Apple's, and pass xnu's make what a Mac provides itself (host compiler, mig, memory and CPU counts).
 XNU_HOST_MAKE_ARGS=()
