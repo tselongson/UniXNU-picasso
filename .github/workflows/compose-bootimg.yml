@@ -242,14 +242,42 @@ jobs:
           ls -1 "$MNT/System/Library/PrivateFrameworks" 2>/dev/null | head -20
           SRC="$MNT/System/Library/PrivateFrameworks/WebKit.framework"
           echo "ROOTFS_WEBKIT=$(test -d "$SRC" && echo 1 || echo 0)"
-          ls -1 "$SRC" 2>/dev/null | head -10
-          ls -1 "$SRC/XPCServices" 2>/dev/null | head -10
+          echo "--- what is that path ---"
+          ls -ld "$SRC" 2>&1 | head -3
+          readlink "$SRC" 2>&1 | head -2
+          echo "--- ExtensionKit extensions ---"
+          ls -1 "$MNT/System/Library/ExtensionKit/Extensions" 2>/dev/null | head -15
+          echo "EXT_COUNT=$(ls -1 "$MNT/System/Library/ExtensionKit/Extensions" 2>/dev/null | wc -l)"
+          echo "EXT_WEBKIT=$(ls -1 "$MNT/System/Library/ExtensionKit/Extensions" 2>/dev/null | grep -ci webcontent)"
+          echo "--- follow the link, if it resolves inside this mount ---"
+          ls -1 "$SRC"/ 2>&1 | head -8
+          echo "--- cryptex: same questions ---"
           rm -rf out/picasso/webkit
           if [ -d "$SRC" ]; then
             mkdir -p out/picasso/webkit
             ditto "$SRC" out/picasso/webkit/WebKit.framework
             echo "WEBKIT_STAGED files=$(find out/picasso/webkit -type f | wc -l) KiB=$(du -sk out/picasso/webkit | cut -f1)"
           fi
+          hdiutil detach "$MNT" >/dev/null 2>&1
+          exit 0
+
+      - name: Inspect the OS cryptex for WebKit content
+        run: |
+          set +e
+          SYS=$(python3 ./unixnu ipsw fetch Cryptex1,SystemOS 2>&1 | grep -v '^$' | tail -1)
+          echo "SYS_CANDIDATE=$SYS"
+          [ -e "$SYS" ] || { echo "SYS_MISSING"; exit 0; }
+          MNT="$RUNNER_TEMP/syscryptex"
+          rm -rf "$MNT"; mkdir -p "$MNT"
+          hdiutil attach -nobrowse -owners on -readonly -noautofsck -mountpoint "$MNT" "$SYS" 2>&1 | tail -3
+          echo "SYS_FILES=$(find "$MNT" -type f 2>/dev/null | wc -l)"
+          echo "SYS_LINKS=$(find "$MNT" -type l 2>/dev/null | wc -l)"
+          ls -1 "$MNT" | head -10
+          echo "--- PrivateFrameworks ---"
+          ls -1 "$MNT/System/Library/PrivateFrameworks" 2>/dev/null | head -10
+          echo "SYS_WEBKIT_LD=$(ls -ld "$MNT/System/Library/PrivateFrameworks/WebKit.framework" 2>&1 | head -1)"
+          echo "--- ExtensionKit ---"
+          ls -1 "$MNT/System/Library/ExtensionKit/Extensions" 2>/dev/null | head -15
           hdiutil detach "$MNT" >/dev/null 2>&1
           exit 0
 
