@@ -25,6 +25,8 @@ static void picasso_cryptex_dump(void);
 static void picasso_webkit_start(void);
 static void picasso_path_dump(void);
 static void picasso_ls_store_drop(void);
+static void picasso_sb_xpc_report(const char *who);
+static void picasso_app_web_probe(const char *who);
 static void picasso_sb_launch_probe(void);
 static void picasso_sb_view(void);
 static void picasso_xpc_exec_probe(void);
@@ -870,7 +872,7 @@ picasso_net_probe_thread(void *arg)
             };
             unsigned i;
 
-            picasso_probe_log("PICASSO_NETPROBE build=9 process=%s clock=%ld\n", who, (long)tv.tv_sec);
+            picasso_probe_log("PICASSO_NETPROBE build=11 process=%s clock=%ld\n", who, (long)tv.tv_sec);
             for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
                 struct stat st;
                 if (stat(paths[i], &st) == 0) {
@@ -2245,6 +2247,50 @@ picasso_sb_view(void)
         closedir(dp);
         picasso_probe_log("PICASSO_SBVIEW xpc entries=%u\n", n);
     }
+
+    /* Where does lsd keep its store on this install?  configd cannot read the
+     * mobile containers, so ask from SpringBoard, which runs as mobile. */
+    {
+        static const char *const stores[] = {
+            "/private/var/mobile/Library/Caches",
+            "/private/var/mobile/Containers/Data/InternalDaemon",
+            "/private/var/mobile/Containers/Data/InternalDaemon/"
+            "5C583048-0C53-456F-B110-BB12068B787F/Library/Caches",
+            "/private/var/root/Library/Caches",
+        };
+        unsigned k;
+
+        for (k = 0; k < sizeof(stores) / sizeof(stores[0]); k++) {
+            DIR *dp = opendir(stores[k]);
+
+            if (dp == NULL) {
+                picasso_probe_log("PICASSO_SBVIEW store errno=%d %s\n", errno, stores[k]);
+                continue;
+            }
+            {
+                struct dirent *entry;
+                unsigned ls = 0, total = 0, shown = 0;
+
+                while ((entry = readdir(dp)) != NULL) {
+                    if (entry->d_name[0] == '.') {
+                        continue;
+                    }
+                    total++;
+                    if (strncmp(entry->d_name, "com.apple.LaunchServices", 24) == 0) {
+                        ls++;
+                    }
+                    if (shown < 3) {
+                        picasso_probe_log("PICASSO_SBVIEW store entry=%s %s\n",
+                                          entry->d_name, stores[k]);
+                        shown++;
+                    }
+                }
+                picasso_probe_log("PICASSO_SBVIEW store total=%u ls=%u %s\n", total, ls,
+                                  stores[k]);
+            }
+            closedir(dp);
+        }
+    }
 }
 #include <spawn.h>
 #include <sys/wait.h>
@@ -2289,6 +2335,100 @@ picasso_xpc_exec_probe(void)
     }
 }
 
+/* ---------------------------------------------------------------------------
+ * Which host can actually start WebKit?
+ *
+ * Every app's sandbox allows the WebKit XPC service names; SpringBoard's may
+ * not, which would explain a WKWebView that is created but never spawns a
+ * content process.  Two independent readings: ask launchd for the service and
+ * report the XPC error, and (for real apps) load a page from a host whose
+ * profile is meant for it.
+ * ------------------------------------------------------------------------- */
+
+#include <mach-o/dyld.h>
+#include <xpc/xpc.h>
+
+static int
+picasso_app_executable(char *buffer, size_t size)
+{
+    uint32_t needed = (uint32_t)size;
+
+    if (_NSGetExecutablePath(buffer, &needed) != 0) {
+        buffer[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
+static void
+picasso_sb_xpc_report(const char *who)
+{
+    static const char service[] = "com.apple.WebKit.Networking";
+    xpc_connection_t connection;
+
+    connection = xpc_connection_create_mach_service(service, NULL, 0);
+    if (connection == NULL) {
+        picasso_probe_log("PICASSO_SBXC %s create=nil\n", who);
+        return;
+    }
+    xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
+        picasso_probe_log("PICASSO_SBXC %s event=%s\n", who,
+                          event == XPC_ERROR_CONNECTION_INVALID ? "invalid" :
+                          (event == XPC_ERROR_CONNECTION_INTERRUPTED ? "interrupted" :
+                           xpc_type_get_name(xpc_get_type(event))));
+    });
+    xpc_connection_resume(connection);
+    {
+        xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
+
+        if (message != NULL) {
+            xpc_dictionary_set_string(message, "picasso", "ping");
+            xpc_connection_send_message_with_reply(connection, message, NULL,
+                ^(xpc_object_t reply) {
+                picasso_probe_log("PICASSO_SBXC %s reply=%s\n", who,
+                                  reply == XPC_ERROR_CONNECTION_INVALID ? "invalid" :
+                                  (reply == XPC_ERROR_CONNECTION_INTERRUPTED ? "interrupted" :
+                                   xpc_type_get_name(xpc_get_type(reply))));
+            });
+        }
+    }
+}
+
+/* Only a process with an app bundle gets here; it is the host WebKit expects. */
+static void
+picasso_app_web_probe(const char *who)
+{
+    char executable[1024];
+
+    if (!picasso_app_executable(executable, sizeof(executable))) {
+        return;
+    }
+    if (strncmp(executable, "/Applications/", 14) != 0) {
+        return;
+    }
+    picasso_probe_log("PICASSO_APPWEB host=%s name=%s\n", executable, who);
+    picasso_sb_xpc_report(who);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15ull * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+        picasso_probe_log("PICASSO_APPWEB webview begin\n");
+        picasso_web_probe_start();
+    });
+
+    /* The supported way for an app to hand a URL to the browser.  From inside a
+     * real app this needs no entitlement -- it is what any app does when it
+     * opens a link. */
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 25ull * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+        NSURL *url = [NSURL URLWithString:@"https://www.apple.com/"];
+
+        picasso_probe_log("PICASSO_APPWEB openurl begin\n");
+        [[UIApplication sharedApplication] openURL:url options:@{}
+            completionHandler:^(BOOL ok) {
+            picasso_probe_log("PICASSO_APPWEB openurl ok=%d\n", ok ? 1 : 0);
+        }];
+    });
+}
+
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
@@ -2318,8 +2458,10 @@ static void picasso_springboard_probe(void)
     // Record entry before either installation path can fail.
     picasso_ack("kern.picasso_inject_ack");
     /* Immediate proof that THIS build of the library is the one loaded. */
-    picasso_probe_log("PICASSO_NETPROBE build=9 armed in %s\n", program ? program : "app");
+    picasso_probe_log("PICASSO_NETPROBE build=11 armed in %s\n", program ? program : "app");
     picasso_net_probe_start(program ? program : "app");
+    picasso_sb_xpc_report(program ? program : "app");
+    picasso_app_web_probe(program ? program : "app");
     if (program != NULL && (!strcmp(program, "SpringBoard") || !strcmp(program, "MobileSafari"))) {
         picasso_web_probe_start();
     }
