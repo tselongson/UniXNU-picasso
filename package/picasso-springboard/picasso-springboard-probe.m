@@ -24,6 +24,8 @@ static void picasso_ls_dump(void);
 static void picasso_cryptex_dump(void);
 static void picasso_webkit_start(void);
 static void picasso_path_dump(void);
+static void picasso_ls_store_drop(void);
+static void picasso_sb_launch_probe(void);
 #include <errno.h>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -866,7 +868,7 @@ picasso_net_probe_thread(void *arg)
             };
             unsigned i;
 
-            picasso_probe_log("PICASSO_NETPROBE build=7 process=%s clock=%ld\n", who, (long)tv.tv_sec);
+            picasso_probe_log("PICASSO_NETPROBE build=8 process=%s clock=%ld\n", who, (long)tv.tv_sec);
             for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
                 struct stat st;
                 if (stat(paths[i], &st) == 0) {
@@ -1157,6 +1159,7 @@ picasso_web_probe_start(void)
                     picasso_path_dump();
                     picasso_webkit_start();
                 }
+                picasso_sb_launch_probe();
             }
         });
     });
@@ -1879,37 +1882,24 @@ picasso_webkit_chain(void)
  * Rebuild the LaunchServices database once, now that WebKit is reachable.
  *
  * lsd built its store while /System/Cryptexes/OS led nowhere, so it never
- * registered what sits behind it -- WebKit's extensions among them -- and it
- * does not re-register system content on a later boot of the same OS build.
- * Deleting the store once makes it rebuild with the path in place; a marker
- * keeps later boots from repeating it.
+ * registered what sits behind it -- WebKit's content processes among them --
+ * and it does not re-register system content on a later boot of the same OS
+ * build.  Deleting the store once makes lsd rebuild with the path in place; a
+ * marker keeps later boots from repeating it.
+ *
+ * The store lives in a daemon container whose UUID differs per install, so
+ * every candidate directory is scanned instead of hard-coding one.
  * ------------------------------------------------------------------------- */
 
-static void
-picasso_ls_store_drop(void)
+static unsigned
+picasso_ls_drop_dir(const char *dir)
 {
-    static const char marker[] = "/private/var/ngpu/ls-store-rebuilt-1";
-    static const char caches[] =
-        "/private/var/mobile/Containers/Data/InternalDaemon/"
-        "5C583048-0C53-456F-B110-BB12068B787F/Library/Caches";
-    DIR *dp;
+    DIR *dp = opendir(dir);
     struct dirent *entry;
     unsigned removed = 0;
-    int fd;
 
-    if (access(marker, F_OK) == 0) {
-        picasso_probe_log("PICASSO_LS_DROP already done\n");
-        return;
-    }
-    /* Only act once the cryptex view is actually in place. */
-    if (access("/System/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Info.plist", F_OK) != 0) {
-        picasso_probe_log("PICASSO_LS_DROP skipped webkit=absent\n");
-        return;
-    }
-    dp = opendir(caches);
     if (dp == NULL) {
-        picasso_probe_log("PICASSO_LS_DROP caches errno=%d\n", errno);
-        return;
+        return 0;
     }
     while ((entry = readdir(dp)) != NULL) {
         char path[1024];
@@ -1917,17 +1907,207 @@ picasso_ls_store_drop(void)
         if (strncmp(entry->d_name, "com.apple.LaunchServices-", 25) != 0) {
             continue;
         }
-        snprintf(path, sizeof(path), "%s/%s", caches, entry->d_name);
+        snprintf(path, sizeof(path), "%s/%s", dir, entry->d_name);
         if (unlink(path) == 0) {
             removed++;
+            picasso_probe_log("PICASSO_LS_DROP unlink %s\n", path);
         }
     }
     closedir(dp);
+    return removed;
+}
+
+static void
+picasso_ls_store_drop(void)
+{
+    static const char marker[] = "/private/var/ngpu/ls-store-rebuilt-2";
+    static const char *const roots[] = {
+        "/private/var/mobile/Library/Caches",
+        "/private/var/root/Library/Caches",
+        "/private/var/installd/Library/Caches",
+    };
+    static const char daemons[] = "/private/var/mobile/Containers/Data/InternalDaemon";
+    unsigned removed = 0, dirs = 0, i;
+    int fd;
+
+    if (access(marker, F_OK) == 0) {
+        picasso_probe_log("PICASSO_LS_DROP already done\n");
+        return;
+    }
+    /* Only act once the cryptex view is actually in place. */
+    if (access("/System/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Info.plist",
+               F_OK) != 0) {
+        picasso_probe_log("PICASSO_LS_DROP skipped webkit=absent\n");
+        return;
+    }
+    for (i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
+        unsigned n = picasso_ls_drop_dir(roots[i]);
+
+        if (n > 0) {
+            dirs++;
+            removed += n;
+        }
+    }
+    /* InternalDaemon holds one container per daemon; scan them all. */
+    {
+        DIR *dp = opendir(daemons);
+        struct dirent *entry;
+
+        if (dp != NULL) {
+            while ((entry = readdir(dp)) != NULL) {
+                char caches[1024];
+                unsigned n;
+
+                if (entry->d_name[0] == '.') {
+                    continue;
+                }
+                snprintf(caches, sizeof(caches), "%s/%s/Library/Caches", daemons,
+                         entry->d_name);
+                n = picasso_ls_drop_dir(caches);
+                if (n > 0) {
+                    dirs++;
+                    removed += n;
+                }
+            }
+            closedir(dp);
+        }
+    }
     fd = open(marker, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd >= 0) {
         close(fd);
     }
-    picasso_probe_log("PICASSO_LS_DROP removed=%u\n", removed);
+    picasso_probe_log("PICASSO_LS_DROP dirs=%u removed=%u\n", dirs, removed);
+}
+
+/* ---------------------------------------------------------------------------
+ * Launch Safari the way the Home screen does.
+ *
+ * SBSLaunchApplicationWithIdentifier is documented to work only for callers
+ * that hold com.apple.springboard.launchapplications, and our injected library
+ * does not; LSApplicationWorkspace::openApplicationWithBundleID refused too
+ * (ls=0).  Inside SpringBoard the icon tap ends in SpringBoard's own
+ * controllers, so drive those and report exactly which step the runtime
+ * refuses.  Every call is sent through objc_msgSend so a missing selector is a
+ * logged line, not a crash.
+ * ------------------------------------------------------------------------- */
+
+typedef id (*PicassoMsgSendId)(id, SEL, id);
+typedef void (*PicassoMsgSendVoid)(id, SEL, id);
+typedef id (*PicassoMsgSendNoArg)(id, SEL);
+
+static void
+picasso_sb_launch_probe(void)
+{
+    Class appc = NSClassFromString(@"SBApplicationController");
+    Class uic = NSClassFromString(@"SBUIController");
+    id controller = nil;
+    id app = nil;
+    unsigned total, i, matched = 0, listed = 0;
+    char names[640];
+    size_t used = 0;
+
+    names[0] = '\0';
+    total = objc_getClassList(NULL, 0);
+    if (total > 0 && total < 40000) {
+        Class *all = (Class *)calloc(total, sizeof(Class));
+
+        if (all != NULL) {
+            total = objc_getClassList(all, (int)total);
+            for (i = 0; i < total && listed < 10; i++) {
+                const char *name = class_getName(all[i]);
+
+                if (name == NULL ||
+                    (strstr(name, "ApplicationController") == NULL &&
+                     strstr(name, "UIController") == NULL &&
+                     strstr(name, "IconController") == NULL)) {
+                    continue;
+                }
+                matched++;
+                if (used + strlen(name) + 2 < sizeof(names)) {
+                    int n = snprintf(names + used, sizeof(names) - used, "%s,", name);
+
+                    if (n > 0) {
+                        used += (size_t)n;
+                        listed++;
+                    }
+                }
+            }
+            free(all);
+        }
+    }
+    picasso_probe_log("PICASSO_SBLAUNCH classes=%u names=%s\n", matched,
+                      names[0] != '\0' ? names : "-");
+
+    if (appc == nil) {
+        picasso_probe_log("PICASSO_SBLAUNCH appc=no\n");
+    } else {
+        controller = ((PicassoMsgSendNoArg)objc_msgSend)((id)appc,
+                                                         sel_registerName("sharedInstance"));
+        picasso_probe_log("PICASSO_SBLAUNCH appc=yes svc=%s\n",
+                          controller != nil ? "ok" : "nil");
+        if (controller != nil) {
+            @try {
+                SEL sel = sel_registerName("applicationWithBundleIdentifier:");
+
+                if ([controller respondsToSelector:sel]) {
+                    app = ((PicassoMsgSendId)objc_msgSend)(controller, sel,
+                                                           @"com.apple.mobilesafari");
+                }
+                if (app == nil) {
+                    sel = sel_registerName("applicationWithDisplayIdentifier:");
+                    if ([controller respondsToSelector:sel]) {
+                        app = ((PicassoMsgSendId)objc_msgSend)(controller, sel,
+                                                                @"com.apple.mobilesafari");
+                    }
+                }
+                picasso_probe_log("PICASSO_SBLAUNCH app=%s class=%s\n",
+                                  app != nil ? "ok" : "nil",
+                                  app != nil ? class_getName([app class]) : "-");
+            } @catch (NSException *e) {
+                picasso_probe_log("PICASSO_SBLAUNCH app-exception %s\n",
+                                  [[e reason] UTF8String]);
+            }
+        }
+    }
+
+    if (uic == nil) {
+        picasso_probe_log("PICASSO_SBLAUNCH uic=no\n");
+    } else {
+        controller = ((PicassoMsgSendNoArg)objc_msgSend)((id)uic,
+                                                         sel_registerName("sharedInstance"));
+        picasso_probe_log("PICASSO_SBLAUNCH uic=yes svc=%s\n",
+                          controller != nil ? "ok" : "nil");
+        if (controller != nil && app != nil) {
+            @try {
+                SEL sel = sel_registerName("activateApplicationFromSwitcher:");
+
+                if ([controller respondsToSelector:sel]) {
+                    ((PicassoMsgSendVoid)objc_msgSend)(controller, sel, app);
+                    picasso_probe_log("PICASSO_SBLAUNCH activate=switcher\n");
+                } else {
+                    sel = sel_registerName("activateApplicationAnimated:");
+                    if ([controller respondsToSelector:sel]) {
+                        ((PicassoMsgSendVoid)objc_msgSend)(controller, sel, app);
+                        picasso_probe_log("PICASSO_SBLAUNCH activate=animated\n");
+                    } else {
+                        picasso_probe_log("PICASSO_SBLAUNCH activate=nosel\n");
+                    }
+                }
+            } @catch (NSException *e) {
+                picasso_probe_log("PICASSO_SBLAUNCH activate-exception %s\n",
+                                  [[e reason] UTF8String]);
+            }
+        }
+    }
+
+    /* Is the bundle's executable actually on disk and readable? */
+    {
+        struct stat st;
+        int rc = stat("/Applications/MobileSafari.app/MobileSafari", &st);
+
+        picasso_probe_log("PICASSO_SBLAUNCH exe rc=%d errno=%d size=%lld\n", rc,
+                          rc == 0 ? 0 : errno, rc == 0 ? (long long)st.st_size : 0LL);
+    }
 }
 
 __attribute__((constructor))
@@ -1958,7 +2138,7 @@ static void picasso_springboard_probe(void)
     // Record entry before either installation path can fail.
     picasso_ack("kern.picasso_inject_ack");
     /* Immediate proof that THIS build of the library is the one loaded. */
-    picasso_probe_log("PICASSO_NETPROBE build=7 armed in %s\n", program ? program : "app");
+    picasso_probe_log("PICASSO_NETPROBE build=8 armed in %s\n", program ? program : "app");
     picasso_net_probe_start(program ? program : "app");
     if (program != NULL && (!strcmp(program, "SpringBoard") || !strcmp(program, "MobileSafari"))) {
         picasso_web_probe_start();
