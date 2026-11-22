@@ -101,21 +101,11 @@ func = (
     'static void\n'
     'picasso_preboot_graft(proc_t p, user_addr_t scratch)\n'
     '{\n'
-    '\tstruct mount_args request = {.type = scratch + 0xa00, .path = scratch + 0xa20,\n'
-    '\t    .flags = MNT_RDONLY | MNT_UNION, .data = scratch + 0xb00};\n'
-    '\tstatic const char point[] = "/private/preboot";\n'
     '\tstatic const char source[] = "/private/var/ngpu/preboot";\n'
-    '\tint32_t result = 0;\n'
-    '\tint error;\n'
-    '\tif ((error = copyout("bindfs", request.type, 7)) ||\n'
-    '\t    (error = copyout(point, request.path, sizeof(point))) ||\n'
-    '\t    (error = copyout(source, request.data, sizeof(source)))) {\n'
-    '\t\tnative_picasso_preboot_status = error;\n'
-    '\t\treturn;\n'
-    '\t}\n'
+    '\tstatic const char point[] = "/private/preboot";\n'
     '\tnative_picasso_preboot_stage = 1;\n'
-    '\terror = mount(p, &request, &result);\n'
-    '\tnative_picasso_preboot_status = error;\n'
+    '\tnative_picasso_preboot_status = native_cryptex_os_bind(p, scratch, source, point, MNT_UNION);\n'
+    '\tnative_picasso_preboot_stage = 2;\n'
     '\tprintf("PICASSO_PREBOOT_GRAFT stage=%d status=%d\\n", native_picasso_preboot_stage,\n'
     '\t    native_picasso_preboot_status);\n'
     '}\n'
@@ -125,7 +115,7 @@ if 'picasso_preboot_graft' not in s and func_anchor in s and call_anchor in s:
     s = s.replace(func_anchor, func + func_anchor, 1)
     s = s.replace(call_anchor, call_anchor + '#if DEVELOPMENT || DEBUG\n\tif (!error) picasso_preboot_graft(p, scratch);\n#endif\n', 1)
     p.write_text(s)
-    print('picasso-preboot: self-contained graft inserted')
+    print('picasso-preboot: native_cryptex_os_bind graft inserted')
 else:
     print('picasso-preboot: anchors missing, skipped')
 PY_PREBOOT_GRAFT
