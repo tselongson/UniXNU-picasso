@@ -307,6 +307,29 @@ jobs:
           done
           exit 0
 
+      - name: Stage WebKit.framework from the SystemOS cryptex
+        run: |
+          set +e
+          SYS=$(python3 ./unixnu ipsw fetch Cryptex1,SystemOS 2>&1 | grep -v '^$' | tail -1)
+          echo "SYS=$SYS"
+          [ -e "$SYS" ] || { echo "SYS_MISSING"; exit 0; }
+          MNT="$RUNNER_TEMP/sysos"
+          rm -rf "$MNT"; mkdir -p "$MNT"
+          hdiutil attach -nobrowse -owners on -readonly -noautofsck -mountpoint "$MNT" "$SYS" 2>&1 | tail -3
+          SRC="$MNT/System/Library/Frameworks/WebKit.framework"
+          echo "SRC_IS_DIR=$(test -d "$SRC" && echo 1 || echo 0)"
+          ls -1 "$SRC" | head -12
+          echo "SRC_KiB=$(du -sk "$SRC" 2>/dev/null | cut -f1)"
+          ls -1 "$SRC/XPCServices" 2>/dev/null | head -10
+          rm -rf out/picasso/webkit
+          if [ -d "$SRC" ]; then
+            mkdir -p out/picasso/webkit
+            ditto "$SRC" out/picasso/webkit/WebKit.framework
+            echo "WEBKIT_STAGED files=$(find out/picasso/webkit -type f | wc -l) KiB=$(du -sk out/picasso/webkit | cut -f1)"
+          fi
+          hdiutil detach "$MNT" >/dev/null 2>&1
+          exit 0
+
       - name: Upload the App cryptex for device-side download
         if: always()
         uses: actions/upload-artifact@v4
