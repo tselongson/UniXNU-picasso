@@ -1149,6 +1149,7 @@ picasso_web_probe_start(void)
                     int rc = sbs_launch(CFSTR("com.apple.mobilesafari"), 0);
 
                     picasso_probe_log("PICASSO_WEBPROBE sbs-launch rc=%d\n", rc);
+                    picasso_ls_dump();
                 }
             }
         });
@@ -1548,6 +1549,66 @@ picasso_cryptex_dump(void)
             }
             closedir(dp);
             picasso_probe_log("PICASSO_CRYPTEX dir=%s open=1 n=%u list=%s\n", dirs[k], n, names);
+        }
+    }
+}
+
+
+/* ---------------------------------------------------------------------------
+ * Is MobileSafari actually registered with LaunchServices?
+ *
+ * The launch attempts failed three different ways (openApplicationWithBundleID
+ * -> NO, openURL -> NO, SBSLaunchApplicationWithIdentifier -> 11).  If the app
+ * is missing from lsd's database, every one of those fails no matter what
+ * WebKit does, and that would be a second, independent blocker.  Enumerate the
+ * database and say plainly whether the bundle is there.
+ * ------------------------------------------------------------------------- */
+
+static void
+picasso_ls_dump(void)
+{
+    Class workspace_class = NSClassFromString(@"LSApplicationWorkspace");
+    id workspace;
+    NSArray *apps;
+    unsigned listed = 0;
+    int found = 0;
+
+    if (workspace_class == Nil) {
+        picasso_probe_log("PICASSO_LS no LSApplicationWorkspace\n");
+        return;
+    }
+    workspace = [workspace_class performSelector:@selector(defaultWorkspace)];
+    if (workspace == nil) {
+        picasso_probe_log("PICASSO_LS no defaultWorkspace\n");
+        return;
+    }
+    apps = [workspace performSelector:@selector(allApplications)];
+    picasso_probe_log("PICASSO_LS apps=%lu\n", (unsigned long)apps.count);
+    for (id app in apps) {
+        NSString *bundle = nil;
+
+        if ([app respondsToSelector:@selector(bundleIdentifier)]) {
+            bundle = [app performSelector:@selector(bundleIdentifier)];
+        }
+        if (bundle == nil) {
+            continue;
+        }
+        if ([bundle isEqualToString:@"com.apple.mobilesafari"]) {
+            found = 1;
+            picasso_probe_log("PICASSO_LS found=com.apple.mobilesafari\n");
+        }
+        if (listed < 8) {
+            picasso_probe_log("PICASSO_LS app[%u]=%s\n", listed,
+                              [bundle UTF8String]);
+            listed++;
+        }
+    }
+    picasso_probe_log("PICASSO_LS safari=%d listed=%u\n", found, listed);
+    if (!found) {
+        /* The staged mount may postdate lsd's scan; ask it to look again. */
+        SEL refresh = @selector(enumerateBundlesOfType:block:);
+        if ([workspace respondsToSelector:refresh]) {
+            picasso_probe_log("PICASSO_LS refresh=available\n");
         }
     }
 }
