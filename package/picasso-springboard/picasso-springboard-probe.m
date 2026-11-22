@@ -26,6 +26,8 @@ static void picasso_webkit_start(void);
 static void picasso_path_dump(void);
 static void picasso_ls_store_drop(void);
 static void picasso_sb_launch_probe(void);
+static void picasso_sb_view(void);
+static void picasso_xpc_exec_probe(void);
 #include <errno.h>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -868,7 +870,7 @@ picasso_net_probe_thread(void *arg)
             };
             unsigned i;
 
-            picasso_probe_log("PICASSO_NETPROBE build=8 process=%s clock=%ld\n", who, (long)tv.tv_sec);
+            picasso_probe_log("PICASSO_NETPROBE build=9 process=%s clock=%ld\n", who, (long)tv.tv_sec);
             for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
                 struct stat st;
                 if (stat(paths[i], &st) == 0) {
@@ -1111,6 +1113,18 @@ picasso_web_probe_start(void)
 
                 picasso_probe_log("PICASSO_WEBPROBE timeout60 url=%s\n",
                                   url != nil ? [url UTF8String] : "-");
+                if (url == nil && g_web_view != nil) {
+                    picasso_probe_log("PICASSO_WEBPROBE html-load begin\n");
+                    [g_web_view loadHTMLString:@"<html><body><h1>picasso</h1></body></html>"
+                                       baseURL:nil];
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30ull * NSEC_PER_SEC),
+                                   dispatch_get_main_queue(), ^{
+                        NSString *after = [[g_web_view URL] absoluteString];
+
+                        picasso_probe_log("PICASSO_WEBPROBE html-load url=%s\n",
+                                          after != nil ? [after UTF8String] : "-");
+                    });
+                }
             });
         }
 
@@ -1159,6 +1173,7 @@ picasso_web_probe_start(void)
                     picasso_path_dump();
                     picasso_webkit_start();
                 }
+                picasso_sb_view();
                 picasso_sb_launch_probe();
             }
         });
@@ -1996,7 +2011,50 @@ picasso_ls_store_drop(void)
 - (id)applicationWithDisplayIdentifier:(NSString *)identifier;
 - (void)activateApplicationFromSwitcher:(id)application;
 - (void)activateApplicationAnimated:(id)application;
+- (void)launch;
 @end
+
+
+static void
+picasso_sb_list_selectors(Class cls, const char *label, const char *const *needles, unsigned needles_n)
+{
+    Method *methods;
+    unsigned count = 0, i, n, listed = 0;
+    char names[700];
+    size_t used = 0;
+
+    if (cls == nil) {
+        picasso_probe_log("PICASSO_SBLAUNCH %s=no\n", label);
+        return;
+    }
+    methods = class_copyMethodList(cls, &count);
+    if (methods == NULL) {
+        picasso_probe_log("PICASSO_SBLAUNCH %s methods=0\n", label);
+        return;
+    }
+    names[0] = '\0';
+    for (i = 0; i < count && listed < 10; i++) {
+        const char *name = sel_getName(method_getName(methods[i]));
+
+        for (n = 0; n < needles_n; n++) {
+            if (strstr(name, needles[n]) == NULL) {
+                continue;
+            }
+            if (used + strlen(name) + 2 < sizeof(names)) {
+                int w = snprintf(names + used, sizeof(names) - used, "%s,", name);
+
+                if (w > 0) {
+                    used += (size_t)w;
+                    listed++;
+                }
+            }
+            break;
+        }
+    }
+    free(methods);
+    picasso_probe_log("PICASSO_SBLAUNCH %s total=%u sel=%s\n", label, count,
+                      names[0] != '\0' ? names : "-");
+}
 
 static void
 picasso_sb_launch_probe(void)
@@ -2071,6 +2129,18 @@ picasso_sb_launch_probe(void)
         }
     }
 
+    {
+        static const char *const ui_needles[] = {"activate", "launch", "open", "present"};
+        static const char *const app_needles[] = {"launch", "activate", "open"};
+
+        picasso_sb_list_selectors(uic, "uicm", ui_needles,
+                                  sizeof(ui_needles) / sizeof(ui_needles[0]));
+        if (app != nil) {
+            picasso_sb_list_selectors([app class], "appm", app_needles,
+                                      sizeof(app_needles) / sizeof(app_needles[0]));
+        }
+    }
+
     if (uic == nil) {
         picasso_probe_log("PICASSO_SBLAUNCH uic=no\n");
     } else {
@@ -2099,6 +2169,17 @@ picasso_sb_launch_probe(void)
                                   [[e reason] UTF8String]);
             }
         }
+        if (app != nil) {
+            @try {
+                if ([app respondsToSelector:@selector(launch)]) {
+                    [app launch];
+                    picasso_probe_log("PICASSO_SBLAUNCH app-launch=ok\n");
+                }
+            } @catch (NSException *e) {
+                picasso_probe_log("PICASSO_SBLAUNCH activate-exception %s\n",
+                                  [[e reason] UTF8String]);
+            }
+        }
     }
 
     /* Is the bundle's executable actually on disk and readable? */
@@ -2108,6 +2189,103 @@ picasso_sb_launch_probe(void)
 
         picasso_probe_log("PICASSO_SBLAUNCH exe rc=%d errno=%d size=%lld\n", rc,
                           rc == 0 ? 0 : errno, rc == 0 ? (long long)st.st_size : 0LL);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * What does a sandboxed app actually see?
+ *
+ * Root (configd) resolved every link of the WebKit chain, but apps do not run
+ * with that view: the chain ends inside /private/preboot, which application
+ * sandboxes do not reach.  Print the same probes from SpringBoard so a denial
+ * shows up as EPERM instead of silently making WebKit look absent.
+ * ------------------------------------------------------------------------- */
+
+static void
+picasso_sb_view(void)
+{
+    static const char *const paths[] = {
+        "/System/Library/Frameworks/WebKit.framework",
+        "/System/Library/Frameworks/WebKit.framework/Info.plist",
+        "/System/Library/Frameworks/WebKit.framework/XPCServices",
+        "/System/Cryptexes/OS/System/Library/Frameworks/WebKit.framework",
+        "/private/preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework",
+    };
+    unsigned i;
+
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        struct stat st;
+
+        if (stat(paths[i], &st) == 0) {
+            picasso_probe_log("PICASSO_SBVIEW ok type=%s size=%lld %s\n",
+                              S_ISDIR(st.st_mode) ? "dir" : "file",
+                              (long long)st.st_size, paths[i]);
+        } else {
+            picasso_probe_log("PICASSO_SBVIEW errno=%d %s\n", errno, paths[i]);
+        }
+    }
+    {
+        DIR *dp = opendir("/System/Library/Frameworks/WebKit.framework/XPCServices");
+        struct dirent *entry;
+        unsigned n = 0;
+
+        if (dp == NULL) {
+            picasso_probe_log("PICASSO_SBVIEW xpc opendir=no errno=%d\n", errno);
+            return;
+        }
+        while ((entry = readdir(dp)) != NULL) {
+            if (entry->d_name[0] == '.') {
+                continue;
+            }
+            if (n < 6) {
+                picasso_probe_log("PICASSO_SBVIEW xpc entry=%s\n", entry->d_name);
+            }
+            n++;
+        }
+        closedir(dp);
+        picasso_probe_log("PICASSO_SBVIEW xpc entries=%u\n", n);
+    }
+}
+#include <spawn.h>
+#include <sys/wait.h>
+
+/* ---------------------------------------------------------------------------
+ * Can the WebContent helper even be executed on this port?
+ *
+ * The framework's code lives in the dyld shared cache, but the helper is a real
+ * Mach-O on disk that launchd/xpcproxy has to exec.  Spawning it here separates
+ * "WebKit never asked for it" from "the port refuses to run it" -- the helper
+ * exits at once without its XPC bootstrap, so this only reports the exec result.
+ * ------------------------------------------------------------------------- */
+
+static void
+picasso_xpc_exec_probe(void)
+{
+    static const char helper[] =
+        "/System/Library/Frameworks/WebKit.framework/XPCServices/"
+        "com.apple.WebKit.WebContent.xpc/com.apple.WebKit.WebContent";
+    struct stat st;
+    pid_t pid = 0;
+    int rc;
+    const char *argv[2];
+
+    if (stat(helper, &st) != 0) {
+        picasso_probe_log("PICASSO_XPCEXEC stat errno=%d\n", errno);
+        return;
+    }
+    picasso_probe_log("PICASSO_XPCEXEC stat ok size=%lld mode=%o\n",
+                      (long long)st.st_size, st.st_mode & 07777);
+    argv[0] = helper;
+    argv[1] = NULL;
+    rc = posix_spawn(&pid, helper, NULL, NULL, (char *const *)argv, NULL);
+    picasso_probe_log("PICASSO_XPCEXEC spawn rc=%d errno=%d pid=%d\n", rc,
+                      rc == 0 ? 0 : errno, (int)pid);
+    if (rc == 0 && pid > 0) {
+        /* It has no XPC bootstrap and will exit on its own; reap it. */
+        int status = 0;
+
+        waitpid(pid, &status, 0);
+        picasso_probe_log("PICASSO_XPCEXEC exited status=%d\n", status);
     }
 }
 
@@ -2129,6 +2307,7 @@ static void picasso_springboard_probe(void)
         picasso_mount_probe();
         picasso_webkit_chain();
         picasso_ls_store_drop();
+        picasso_xpc_exec_probe();
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
         /* Independent of the bootstrap path on purpose (chain-607). */
@@ -2139,7 +2318,7 @@ static void picasso_springboard_probe(void)
     // Record entry before either installation path can fail.
     picasso_ack("kern.picasso_inject_ack");
     /* Immediate proof that THIS build of the library is the one loaded. */
-    picasso_probe_log("PICASSO_NETPROBE build=8 armed in %s\n", program ? program : "app");
+    picasso_probe_log("PICASSO_NETPROBE build=9 armed in %s\n", program ? program : "app");
     picasso_net_probe_start(program ? program : "app");
     if (program != NULL && (!strcmp(program, "SpringBoard") || !strcmp(program, "MobileSafari"))) {
         picasso_web_probe_start();
