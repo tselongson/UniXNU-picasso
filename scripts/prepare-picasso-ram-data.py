@@ -437,7 +437,7 @@ def mounted(image, target, readonly=False):
         subprocess.run(['hdiutil', 'detach', device], check=True)
 
 
-def prepare(tree, source, output, config, extra_var=None):
+def prepare(tree, source, output, config, extra_var=None, extra_var_target='private/var/appcryptex'):
     if sys.platform != 'darwin' or os.geteuid() != 0:
         raise ValueError('APFS Data preparation requires macOS and root')
     if not source.is_file() or output.exists():
@@ -477,7 +477,7 @@ def prepare(tree, source, output, config, extra_var=None):
             # DMG, so it cannot carry this itself.  It is not part of the original
             # var manifest; verify_var() only checks the entries it lists.
             if extra_var is not None and Path(extra_var).is_dir():
-                destination = target / 'private/var/appcryptex'
+                destination = target / extra_var_target
                 copied = 0
                 for root, _dirs, names in os.walk(extra_var):
                     relative = os.path.relpath(root, extra_var)
@@ -535,7 +535,10 @@ if __name__ == '__main__':
     for name in ('tree', 'source', 'output', 'config'):
         parser.add_argument('--' + name, type=Path, required=True)
     parser.add_argument('--extra-var', type=Path, default=None,
-                        help='optional tree copied into private/var/appcryptex (App cryptex)')
+                        help='optional tree copied into the seed')
+    parser.add_argument('--extra-var-target', default='private/var/appcryptex',
+                        help='where --extra-var lands inside the Data volume')
     args = parser.parse_args()
     prepare(*(getattr(args, name).resolve() for name in ('tree', 'source', 'output', 'config')),
-            extra_var=args.extra_var.resolve() if args.extra_var else None)
+            extra_var=args.extra_var.resolve() if args.extra_var else None,
+            extra_var_target=args.extra_var_target)
