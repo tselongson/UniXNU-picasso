@@ -1192,6 +1192,164 @@ picasso_cryptex_bridge(void)
 
 
 /* ---------------------------------------------------------------------------
+ * Cryptex reality check, from configd (root) instead of SpringBoard.
+ *
+ * Every earlier "exists=0" came from a sandboxed SpringBoard lookup, and the
+ * sandbox answers ENOENT for paths it does not own -- /private/preboot is one
+ * of them.  So those results never proved the cryptex was absent.  This dump
+ * is the durable record: the real mount table plus stat()/readdir() of the
+ * cryptex trees, taken by a root daemon.
+ * ------------------------------------------------------------------------- */
+
+static void
+picasso_cryptex_dump(void)
+{
+    static const char *paths[] = {
+        "/private/preboot",
+        "/private/preboot/Cryptexes",
+        "/private/preboot/Cryptexes/OS",
+        "/private/preboot/Cryptexes/App",
+        "/System/Cryptexes",
+        "/System/Cryptexes/OS",
+        "/System/Cryptexes/App",
+        "/private/preboot/Cryptexes/OS/System/Library/PrivateFrameworks/WebKit.framework",
+        "/private/preboot/Cryptexes/OS/System/Library/PrivateFrameworks/WebKit.framework/XPCServices",
+        "/System/Library/PrivateFrameworks/WebKit.framework",
+        "/System/Library/PrivateFrameworks",
+        "/usr/libexec/webinspectord",
+    };
+    struct statfs *mounts = NULL;
+    int count = getfsstat(NULL, 0, MNT_NOWAIT);
+    int i;
+    unsigned k;
+
+    picasso_probe_log("PICASSO_CRYPTEX mounts=%d\n", count);
+    if (count > 0) {
+        mounts = (struct statfs *)calloc((size_t)count, sizeof(*mounts));
+        if (mounts != NULL) {
+            count = getfsstat(mounts, count * (int)sizeof(*mounts), MNT_NOWAIT);
+            for (i = 0; i < count && i < 32; i++) {
+                picasso_probe_log("PICASSO_CRYPTEX mount[%d] %s on %s\n",
+                                  i, mounts[i].f_fstypename, mounts[i].f_mntonname);
+            }
+            free(mounts);
+        }
+    }
+    for (k = 0; k < sizeof(paths) / sizeof(paths[0]); k++) {
+        struct stat st;
+
+        if (stat(paths[k], &st) == 0) {
+            picasso_probe_log("PICASSO_CRYPTEX stat=%s ok mode=%o type=%s\n",
+                              paths[k], (unsigned)st.st_mode,
+                              S_ISDIR(st.st_mode) ? "dir" : (S_ISREG(st.st_mode) ? "file" : "other"));
+        } else {
+            picasso_probe_log("PICASSO_CRYPTEX stat=%s errno=%d\n", paths[k], errno);
+        }
+    }
+    {
+        static const char *dirs[] = {
+            "/private/preboot",
+            "/private/preboot/Cryptexes",
+            "/System/Cryptexes",
+            "/System/Library/PrivateFrameworks",
+        };
+
+        for (k = 0; k < sizeof(dirs) / sizeof(dirs[0]); k++) {
+            DIR *dp = opendir(dirs[k]);
+            char names[400];
+            size_t used = 0;
+            struct dirent *entry;
+            unsigned n = 0;
+
+            if (dp == NULL) {
+                picasso_probe_log("PICASSO_CRYPTEX dir=%s open=0 errno=%d\n", dirs[k], errno);
+                continue;
+            }
+            names[0] = '\0';
+            while ((entry = readdir(dp)) != NULL && n < 12) {
+                size_t len;
+
+                if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+                    continue;
+                }
+                len = strlen(entry->d_name);
+                if (used + len + 2 >= sizeof(names)) {
+                    break;
+                }
+                memcpy(names + used, entry->d_name, len);
+                used += len;
+                names[used++] = ',';
+                names[used] = '\0';
+                n++;
+            }
+            closedir(dp);
+            picasso_probe_log("PICASSO_CRYPTEX dir=%s open=1 n=%u list=%s\n", dirs[k], n, names);
+        }
+    }
+}
+
+
+/* ---------------------------------------------------------------------------
+ * Is MobileSafari actually registered with LaunchServices?
+ *
+ * The launch attempts failed three different ways (openApplicationWithBundleID
+ * -> NO, openURL -> NO, SBSLaunchApplicationWithIdentifier -> 11).  If the app
+ * is missing from lsd's database, every one of those fails no matter what
+ * WebKit does, and that would be a second, independent blocker.  Enumerate the
+ * database and say plainly whether the bundle is there.
+ * ------------------------------------------------------------------------- */
+
+static void
+picasso_ls_dump(void)
+{
+    Class workspace_class = NSClassFromString(@"LSApplicationWorkspace");
+    id workspace;
+    NSArray *apps;
+    unsigned listed = 0;
+    int found = 0;
+
+    if (workspace_class == Nil) {
+        picasso_probe_log("PICASSO_LS no LSApplicationWorkspace\n");
+        return;
+    }
+    workspace = [workspace_class performSelector:@selector(defaultWorkspace)];
+    if (workspace == nil) {
+        picasso_probe_log("PICASSO_LS no defaultWorkspace\n");
+        return;
+    }
+    apps = [workspace performSelector:@selector(allApplications)];
+    picasso_probe_log("PICASSO_LS apps=%lu\n", (unsigned long)apps.count);
+    for (id app in apps) {
+        NSString *bundle = nil;
+
+        if ([app respondsToSelector:@selector(bundleIdentifier)]) {
+            bundle = [app performSelector:@selector(bundleIdentifier)];
+        }
+        if (bundle == nil) {
+            continue;
+        }
+        if ([bundle isEqualToString:@"com.apple.mobilesafari"]) {
+            found = 1;
+            picasso_probe_log("PICASSO_LS found=com.apple.mobilesafari\n");
+        }
+        if (listed < 8) {
+            picasso_probe_log("PICASSO_LS app[%u]=%s\n", listed,
+                              [bundle UTF8String]);
+            listed++;
+        }
+    }
+    picasso_probe_log("PICASSO_LS safari=%d listed=%u\n", found, listed);
+    if (!found) {
+        /* The staged mount may postdate lsd's scan; ask it to look again. */
+        SEL refresh = @selector(enumerateBundlesOfType:block:);
+        if ([workspace respondsToSelector:refresh]) {
+            picasso_probe_log("PICASSO_LS refresh=available\n");
+        }
+    }
+}
+
+
+/* ---------------------------------------------------------------------------
  * App cryptex pull (device side).
  *
  * Why this exists: the WebKit services Safari needs (WebContent/Networking/GPU)
@@ -1206,10 +1364,10 @@ picasso_cryptex_bridge(void)
  * up, downloads once, unpacks, then verifies the completeness marker.
  * ------------------------------------------------------------------------- */
 
-static const char kAppCryptexURL[] = "http://192.168.101.4:8099/cryptex.tar";
-static const char kAppCryptexRoot[] = "/private/preboot/Cryptexes/App";
-static const char kAppCryptexMark[] =
-    "/private/preboot/Cryptexes/App/usr/libexec/webbookmarksd";
+static const char kWebkitURL[] = "http://192.168.101.4:8099/webkit.tar";
+static const char kWebkitRoot[] = "/private/var/picasso-webkit";
+static const char kWebkitMark[] =
+    "/private/var/picasso-webkit/WebKit.framework/Info.plist";
 
 static unsigned long long
 picasso_tar_octal(const char *text, size_t width)
@@ -1390,7 +1548,7 @@ picasso_untar(const unsigned char *base, size_t length, const char *root)
 }
 
 static void *
-picasso_appcryptex_thread(void *unused)
+picasso_webkit_thread(void *unused)
 {
     unsigned attempt;
 
@@ -1402,11 +1560,11 @@ picasso_appcryptex_thread(void *unused)
             NSURLSession *session;
             NSURL *url;
 
-            if (access(kAppCryptexMark, F_OK) == 0) {
-                picasso_probe_log("PICASSO_CRYPTEX already present attempt=%u\n", attempt);
+            if (access(kWebkitMark, F_OK) == 0) {
+                picasso_probe_log("PICASSO_WEBKIT_PULL already present attempt=%u\n", attempt);
                 return NULL;
             }
-            url = [NSURL URLWithString:[NSString stringWithUTF8String:kAppCryptexURL]];
+            url = [NSURL URLWithString:[NSString stringWithUTF8String:kWebkitURL]];
             if (url == nil) {
                 return NULL;
             }
@@ -1422,7 +1580,7 @@ picasso_appcryptex_thread(void *unused)
                 if (data.length > 0 && status == 200) {
                     payload = data;
                 }
-                picasso_probe_log("PICASSO_CRYPTEX get attempt=%u status=%ld bytes=%lu err=%ld\n",
+                picasso_probe_log("PICASSO_WEBKIT_PULL get attempt=%u status=%ld bytes=%lu err=%ld\n",
                                   attempt, (long)status, (unsigned long)data.length,
                                   (long)(error != nil ? [error code] : 0));
                 dispatch_semaphore_signal(done);
@@ -1432,184 +1590,26 @@ picasso_appcryptex_thread(void *unused)
 
             if (payload.length > 1024) {
                 unsigned count = picasso_untar((const unsigned char *)[payload bytes],
-                                               (size_t)[payload length], kAppCryptexRoot);
+                                               (size_t)[payload length], kWebkitRoot);
 
-                picasso_probe_log("PICASSO_CRYPTEX unpack files=%u marker=%d\n",
-                                  count, access(kAppCryptexMark, F_OK) == 0);
+                picasso_probe_log("PICASSO_WEBKIT_PULL unpack files=%u marker=%d\n",
+                                  count, access(kWebkitMark, F_OK) == 0);
                 return NULL;
             }
             sleep(8);
         }
     }
-    picasso_probe_log("PICASSO_CRYPTEX gave up\n");
+    picasso_probe_log("PICASSO_WEBKIT_PULL gave up\n");
     return NULL;
 }
 
 static void
-picasso_appcryptex_start(void)
+picasso_webkit_start(void)
 {
     pthread_t thread;
 
-    if (pthread_create(&thread, NULL, picasso_appcryptex_thread, NULL) == 0) {
+    if (pthread_create(&thread, NULL, picasso_webkit_thread, NULL) == 0) {
         (void)pthread_detach(thread);
-    }
-}
-
-
-/* ---------------------------------------------------------------------------
- * Cryptex reality check, from configd (root) instead of SpringBoard.
- *
- * Every earlier "exists=0" came from a sandboxed SpringBoard lookup, and the
- * sandbox answers ENOENT for paths it does not own -- /private/preboot is one
- * of them.  So those results never proved the cryptex was absent.  This dump
- * is the durable record: the real mount table plus stat()/readdir() of the
- * cryptex trees, taken by a root daemon.
- * ------------------------------------------------------------------------- */
-
-static void
-picasso_cryptex_dump(void)
-{
-    static const char *paths[] = {
-        "/private/preboot",
-        "/private/preboot/Cryptexes",
-        "/private/preboot/Cryptexes/OS",
-        "/private/preboot/Cryptexes/App",
-        "/System/Cryptexes",
-        "/System/Cryptexes/OS",
-        "/System/Cryptexes/App",
-        "/private/preboot/Cryptexes/OS/System/Library/PrivateFrameworks/WebKit.framework",
-        "/private/preboot/Cryptexes/OS/System/Library/PrivateFrameworks/WebKit.framework/XPCServices",
-        "/System/Library/PrivateFrameworks/WebKit.framework",
-        "/System/Library/PrivateFrameworks",
-        "/usr/libexec/webinspectord",
-    };
-    struct statfs *mounts = NULL;
-    int count = getfsstat(NULL, 0, MNT_NOWAIT);
-    int i;
-    unsigned k;
-
-    picasso_probe_log("PICASSO_CRYPTEX mounts=%d\n", count);
-    if (count > 0) {
-        mounts = (struct statfs *)calloc((size_t)count, sizeof(*mounts));
-        if (mounts != NULL) {
-            count = getfsstat(mounts, count * (int)sizeof(*mounts), MNT_NOWAIT);
-            for (i = 0; i < count && i < 32; i++) {
-                picasso_probe_log("PICASSO_CRYPTEX mount[%d] %s on %s\n",
-                                  i, mounts[i].f_fstypename, mounts[i].f_mntonname);
-            }
-            free(mounts);
-        }
-    }
-    for (k = 0; k < sizeof(paths) / sizeof(paths[0]); k++) {
-        struct stat st;
-
-        if (stat(paths[k], &st) == 0) {
-            picasso_probe_log("PICASSO_CRYPTEX stat=%s ok mode=%o type=%s\n",
-                              paths[k], (unsigned)st.st_mode,
-                              S_ISDIR(st.st_mode) ? "dir" : (S_ISREG(st.st_mode) ? "file" : "other"));
-        } else {
-            picasso_probe_log("PICASSO_CRYPTEX stat=%s errno=%d\n", paths[k], errno);
-        }
-    }
-    {
-        static const char *dirs[] = {
-            "/private/preboot",
-            "/private/preboot/Cryptexes",
-            "/System/Cryptexes",
-            "/System/Library/PrivateFrameworks",
-        };
-
-        for (k = 0; k < sizeof(dirs) / sizeof(dirs[0]); k++) {
-            DIR *dp = opendir(dirs[k]);
-            char names[400];
-            size_t used = 0;
-            struct dirent *entry;
-            unsigned n = 0;
-
-            if (dp == NULL) {
-                picasso_probe_log("PICASSO_CRYPTEX dir=%s open=0 errno=%d\n", dirs[k], errno);
-                continue;
-            }
-            names[0] = '\0';
-            while ((entry = readdir(dp)) != NULL && n < 12) {
-                size_t len;
-
-                if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-                    continue;
-                }
-                len = strlen(entry->d_name);
-                if (used + len + 2 >= sizeof(names)) {
-                    break;
-                }
-                memcpy(names + used, entry->d_name, len);
-                used += len;
-                names[used++] = ',';
-                names[used] = '\0';
-                n++;
-            }
-            closedir(dp);
-            picasso_probe_log("PICASSO_CRYPTEX dir=%s open=1 n=%u list=%s\n", dirs[k], n, names);
-        }
-    }
-}
-
-
-/* ---------------------------------------------------------------------------
- * Is MobileSafari actually registered with LaunchServices?
- *
- * The launch attempts failed three different ways (openApplicationWithBundleID
- * -> NO, openURL -> NO, SBSLaunchApplicationWithIdentifier -> 11).  If the app
- * is missing from lsd's database, every one of those fails no matter what
- * WebKit does, and that would be a second, independent blocker.  Enumerate the
- * database and say plainly whether the bundle is there.
- * ------------------------------------------------------------------------- */
-
-static void
-picasso_ls_dump(void)
-{
-    Class workspace_class = NSClassFromString(@"LSApplicationWorkspace");
-    id workspace;
-    NSArray *apps;
-    unsigned listed = 0;
-    int found = 0;
-
-    if (workspace_class == Nil) {
-        picasso_probe_log("PICASSO_LS no LSApplicationWorkspace\n");
-        return;
-    }
-    workspace = [workspace_class performSelector:@selector(defaultWorkspace)];
-    if (workspace == nil) {
-        picasso_probe_log("PICASSO_LS no defaultWorkspace\n");
-        return;
-    }
-    apps = [workspace performSelector:@selector(allApplications)];
-    picasso_probe_log("PICASSO_LS apps=%lu\n", (unsigned long)apps.count);
-    for (id app in apps) {
-        NSString *bundle = nil;
-
-        if ([app respondsToSelector:@selector(bundleIdentifier)]) {
-            bundle = [app performSelector:@selector(bundleIdentifier)];
-        }
-        if (bundle == nil) {
-            continue;
-        }
-        if ([bundle isEqualToString:@"com.apple.mobilesafari"]) {
-            found = 1;
-            picasso_probe_log("PICASSO_LS found=com.apple.mobilesafari\n");
-        }
-        if (listed < 8) {
-            picasso_probe_log("PICASSO_LS app[%u]=%s\n", listed,
-                              [bundle UTF8String]);
-            listed++;
-        }
-    }
-    picasso_probe_log("PICASSO_LS safari=%d listed=%u\n", found, listed);
-    if (!found) {
-        /* The staged mount may postdate lsd's scan; ask it to look again. */
-        SEL refresh = @selector(enumerateBundlesOfType:block:);
-        if ([workspace respondsToSelector:refresh]) {
-            picasso_probe_log("PICASSO_LS refresh=available\n");
-        }
     }
 }
 
@@ -1626,7 +1626,7 @@ static void picasso_springboard_probe(void)
         wifiui_log("PICASSO_WIFIUI loaded in configd\n");
         picasso_cryptex_bridge();
         picasso_cryptex_dump();
-        picasso_appcryptex_start();
+        picasso_webkit_start();
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
         /* Independent of the bootstrap path on purpose (chain-607). */
