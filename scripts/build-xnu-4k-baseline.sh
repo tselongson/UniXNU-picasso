@@ -101,8 +101,6 @@ func = (
     'static void\n'
     'picasso_preboot_graft(proc_t p, user_addr_t scratch)\n'
     '{\n'
-    '\textern int native_gpu_addon_mount(proc_t, user_addr_t, uint32_t, const char *, size_t,\n'
-    '\t    const char *, size_t, const char *, const char *, volatile int *, volatile int *);\n'
     '\tstatic const char source[] = "/private/var/ngpu/preboot";\n'
     '\tstatic const char point[] = "/private/preboot";\n'
     '\tnative_gpu_addon_mount(p, scratch, 0xc00 | MNT_UNION, source, sizeof(source), point, sizeof(point),\n'
