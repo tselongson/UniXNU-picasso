@@ -129,6 +129,15 @@ if 'picasso_preboot_graft' not in s and func_anchor in s and call_anchor in s:
 else:
     print('picasso-preboot: anchors missing, skipped')
 PY_PREBOOT_GRAFT
+# Print how bindfs decides whether a boot-time mount is allowed, and how the
+# port's own addon mount calls it: the graft needs the same path, and guessing
+# the guard costs a kernel build each time.
+echo "=== bindfs symbols ==="
+grep -rn "bindfs_boot\|native_bindfs\|bindfs_mount" .cache/xnu-work/bsd 2>/dev/null | head -20 || true
+echo "=== addon mount ==="
+grep -rn "native_gpu_addon_mount" .cache/xnu-work/bsd 2>/dev/null | head -10 || true
+echo "=== bindfs mount entry ==="
+grep -rn "bindfs" .cache/xnu-work/bsd/vfs/vfs_syscalls.c 2>/dev/null | head -20 || true
 # A Linux host builds with upstream clang and GNU tools (scripts/linux): rewrite the few sources that assume
 # Apple's, and pass xnu's make what a Mac provides itself (host compiler, mig, memory and CPU counts).
 XNU_HOST_MAKE_ARGS=()
