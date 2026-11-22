@@ -1811,6 +1811,69 @@ picasso_mount_probe(void)
     }
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Does the WebKit chain resolve end to end?
+ *
+ * Four links, in order: the public framework path, the cryptex view, the
+ * preboot union, and the seed copy.  Printing all four says exactly which link
+ * is still broken instead of only that "WebKit is missing".
+ * ------------------------------------------------------------------------- */
+
+static void
+picasso_webkit_chain(void)
+{
+    static const char *paths[] = {
+        "/System/Library/Frameworks/WebKit.framework/Info.plist",
+        "/System/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Info.plist",
+        "/private/preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Info.plist",
+        "/private/var/ngpu/preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework/Info.plist",
+    };
+    unsigned i;
+
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        struct stat st;
+
+        if (stat(paths[i], &st) == 0) {
+            picasso_probe_log("PICASSO_WEBKIT_CHAIN ok size=%lld %s\n",
+                              (long long)st.st_size, paths[i]);
+        } else {
+            picasso_probe_log("PICASSO_WEBKIT_CHAIN errno=%d %s\n", errno, paths[i]);
+        }
+    }
+    {
+        DIR *dp = opendir("/System/Library/Frameworks/WebKit.framework/XPCServices");
+        char names[300];
+        size_t used = 0;
+        struct dirent *entry;
+        unsigned n = 0;
+
+        if (dp == NULL) {
+            picasso_probe_log("PICASSO_WEBKIT_CHAIN xpc_open=0 errno=%d\n", errno);
+            return;
+        }
+        names[0] = '\0';
+        while ((entry = readdir(dp)) != NULL && n < 8) {
+            size_t len;
+
+            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+                continue;
+            }
+            len = strlen(entry->d_name);
+            if (used + len + 2 >= sizeof(names)) {
+                break;
+            }
+            memcpy(names + used, entry->d_name, len);
+            used += len;
+            names[used++] = ',';
+            names[used] = '\0';
+            n++;
+        }
+        closedir(dp);
+        picasso_probe_log("PICASSO_WEBKIT_CHAIN xpc n=%u list=%s\n", n, names);
+    }
+}
+
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
@@ -1827,6 +1890,7 @@ static void picasso_springboard_probe(void)
         picasso_fs_write_probe();
         picasso_preboot_probe();
         picasso_mount_probe();
+        picasso_webkit_chain();
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
         /* Independent of the bootstrap path on purpose (chain-607). */
