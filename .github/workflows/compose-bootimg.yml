@@ -449,13 +449,13 @@ jobs:
         if: always()
         run: |
           echo "=== worktree ==="
-          ls -d .cache/xnu-work 2>/dev/null || echo NO_WORKTREE
+          find . -maxdepth 5 -type d -name xnu-work 2>/dev/null | head -5
           echo "=== guard symbols ==="
-          grep -rn "bindfs_boot\|native_bindfs\|bindfs_mount" .cache/xnu-work/bsd 2>/dev/null | head -40 || true
+          grep -rn "bindfs_boot\|native_bindfs\|bindfs_mount" out/picasso/tree/.cache/xnu-work/bsd 2>/dev/null | head -40 || true
           echo "=== addon mount ==="
-          grep -rn "native_gpu_addon_mount" .cache/xnu-work/bsd 2>/dev/null | head -20 || true
+          grep -rn "native_gpu_addon_mount" out/picasso/tree/.cache/xnu-work/bsd 2>/dev/null | head -20 || true
           echo "=== bindfs implementation file ==="
-          grep -rln "bindfs" .cache/xnu-work/bsd 2>/dev/null | head -10 || true
+          grep -rln "bindfs" out/picasso/tree/.cache/xnu-work/bsd 2>/dev/null | head -10 || true
           echo "=== end ==="
 
       - name: Verify raphael WiFi stack is linked in the final kernel
