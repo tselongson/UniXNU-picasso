@@ -379,7 +379,7 @@ jobs:
             sudo "$(command -v python3)" scripts/prepare-picasso-ram-data.py \
               --tree "$UNIXNU_TREE" --source "out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER" \
               --output out/picasso/ram-data --config out/picasso/.config \
-              --extra-var out/picasso/preboot --extra-var-target private/var/ngpu/preboot \
+              --extra-var out/picasso/preboot --extra-var-target ngpu/preboot \
               2>&1 | tee out/picasso/logs/actions-ram-data.log
           fi
 
