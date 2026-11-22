@@ -227,6 +227,39 @@ jobs:
           hdiutil detach "$DEV" >/dev/null 2>&1
           exit 0
 
+      - name: Extract WebKit.framework from the OS cryptex (cryptexes are grafted, not mounted)
+        run: |
+          set +e
+          SYS=$(python3 ./unixnu ipsw fetch Cryptex1,SystemOS 2>&1 | grep -v '^$' | tail -1)
+          echo "SYS_CANDIDATE=$SYS"
+          if [ ! -e "$SYS" ]; then
+            SYS=$(find "out/ipsw/$PICASSO_IPSW_BUILD" -maxdepth 1 -name '*.dmg' -size +1000M | head -1)
+            echo "SYS_FALLBACK=$SYS"
+          fi
+          if [ -z "$SYS" ]; then echo "SYS_CRYPTEX_MISSING"; exit 0; fi
+          hdiutil attach -nomount -readonly "$SYS" 2>&1 | tee /tmp/sys-attach.log
+          DEV=$(awk '/^\\/dev\\/disk[0-9]+s[0-9]+/{print $1; exit}' /tmp/sys-attach.log)
+          if [ -z "$DEV" ]; then DEV=$(awk '/^\\/dev\\/disk/{print $1; exit}' /tmp/sys-attach.log); fi
+          echo "SYS_DEV=$DEV"
+          MNT="$RUNNER_TEMP/sysvol"
+          rm -rf "$MNT"; mkdir -p "$MNT"
+          mount_apfs -o ro "$DEV" "$MNT" 2>&1 | head -3
+          echo "SYS_MOUNTED files=$(find "$MNT" -type f | wc -l)"
+          ls -1 "$MNT" | head -10
+          ls -1 "$MNT/System/Library/PrivateFrameworks" 2>/dev/null | head -20
+          SRC="$MNT/System/Library/PrivateFrameworks/WebKit.framework"
+          echo "SYS_WEBKIT=$(test -d "$SRC" && echo 1 || echo 0)"
+          ls -1 "$SRC" 2>/dev/null | head -10
+          ls -1 "$SRC/XPCServices" 2>/dev/null | head -10
+          rm -rf out/picasso/webkit
+          if [ -d "$SRC" ]; then
+            mkdir -p out/picasso/webkit
+            ditto "$SRC" out/picasso/webkit/WebKit.framework
+            echo "WEBKIT_STAGED files=$(find out/picasso/webkit -type f | wc -l) KiB=$(du -sk out/picasso/webkit | cut -f1)"
+          fi
+          hdiutil detach "$DEV" >/dev/null 2>&1
+          exit 0
+
       - name: Upload the App cryptex for device-side download
         if: always()
         uses: actions/upload-artifact@v4
@@ -234,6 +267,14 @@ jobs:
           name: picasso-app-cryptex
           path: device/out/picasso/app-cryptex
           if-no-files-found: warn
+      - name: Upload WebKit.framework for device-side download
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: picasso-webkit-framework
+          path: device/out/picasso/webkit
+          if-no-files-found: warn
+
 
       - name: Reuse persistent Data seed (new seed requires explicit input)
         env:
