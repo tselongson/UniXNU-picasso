@@ -445,6 +445,19 @@ jobs:
           # Which options and inputs ccache refuses (the stats only count them).
           grep -hE "unsupported|Multiple input|multiple source" "$RUNNER_TEMP/ccache.log" 2>/dev/null | sed -E 's/^\[[^]]*\] //' | sort | uniq -c | sort -rn | head -20 || true
 
+      - name: Print the bindfs boot-mount guard from the kernel tree
+        if: always()
+        run: |
+          echo "=== worktree ==="
+          ls -d .cache/xnu-work 2>/dev/null || echo NO_WORKTREE
+          echo "=== guard symbols ==="
+          grep -rn "bindfs_boot\|native_bindfs\|bindfs_mount" .cache/xnu-work/bsd 2>/dev/null | head -40 || true
+          echo "=== addon mount ==="
+          grep -rn "native_gpu_addon_mount" .cache/xnu-work/bsd 2>/dev/null | head -20 || true
+          echo "=== bindfs implementation file ==="
+          grep -rln "bindfs" .cache/xnu-work/bsd 2>/dev/null | head -10 || true
+          echo "=== end ==="
+
       - name: Verify raphael WiFi stack is linked in the final kernel
         if: ${{ inputs.raphael_wifi }}
         run: |
