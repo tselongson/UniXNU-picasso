@@ -26,6 +26,7 @@ static void picasso_webkit_start(void);
 static void picasso_path_dump(void);
 static void picasso_ls_store_drop(void);
 static void picasso_app_web_probe(const char *who);
+static void picasso_metal_probe(void);
 static void picasso_sb_launch_probe(void);
 static void picasso_sb_view(void);
 static void picasso_xpc_exec_probe(void);
@@ -871,7 +872,7 @@ picasso_net_probe_thread(void *arg)
             };
             unsigned i;
 
-            picasso_probe_log("PICASSO_NETPROBE build=11 process=%s clock=%ld\n", who, (long)tv.tv_sec);
+            picasso_probe_log("PICASSO_NETPROBE build=12 process=%s clock=%ld\n", who, (long)tv.tv_sec);
             for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
                 struct stat st;
                 if (stat(paths[i], &st) == 0) {
@@ -1174,6 +1175,7 @@ picasso_web_probe_start(void)
                     picasso_path_dump();
                     picasso_webkit_start();
                 }
+                picasso_metal_probe();
                 picasso_sb_view();
                 picasso_sb_launch_probe();
             }
@@ -2013,6 +2015,9 @@ picasso_ls_store_drop(void)
 - (void)activateApplicationFromSwitcher:(id)application;
 - (void)activateApplicationAnimated:(id)application;
 - (void)launch;
+- (void)_activateApplicationFromAccessibility:(id)application;
+- (void)activateApplication:(id)application fromIcon:(id)icon location:(id)location
+    activationSettings:(id)settings actions:(id)actions;
 @end
 
 
@@ -2167,6 +2172,25 @@ picasso_sb_launch_probe(void)
                 }
             } @catch (NSException *e) {
                 picasso_probe_log("PICASSO_SBLAUNCH activate-exception %s\n",
+                                  [[e reason] UTF8String]);
+            }
+        }
+        /* iOS 16 renamed the activation entry points; try the ones the runtime
+         * actually reports before giving up. */
+        if (controller != nil && app != nil) {
+            @try {
+                if ([controller respondsToSelector:@selector(_activateApplicationFromAccessibility:)]) {
+                    [controller _activateApplicationFromAccessibility:app];
+                    picasso_probe_log("PICASSO_SBLAUNCH activate=accessibility\n");
+                }
+                if ([controller respondsToSelector:
+                        @selector(activateApplication:fromIcon:location:activationSettings:actions:)]) {
+                    [controller activateApplication:app fromIcon:nil location:@"SBIconLocationDock"
+                                 activationSettings:nil actions:nil];
+                    picasso_probe_log("PICASSO_SBLAUNCH activate=workspace\n");
+                }
+            } @catch (NSException *e) {
+                picasso_probe_log("PICASSO_SBLAUNCH activate2-exception %s\n",
                                   [[e reason] UTF8String]);
             }
         }
@@ -2391,6 +2415,44 @@ picasso_app_web_probe(const char *who)
     });
 }
 
+/* ---------------------------------------------------------------------------
+ * Can this port composite at all?
+ *
+ * WebKit renders through its GPU process, which needs a Metal device.  The port
+ * is known to run the display from a software framebuffer and its GPU fence
+ * never advances, so ask Metal directly: a nil device here means a page could
+ * never be drawn even with every file and service in place.
+ * ------------------------------------------------------------------------- */
+
+static void
+picasso_metal_probe(void)
+{
+    void *metal = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_LAZY);
+    id (*create_device)(void);
+    id device = nil;
+
+    if (metal == NULL) {
+        picasso_probe_log("PICASSO_METAL dlopen=fail\n");
+        return;
+    }
+    create_device = (id (*)(void))dlsym(metal, "MTLCreateSystemDefaultDevice");
+    if (create_device == NULL) {
+        picasso_probe_log("PICASSO_METAL sym=no\n");
+        return;
+    }
+    @try {
+        device = create_device();
+    } @catch (NSException *e) {
+        picasso_probe_log("PICASSO_METAL exception %s\n", [[e reason] UTF8String]);
+        return;
+    }
+    if (device == nil) {
+        picasso_probe_log("PICASSO_METAL device=nil\n");
+        return;
+    }
+    picasso_probe_log("PICASSO_METAL device=ok name=%s\n", [[device name] UTF8String]);
+}
+
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
@@ -2420,7 +2482,7 @@ static void picasso_springboard_probe(void)
     // Record entry before either installation path can fail.
     picasso_ack("kern.picasso_inject_ack");
     /* Immediate proof that THIS build of the library is the one loaded. */
-    picasso_probe_log("PICASSO_NETPROBE build=11 armed in %s\n", program ? program : "app");
+    picasso_probe_log("PICASSO_NETPROBE build=12 armed in %s\n", program ? program : "app");
     picasso_net_probe_start(program ? program : "app");
     picasso_app_web_probe(program ? program : "app");
     if (program != NULL && (!strcmp(program, "SpringBoard") || !strcmp(program, "MobileSafari"))) {
