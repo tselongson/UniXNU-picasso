@@ -25,7 +25,6 @@ static void picasso_cryptex_dump(void);
 static void picasso_webkit_start(void);
 static void picasso_path_dump(void);
 static void picasso_ls_store_drop(void);
-static void picasso_sb_xpc_report(const char *who);
 static void picasso_app_web_probe(const char *who);
 static void picasso_sb_launch_probe(void);
 static void picasso_sb_view(void);
@@ -2254,8 +2253,7 @@ picasso_sb_view(void)
         static const char *const stores[] = {
             "/private/var/mobile/Library/Caches",
             "/private/var/mobile/Containers/Data/InternalDaemon",
-            "/private/var/mobile/Containers/Data/InternalDaemon/"
-            "5C583048-0C53-456F-B110-BB12068B787F/Library/Caches",
+            "/private/var/mobile/Containers/Data/InternalDaemon/5C583048-0C53-456F-B110-BB12068B787F/Library/Caches",
             "/private/var/root/Library/Caches",
         };
         unsigned k;
@@ -2346,7 +2344,6 @@ picasso_xpc_exec_probe(void)
  * ------------------------------------------------------------------------- */
 
 #include <mach-o/dyld.h>
-#include <xpc/xpc.h>
 
 static int
 picasso_app_executable(char *buffer, size_t size)
@@ -2358,40 +2355,6 @@ picasso_app_executable(char *buffer, size_t size)
         return 0;
     }
     return 1;
-}
-
-static void
-picasso_sb_xpc_report(const char *who)
-{
-    static const char service[] = "com.apple.WebKit.Networking";
-    xpc_connection_t connection;
-
-    connection = xpc_connection_create_mach_service(service, NULL, 0);
-    if (connection == NULL) {
-        picasso_probe_log("PICASSO_SBXC %s create=nil\n", who);
-        return;
-    }
-    xpc_connection_set_event_handler(connection, ^(xpc_object_t event) {
-        picasso_probe_log("PICASSO_SBXC %s event=%s\n", who,
-                          event == XPC_ERROR_CONNECTION_INVALID ? "invalid" :
-                          (event == XPC_ERROR_CONNECTION_INTERRUPTED ? "interrupted" :
-                           xpc_type_get_name(xpc_get_type(event))));
-    });
-    xpc_connection_resume(connection);
-    {
-        xpc_object_t message = xpc_dictionary_create(NULL, NULL, 0);
-
-        if (message != NULL) {
-            xpc_dictionary_set_string(message, "picasso", "ping");
-            xpc_connection_send_message_with_reply(connection, message, NULL,
-                ^(xpc_object_t reply) {
-                picasso_probe_log("PICASSO_SBXC %s reply=%s\n", who,
-                                  reply == XPC_ERROR_CONNECTION_INVALID ? "invalid" :
-                                  (reply == XPC_ERROR_CONNECTION_INTERRUPTED ? "interrupted" :
-                                   xpc_type_get_name(xpc_get_type(reply))));
-            });
-        }
-    }
 }
 
 /* Only a process with an app bundle gets here; it is the host WebKit expects. */
@@ -2407,7 +2370,6 @@ picasso_app_web_probe(const char *who)
         return;
     }
     picasso_probe_log("PICASSO_APPWEB host=%s name=%s\n", executable, who);
-    picasso_sb_xpc_report(who);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15ull * NSEC_PER_SEC),
                    dispatch_get_main_queue(), ^{
         picasso_probe_log("PICASSO_APPWEB webview begin\n");
@@ -2460,7 +2422,6 @@ static void picasso_springboard_probe(void)
     /* Immediate proof that THIS build of the library is the one loaded. */
     picasso_probe_log("PICASSO_NETPROBE build=11 armed in %s\n", program ? program : "app");
     picasso_net_probe_start(program ? program : "app");
-    picasso_sb_xpc_report(program ? program : "app");
     picasso_app_web_probe(program ? program : "app");
     if (program != NULL && (!strcmp(program, "SpringBoard") || !strcmp(program, "MobileSafari"))) {
         picasso_web_probe_start();
