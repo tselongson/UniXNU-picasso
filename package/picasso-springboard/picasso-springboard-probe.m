@@ -866,7 +866,7 @@ picasso_net_probe_thread(void *arg)
             };
             unsigned i;
 
-            picasso_probe_log("PICASSO_NETPROBE build=5 process=%s clock=%ld\n", who, (long)tv.tv_sec);
+            picasso_probe_log("PICASSO_NETPROBE build=6 process=%s clock=%ld\n", who, (long)tv.tv_sec);
             for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
                 struct stat st;
                 if (stat(paths[i], &st) == 0) {
@@ -1901,7 +1901,7 @@ static void picasso_springboard_probe(void)
     // Record entry before either installation path can fail.
     picasso_ack("kern.picasso_inject_ack");
     /* Immediate proof that THIS build of the library is the one loaded. */
-    picasso_probe_log("PICASSO_NETPROBE build=5 armed in %s\n", program ? program : "app");
+    picasso_probe_log("PICASSO_NETPROBE build=6 armed in %s\n", program ? program : "app");
     picasso_net_probe_start(program ? program : "app");
     if (program != NULL && (!strcmp(program, "SpringBoard") || !strcmp(program, "MobileSafari"))) {
         picasso_web_probe_start();
