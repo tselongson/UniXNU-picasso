@@ -1720,6 +1720,56 @@ picasso_webkit_start(void)
     }
 }
 
+
+/* ---------------------------------------------------------------------------
+ * Is /private/preboot writable?
+ *
+ * The rootfs keeps WebKit at a symlink chain:
+ *   /System/Library/Frameworks/WebKit.framework
+ *     -> /System/Cryptexes/OS/System/Library/Frameworks/WebKit.framework
+ *     -> /private/preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework
+ * and the SystemOS cryptex holds the real directory.  Everything after that
+ * path is missing on this image, so if the data volume is writable there we can
+ * simply put the framework there and the chain resolves -- no kernel change.
+ * ------------------------------------------------------------------------- */
+
+static void
+picasso_preboot_probe(void)
+{
+    static const char *dirs[] = {
+        "/private/preboot",
+        "/private/preboot/Cryptexes",
+        "/private/preboot/Cryptexes/OS",
+    };
+    unsigned i;
+
+    for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        struct stat st;
+
+        if (stat(dirs[i], &st) == 0) {
+            picasso_probe_log("PICASSO_PREBOOT stat=%s ok mode=%o\n", dirs[i], (unsigned)st.st_mode);
+        } else {
+            picasso_probe_log("PICASSO_PREBOOT stat=%s errno=%d\n", dirs[i], errno);
+        }
+    }
+    {
+        const char *path = "/private/preboot/Cryptexes";
+        int rc = mkdir(path, 0755);
+
+        picasso_probe_log("PICASSO_PREBOOT mkdir=%s rc=%d errno=%d\n", path, rc, errno);
+    }
+    {
+        const char *file = "/private/preboot/.picasso-write-test";
+        int fd = open(file, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+
+        picasso_probe_log("PICASSO_PREBOOT creat=%s fd=%d errno=%d\n", file, fd, errno);
+        if (fd >= 0) {
+            close(fd);
+            (void)unlink(file);
+        }
+    }
+}
+
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
@@ -1734,6 +1784,7 @@ static void picasso_springboard_probe(void)
         picasso_cryptex_bridge();
         picasso_cryptex_dump();
         picasso_fs_write_probe();
+        picasso_preboot_probe();
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
         /* Independent of the bootstrap path on purpose (chain-607). */
