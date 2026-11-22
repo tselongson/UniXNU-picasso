@@ -281,6 +281,32 @@ jobs:
           hdiutil detach "$MNT" >/dev/null 2>&1
           exit 0
 
+      - name: Find which IPSW image actually carries WebKit
+        run: |
+          set +e
+          python3 - "$UNIXNU_IPSW" <<'PY2'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for info in z.infolist():
+                  if info.filename.lower().endswith('.dmg'):
+                      print("IPSW_DMG %s %.1f MiB" % (info.filename, info.file_size / 1048576))
+          PY2
+          for DMG in $(find "out/ipsw/$PICASSO_IPSW_BUILD" -maxdepth 1 -name '*.dmg' | sort); do
+            SZ=$(stat -f%z "$DMG")
+            [ "$SZ" -gt 524288000 ] || continue
+            echo "=== probe $(basename "$DMG") $(($SZ/1048576))MiB ==="
+            MNT="$RUNNER_TEMP/probe-$(basename "$DMG" .dmg)"
+            rm -rf "$MNT"; mkdir -p "$MNT"
+            hdiutil attach -nobrowse -owners on -readonly -noautofsck -mountpoint "$MNT" "$DMG" 2>&1 | tail -2
+            echo "FILES=$(find "$MNT" -type f 2>/dev/null | wc -l)"
+            echo "WK_FW=$(ls -ld "$MNT/System/Library/Frameworks/WebKit.framework" 2>&1 | head -1)"
+            echo "WK_PF=$(ls -ld "$MNT/System/Library/PrivateFrameworks/WebKit.framework" 2>&1 | head -1)"
+            echo "EXT_N=$(ls -1 "$MNT/System/Library/ExtensionKit/Extensions" 2>/dev/null | wc -l)"
+            ls -1 "$MNT/System/Library/ExtensionKit/Extensions" 2>/dev/null | head -6
+            hdiutil detach "$MNT" >/dev/null 2>&1
+          done
+          exit 0
+
       - name: Upload the App cryptex for device-side download
         if: always()
         uses: actions/upload-artifact@v4
