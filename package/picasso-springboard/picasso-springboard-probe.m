@@ -1155,6 +1155,7 @@ picasso_web_probe_start(void)
                     picasso_probe_log("PICASSO_WEBPROBE sbs-launch rc=%d\n", rc);
                     picasso_ls_dump();
                     picasso_path_dump();
+                    picasso_webkit_start();
                 }
             }
         });
@@ -1733,7 +1734,6 @@ static void picasso_springboard_probe(void)
         picasso_cryptex_bridge();
         picasso_cryptex_dump();
         picasso_fs_write_probe();
-        picasso_webkit_start();
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
         /* Independent of the bootstrap path on purpose (chain-607). */
