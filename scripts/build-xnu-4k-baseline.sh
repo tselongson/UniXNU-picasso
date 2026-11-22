@@ -97,50 +97,46 @@ call_anchor = '\tif (!error) native_picasso_apps_mount(p, scratch);\n'
 func_anchor = 'static int\nnative_owner_data_prepare(proc_t p, user_addr_t scratch)\n{\n'
 func = (
     '#if DEVELOPMENT || DEBUG\n'
-    'static volatile int native_picasso_preboot_stage = 0, native_picasso_preboot_status = -1;\n'
-    'static int native_picasso_preboot_done = 0;\n'
+    'static int native_picasso_graft_done[2];\n'
+    'static int native_picasso_graft_last[2] = { -2, -2 };\n'
     'static void\n'
-    'picasso_preboot_graft(proc_t p, user_addr_t scratch)\n'
+    'picasso_graft_one(proc_t p, user_addr_t scratch, const char *source, const char *point, int slot)\n'
     '{\n'
     '\textern volatile int native_bindfs_boot_mount;\n'
-    '\tvnode_t probe_vp = NULLVP;\n'
-    '\tif (native_picasso_preboot_done) { return; }\n'
     '\tstruct mount_args request = {.type = scratch + 0xa00, .path = scratch + 0xa20,\n'
     '\t    .flags = MNT_RDONLY | MNT_UNION, .data = scratch + 0xb00};\n'
-    '\tstatic const char point[] = "/private/preboot";\n'
-    '\tstatic const char source[] = "/private/var/ngpu/preboot";\n'
     '\tint32_t result = 0;\n'
     '\tint error;\n'
-    '\tif (vnode_lookup("/private/preboot/Cryptexes", 0, &probe_vp, vfs_context_current()) == 0) {\n'
-    '\t\tvnode_put(probe_vp);\n'
-    '\t\tnative_picasso_preboot_done = 1;\n'
-    '\t\treturn;\n'
-    '\t}\n'
+    '\tif (native_picasso_graft_done[slot]) { return; }\n'
     '\tif ((error = copyout("bindfs", request.type, 7)) ||\n'
-    '\t    (error = copyout(point, request.path, sizeof(point))) ||\n'
-    '\t    (error = copyout(source, request.data, sizeof(source)))) {\n'
-    '\t\tnative_picasso_preboot_status = error;\n'
+    '\t    (error = copyout(point, request.path, strlen(point) + 1)) ||\n'
+    '\t    (error = copyout(source, request.data, strlen(source) + 1))) {\n'
     '\t\treturn;\n'
     '\t}\n'
-    '\tnative_picasso_preboot_stage = 1;\n'
     '\tnative_bindfs_boot_mount = 1;\n'
     '\terror = mount(p, &request, &result);\n'
     '\tnative_bindfs_boot_mount = 0;\n'
-    '\tnative_picasso_preboot_status = error;\n'
-    '\tnative_picasso_preboot_stage = 2;\n'
-    '\tif (error == 0) { native_picasso_preboot_done = 1; }\n'
-    '\tprintf("PICASSO_PREBOOT_GRAFT stage=%d status=%d\\n", native_picasso_preboot_stage,\n'
-    '\t    native_picasso_preboot_status);\n'
+    '\tif (error == 0) { native_picasso_graft_done[slot] = 1; }\n'
+    '\tif (error != native_picasso_graft_last[slot]) {\n'
+    '\t\tnative_picasso_graft_last[slot] = error;\n'
+    '\t\tprintf("PICASSO_GRAFT slot=%d status=%d %s -> %s\\n", slot, error, source, point);\n'
+    '\t}\n'
+    '}\n'
+    'static void\n'
+    'picasso_preboot_graft(proc_t p, user_addr_t scratch)\n'
+    '{\n'
+    '\tpicasso_graft_one(p, scratch, "/private/var/ngpu/preboot", "/private/preboot", 0);\n'
+    '\tpicasso_graft_one(p, scratch, "/private/var/ngpu/cryptexes", "/System/Cryptexes", 1);\n'
     '}\n'
     '#endif\n'
 )
-if 'picasso_preboot_graft' not in s and func_anchor in s and call_anchor in s:
+if 'picasso_graft_one' not in s and func_anchor in s and call_anchor in s:
     s = s.replace(func_anchor, func + func_anchor, 1)
     s = s.replace(call_anchor, call_anchor + '#if DEVELOPMENT || DEBUG\n\tpicasso_preboot_graft(p, scratch);\n#endif\n', 1)
     p.write_text(s)
-    print('picasso-preboot: volatile flag + raw mount inserted')
+    print('picasso-graft: preboot + System/Cryptexes inserted')
 else:
-    print('picasso-preboot: anchors missing, skipped')
+    print('picasso-graft: anchors missing, skipped')
 PY_PREBOOT_GRAFT
 # Print how bindfs decides whether a boot-time mount is allowed, and how the
 # port's own addon mount calls it: the graft needs the same path, and guessing
