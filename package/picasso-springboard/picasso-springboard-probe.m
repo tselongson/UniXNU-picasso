@@ -1414,6 +1414,48 @@ picasso_path_dump(void)
 
 
 /* ---------------------------------------------------------------------------
+ * Can anything be created on the system volume?
+ *
+ * The port already bind-mounts onto /System/Library/SystemConfiguration/
+ * InterfaceNamer.bundle, so mounts into the system tree are possible -- but
+ * only onto paths that exist.  WebKit.framework does not exist, so the mount
+ * needs the directory created first, and the root volume is APFS read-only.
+ * Find out which side of that line this image is on before building on it.
+ * ------------------------------------------------------------------------- */
+
+static void
+picasso_fs_write_probe(void)
+{
+    static const char *dirs[] = {
+        "/System/Library/PrivateFrameworks/WebKit.framework",
+        "/System/Library/PrivateFrameworks/.picasso-probe",
+    };
+    unsigned i;
+
+    for (i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        int rc = mkdir(dirs[i], 0755);
+        int saved = errno;
+
+        picasso_probe_log("PICASSO_FS mkdir=%s rc=%d errno=%d\n", dirs[i], rc, saved);
+        if (rc == 0) {
+            (void)rmdir(dirs[i]);
+        }
+    }
+    {
+        const char *file = "/System/Library/PrivateFrameworks/.picasso-write-test";
+        int fd = open(file, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        int saved = errno;
+
+        picasso_probe_log("PICASSO_FS creat=%s fd=%d errno=%d\n", file, fd, saved);
+        if (fd >= 0) {
+            close(fd);
+            (void)unlink(file);
+        }
+    }
+}
+
+
+/* ---------------------------------------------------------------------------
  * App cryptex pull (device side).
  *
  * Why this exists: the WebKit services Safari needs (WebContent/Networking/GPU)
@@ -1690,6 +1732,7 @@ static void picasso_springboard_probe(void)
         wifiui_log("PICASSO_WIFIUI loaded in configd\n");
         picasso_cryptex_bridge();
         picasso_cryptex_dump();
+        picasso_fs_write_probe();
         picasso_webkit_start();
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
