@@ -232,7 +232,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: picasso-app-cryptex
-          path: out/picasso/app-cryptex
+          path: device/out/picasso/app-cryptex
           if-no-files-found: warn
 
       - name: Reuse persistent Data seed (new seed requires explicit input)
