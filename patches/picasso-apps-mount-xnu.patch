@@ -1,6 +1,6 @@
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -8022,6 +8022,50 @@
+@@ -8022,6 +8022,25 @@
  	vnode_put(vp);
  }
  
@@ -22,42 +22,16 @@
 +	    &native_picasso_apps_stage, &native_picasso_apps_status);
 +	printf("PICASSO_APPS_MOUNT stage=%d status=%d\n", native_picasso_apps_stage, native_picasso_apps_status);
 +}
-+
-+/*
-+ * The OS cryptex is grafted onto the system volume on real iOS, not mounted,
-+ * so /System/Library/PrivateFrameworks/WebKit.framework never exists here and
-+ * WebKit cannot spawn WebContent/Networking/GPU.  The framework is delivered
-+ * to the data volume; expose it at the path the dyld cache expects.
-+ */
-+static volatile int native_picasso_webkit_stage = 0, native_picasso_webkit_status = -1;
-+static void
-+native_picasso_webkit_mount(proc_t p, user_addr_t scratch)
-+{
-+	static const char source[] = "/private/var/picasso-webkit/WebKit.framework";
-+	static const char point[] = "/System/Library/PrivateFrameworks/WebKit.framework";
-+	uint32_t picassoExtras = 7;
-+	PE_parse_boot_argn("sheng-ui-extras", &picassoExtras, sizeof(picassoExtras));
-+	if (!(picassoExtras & 2)) {
-+		printf("PICASSO_WEBKIT_MOUNT skipped extras=%u\n", picassoExtras);
-+		return;
-+	}
-+	native_gpu_addon_mount(p, scratch, 0xc00, source, sizeof(source), point, sizeof(point),
-+	    "/System/Library/PrivateFrameworks/WebKit.framework/Info.plist",
-+	    "/System/Library/PrivateFrameworks/WebKit.framework/XPCServices",
-+	    &native_picasso_webkit_stage, &native_picasso_webkit_status);
-+	printf("PICASSO_WEBKIT_MOUNT stage=%d status=%d\n", native_picasso_webkit_stage, native_picasso_webkit_status);
-+}
 +#endif
  static int
  native_owner_data_prepare(proc_t p, user_addr_t scratch)
  {
-@@ -8091,6 +8135,10 @@
+@@ -8091,6 +8110,9 @@
  	if (!error) native_owner_data_stage = 4;
  	if (!error) native_gpu_addon_prepare(p, scratch);
  	if (!error) native_staged_apps_prepare(p, scratch, data_mount);
 +#if DEVELOPMENT || DEBUG
 +	if (!error) native_picasso_apps_mount(p, scratch);
-+	if (!error) native_picasso_webkit_mount(p, scratch);
 +#endif
  done:
  	if (data_root) vnode_put(data_root);
