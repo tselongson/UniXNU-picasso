@@ -20,6 +20,9 @@
 #include <sys/mount.h>
 #include <sys/param.h>
 #include <pthread.h>
+static void picasso_ls_dump(void);
+static void picasso_cryptex_dump(void);
+static void picasso_webkit_start(void);
 #include <errno.h>
 #include <dlfcn.h>
 #include <pthread.h>
