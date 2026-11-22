@@ -1978,7 +1978,6 @@ picasso_ls_store_drop(void)
     }
     picasso_probe_log("PICASSO_LS_DROP dirs=%u removed=%u\n", dirs, removed);
 }
-
 /* ---------------------------------------------------------------------------
  * Launch Safari the way the Home screen does.
  *
@@ -1987,20 +1986,23 @@ picasso_ls_store_drop(void)
  * does not; LSApplicationWorkspace::openApplicationWithBundleID refused too
  * (ls=0).  Inside SpringBoard the icon tap ends in SpringBoard's own
  * controllers, so drive those and report exactly which step the runtime
- * refuses.  Every call is sent through objc_msgSend so a missing selector is a
- * logged line, not a crash.
+ * refuses.  Private selectors are declared on NSObject so the compiler emits
+ * ordinary sends; everything is guarded by respondsToSelector:.
  * ------------------------------------------------------------------------- */
 
-typedef id (*PicassoMsgSendId)(id, SEL, id);
-typedef void (*PicassoMsgSendVoid)(id, SEL, id);
-typedef id (*PicassoMsgSendNoArg)(id, SEL);
+@interface NSObject (PicassoSpringBoardLaunch)
++ (id)sharedInstance;
+- (id)applicationWithBundleIdentifier:(NSString *)identifier;
+- (id)applicationWithDisplayIdentifier:(NSString *)identifier;
+- (void)activateApplicationFromSwitcher:(id)application;
+- (void)activateApplicationAnimated:(id)application;
+@end
 
 static void
 picasso_sb_launch_probe(void)
 {
     Class appc = NSClassFromString(@"SBApplicationController");
     Class uic = NSClassFromString(@"SBUIController");
-    id controller = nil;
     id app = nil;
     unsigned total, i, matched = 0, listed = 0;
     char names[640];
@@ -2041,24 +2043,23 @@ picasso_sb_launch_probe(void)
     if (appc == nil) {
         picasso_probe_log("PICASSO_SBLAUNCH appc=no\n");
     } else {
-        controller = ((PicassoMsgSendNoArg)objc_msgSend)((id)appc,
-                                                         sel_registerName("sharedInstance"));
+        id controller = nil;
+
+        @try {
+            controller = [appc sharedInstance];
+        } @catch (NSException *e) {
+            picasso_probe_log("PICASSO_SBLAUNCH appc-exception %s\n", [[e reason] UTF8String]);
+        }
         picasso_probe_log("PICASSO_SBLAUNCH appc=yes svc=%s\n",
                           controller != nil ? "ok" : "nil");
         if (controller != nil) {
             @try {
-                SEL sel = sel_registerName("applicationWithBundleIdentifier:");
-
-                if ([controller respondsToSelector:sel]) {
-                    app = ((PicassoMsgSendId)objc_msgSend)(controller, sel,
-                                                           @"com.apple.mobilesafari");
+                if ([controller respondsToSelector:@selector(applicationWithBundleIdentifier:)]) {
+                    app = [controller applicationWithBundleIdentifier:@"com.apple.mobilesafari"];
                 }
-                if (app == nil) {
-                    sel = sel_registerName("applicationWithDisplayIdentifier:");
-                    if ([controller respondsToSelector:sel]) {
-                        app = ((PicassoMsgSendId)objc_msgSend)(controller, sel,
-                                                                @"com.apple.mobilesafari");
-                    }
+                if (app == nil &&
+                    [controller respondsToSelector:@selector(applicationWithDisplayIdentifier:)]) {
+                    app = [controller applicationWithDisplayIdentifier:@"com.apple.mobilesafari"];
                 }
                 picasso_probe_log("PICASSO_SBLAUNCH app=%s class=%s\n",
                                   app != nil ? "ok" : "nil",
@@ -2073,25 +2074,25 @@ picasso_sb_launch_probe(void)
     if (uic == nil) {
         picasso_probe_log("PICASSO_SBLAUNCH uic=no\n");
     } else {
-        controller = ((PicassoMsgSendNoArg)objc_msgSend)((id)uic,
-                                                         sel_registerName("sharedInstance"));
+        id controller = nil;
+
+        @try {
+            controller = [uic sharedInstance];
+        } @catch (NSException *e) {
+            picasso_probe_log("PICASSO_SBLAUNCH uic-exception %s\n", [[e reason] UTF8String]);
+        }
         picasso_probe_log("PICASSO_SBLAUNCH uic=yes svc=%s\n",
                           controller != nil ? "ok" : "nil");
         if (controller != nil && app != nil) {
             @try {
-                SEL sel = sel_registerName("activateApplicationFromSwitcher:");
-
-                if ([controller respondsToSelector:sel]) {
-                    ((PicassoMsgSendVoid)objc_msgSend)(controller, sel, app);
+                if ([controller respondsToSelector:@selector(activateApplicationFromSwitcher:)]) {
+                    [controller activateApplicationFromSwitcher:app];
                     picasso_probe_log("PICASSO_SBLAUNCH activate=switcher\n");
+                } else if ([controller respondsToSelector:@selector(activateApplicationAnimated:)]) {
+                    [controller activateApplicationAnimated:app];
+                    picasso_probe_log("PICASSO_SBLAUNCH activate=animated\n");
                 } else {
-                    sel = sel_registerName("activateApplicationAnimated:");
-                    if ([controller respondsToSelector:sel]) {
-                        ((PicassoMsgSendVoid)objc_msgSend)(controller, sel, app);
-                        picasso_probe_log("PICASSO_SBLAUNCH activate=animated\n");
-                    } else {
-                        picasso_probe_log("PICASSO_SBLAUNCH activate=nosel\n");
-                    }
+                    picasso_probe_log("PICASSO_SBLAUNCH activate=nosel\n");
                 }
             } @catch (NSException *e) {
                 picasso_probe_log("PICASSO_SBLAUNCH activate-exception %s\n",
