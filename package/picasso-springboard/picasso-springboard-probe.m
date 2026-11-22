@@ -1395,62 +1395,50 @@ picasso_appcryptex_thread(void *unused)
 
     (void)unused;
     for (attempt = 0; attempt < 45; attempt++) {
-        Class session_class;
-        NSURLSession *session;
-        NSURL *url;
-        __block NSData *payload = nil;
-        dispatch_semaphore_t done;
+        @autoreleasepool {
+            __block NSData *payload = nil;
+            dispatch_semaphore_t done;
+            NSURLSession *session;
+            NSURL *url;
 
-        if (access(kAppCryptexMark, F_OK) == 0) {
-            picasso_probe_log("PICASSO_CRYPTEX already present attempt=%u\n", attempt);
-            return NULL;
-        }
-        session_class = NSClassFromString(@"NSURLSession");
-        if (session_class == Nil) {
-            picasso_probe_log("PICASSO_CRYPTEX no NSURLSession\n");
-            return NULL;
-        }
-        url = [NSURL URLWithString:[NSString stringWithUTF8String:kAppCryptexURL]];
-        if (url == nil) {
-            return NULL;
-        }
-        session = [(NSURLSession *)[session_class sessionWithConfiguration:
-                    [(NSURLSessionConfiguration *)[NSClassFromString(@"NSURLSessionConfiguration")
-                        performSelector:@selector(ephemeralSessionConfiguration)] copy]] retain];
-        done = dispatch_semaphore_create(0);
-        [[session dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-            NSInteger status = 0;
-
-            if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
-                status = [(NSHTTPURLResponse *)response statusCode];
+            if (access(kAppCryptexMark, F_OK) == 0) {
+                picasso_probe_log("PICASSO_CRYPTEX already present attempt=%u\n", attempt);
+                return NULL;
             }
-            if (data.length > 0 && status == 200) {
-                payload = [data retain];
+            url = [NSURL URLWithString:[NSString stringWithUTF8String:kAppCryptexURL]];
+            if (url == nil) {
+                return NULL;
             }
-            picasso_probe_log("PICASSO_CRYPTEX get attempt=%u status=%ld bytes=%lu err=%ld\n",
-                              attempt, (long)status, (unsigned long)data.length,
-                              (long)(error != nil ? [error code] : 0));
-            dispatch_semaphore_signal(done);
-        }] resume];
-        dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 90ull * NSEC_PER_SEC));
-        [session invalidateAndCancel];
-        [session release];
+            done = dispatch_semaphore_create(0);
+            session = [NSURLSession sessionWithConfiguration:
+                       [NSURLSessionConfiguration ephemeralSessionConfiguration]];
+            [[session dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+                NSInteger status = 0;
 
-        if (payload != nil && payload.length > 1024) {
-            unsigned count;
+                if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                    status = [(NSHTTPURLResponse *)response statusCode];
+                }
+                if (data.length > 0 && status == 200) {
+                    payload = data;
+                }
+                picasso_probe_log("PICASSO_CRYPTEX get attempt=%u status=%ld bytes=%lu err=%ld\n",
+                                  attempt, (long)status, (unsigned long)data.length,
+                                  (long)(error != nil ? [error code] : 0));
+                dispatch_semaphore_signal(done);
+            }] resume];
+            dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 90ull * NSEC_PER_SEC));
+            [session invalidateAndCancel];
 
-            picasso_mkdirs(kAppCryptexRoot);
-            count = picasso_untar((const unsigned char *)[payload bytes],
-                                  (size_t)[payload length], kAppCryptexRoot);
-            picasso_probe_log("PICASSO_CRYPTEX unpack files=%u marker=%d\n",
-                              count, access(kAppCryptexMark, F_OK) == 0);
-            [payload release];
-            return NULL;
+            if (payload.length > 1024) {
+                unsigned count = picasso_untar((const unsigned char *)[payload bytes],
+                                               (size_t)[payload length], kAppCryptexRoot);
+
+                picasso_probe_log("PICASSO_CRYPTEX unpack files=%u marker=%d\n",
+                                  count, access(kAppCryptexMark, F_OK) == 0);
+                return NULL;
+            }
+            sleep(8);
         }
-        if (payload != nil) {
-            [payload release];
-        }
-        sleep(8);
     }
     picasso_probe_log("PICASSO_CRYPTEX gave up\n");
     return NULL;
