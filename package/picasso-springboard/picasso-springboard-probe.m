@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <sys/param.h>
+#include <pthread.h>
 #include <errno.h>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -1188,6 +1189,283 @@ picasso_cryptex_bridge(void)
     }
 }
 
+
+/* ---------------------------------------------------------------------------
+ * App cryptex pull (device side).
+ *
+ * Why this exists: the WebKit services Safari needs (WebContent/Networking/GPU)
+ * are not in the OS volume at all -- measured, XPCServices exists=0 -- they come
+ * from the App cryptex, which this image does not carry.  The Data seed cannot
+ * carry it either: the packed seed format is capped at 4 MiB and the cryptex is
+ * 10 MiB.  The device's own WiFi works (proven with a 3961-byte page), so the
+ * device fetches the cryptex over the LAN after boot and unpacks it to exactly
+ * the path the stock /System/Cryptexes/App symlink points at.
+ *
+ * Runs in configd (root, early): a detached thread retries until the radio is
+ * up, downloads once, unpacks, then verifies the completeness marker.
+ * ------------------------------------------------------------------------- */
+
+static const char kAppCryptexURL[] = "http://192.168.101.4:8099/cryptex.tar";
+static const char kAppCryptexRoot[] = "/private/preboot/Cryptexes/App";
+static const char kAppCryptexMark[] =
+    "/private/preboot/Cryptexes/App/usr/libexec/webbookmarksd";
+
+static unsigned long long
+picasso_tar_octal(const char *text, size_t width)
+{
+    unsigned long long value = 0;
+    size_t i;
+
+    for (i = 0; i < width && text[i] != '\0'; i++) {
+        if (text[i] >= '0' && text[i] <= '7') {
+            value = value * 8 + (unsigned long long)(text[i] - '0');
+        } else if (text[i] == ' ' || text[i] == '\0') {
+            break;
+        }
+    }
+    return value;
+}
+
+static void
+picasso_mkdirs(const char *path)
+{
+    char buffer[2048];
+    size_t i, length = strlen(path);
+
+    if (length == 0 || length >= sizeof(buffer)) {
+        return;
+    }
+    memcpy(buffer, path, length + 1);
+    for (i = 1; i < length; i++) {
+        if (buffer[i] == '/') {
+            buffer[i] = '\0';
+            (void)mkdir(buffer, 0755);
+            buffer[i] = '/';
+        }
+    }
+    (void)mkdir(buffer, 0755);
+}
+
+static int
+picasso_tar_unsafe(const char *name)
+{
+    const char *p = name;
+
+    if (name[0] == '/') {
+        return 1;
+    }
+    while (*p != '\0') {
+        if (p[0] == '.' && p[1] == '.' && (p[2] == '/' || p[2] == '\0')) {
+            return 1;
+        }
+        while (*p != '\0' && *p != '/') {
+            p++;
+        }
+        while (*p == '/') {
+            p++;
+        }
+    }
+    return 0;
+}
+
+static unsigned
+picasso_untar(const unsigned char *base, size_t length, const char *root)
+{
+    const unsigned char *cursor = base;
+    const unsigned char *end = base + length;
+    char longname[1600];
+    char longlink[1600];
+    unsigned written = 0;
+
+    longname[0] = '\0';
+    longlink[0] = '\0';
+
+    while ((size_t)(end - cursor) >= 512) {
+        const char *header = (const char *)cursor;
+        char name[1600];
+        char link[1600];
+        unsigned long long size;
+        unsigned mode;
+        char type;
+
+        if (header[0] == '\0') {
+            break;
+        }
+        size = picasso_tar_octal(header + 124, 12);
+        mode = (unsigned)picasso_tar_octal(header + 100, 8) & 07777u;
+        type = header[156];
+
+        if (type == 'L' || type == 'K') {
+            char *slot = (type == 'L') ? longname : longlink;
+            size_t room = (type == 'L') ? sizeof(longname) : sizeof(longlink);
+            size_t take = (size_t)size < room - 1 ? (size_t)size : room - 1;
+
+            memcpy(slot, cursor + 512, take);
+            slot[take] = '\0';
+            cursor += 512 + ((size + 511ull) & ~511ull);
+            continue;
+        }
+        if (type == 'x' || type == 'g') {                 /* pax headers: skip */
+            cursor += 512 + ((size + 511ull) & ~511ull);
+            continue;
+        }
+        if (longname[0] != '\0') {
+            strlcpy(name, longname, sizeof(name));
+            longname[0] = '\0';
+        } else {
+            const char *prefix;
+
+            memcpy(name, header, 100);
+            name[100] = '\0';
+            prefix = header + 345;
+            if (prefix[0] != '\0' && memcmp(header + 257, "ustar", 5) == 0) {
+                char joined[1600];
+
+                snprintf(joined, sizeof(joined), "%s/%s", prefix, name);
+                strlcpy(name, joined, sizeof(name));
+            }
+        }
+        if (longlink[0] != '\0') {
+            strlcpy(link, longlink, sizeof(link));
+            longlink[0] = '\0';
+        } else {
+            memcpy(link, header + 157, 100);
+            link[100] = '\0';
+        }
+        while (name[0] == '.' && name[1] == '/') {
+            memmove(name, name + 2, strlen(name + 2) + 1);
+        }
+        if (name[0] == '\0' || picasso_tar_unsafe(name)) {
+            cursor += 512 + ((size + 511ull) & ~511ull);
+            continue;
+        }
+        {
+            char destination[2048];
+            char parent[2048];
+            char *slash;
+
+            snprintf(destination, sizeof(destination), "%s/%s", root, name);
+            strlcpy(parent, destination, sizeof(parent));
+            slash = strrchr(parent, '/');
+            if (slash != NULL) {
+                *slash = '\0';
+                picasso_mkdirs(parent);
+            }
+            if (type == '5') {
+                picasso_mkdirs(destination);
+            } else if (type == '2') {
+                (void)unlink(destination);
+                if (symlink(link, destination) == 0) {
+                    written++;
+                }
+            } else if (type == '0' || type == '\0' || type == '7') {
+                int fd = open(destination, O_CREAT | O_WRONLY | O_TRUNC,
+                              (mode & 0777u) != 0 ? (mode & 0777u) : 0644);
+
+                if (fd >= 0) {
+                    size_t left = (size_t)size;
+                    const unsigned char *chunk = cursor + 512;
+
+                    while (left > 0) {
+                        ssize_t rc = write(fd, chunk, left);
+
+                        if (rc <= 0) {
+                            break;
+                        }
+                        chunk += rc;
+                        left -= (size_t)rc;
+                    }
+                    close(fd);
+                    if (mode & 0111u) {
+                        (void)chmod(destination, (mode & 0777u) | 0700u);
+                    }
+                    written++;
+                }
+            }
+        }
+        cursor += 512 + ((size + 511ull) & ~511ull);
+    }
+    return written;
+}
+
+static void *
+picasso_appcryptex_thread(void *unused)
+{
+    unsigned attempt;
+
+    (void)unused;
+    for (attempt = 0; attempt < 45; attempt++) {
+        Class session_class;
+        NSURLSession *session;
+        NSURL *url;
+        __block NSData *payload = nil;
+        dispatch_semaphore_t done;
+
+        if (access(kAppCryptexMark, F_OK) == 0) {
+            picasso_probe_log("PICASSO_CRYPTEX already present attempt=%u\n", attempt);
+            return NULL;
+        }
+        session_class = NSClassFromString(@"NSURLSession");
+        if (session_class == Nil) {
+            picasso_probe_log("PICASSO_CRYPTEX no NSURLSession\n");
+            return NULL;
+        }
+        url = [NSURL URLWithString:[NSString stringWithUTF8String:kAppCryptexURL]];
+        if (url == nil) {
+            return NULL;
+        }
+        session = [(NSURLSession *)[session_class sessionWithConfiguration:
+                    [(NSURLSessionConfiguration *)[NSClassFromString(@"NSURLSessionConfiguration")
+                        performSelector:@selector(ephemeralSessionConfiguration)] copy]] retain];
+        done = dispatch_semaphore_create(0);
+        [[session dataTaskWithURL:url completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+            NSInteger status = 0;
+
+            if ([response isKindOfClass:[NSHTTPURLResponse class]]) {
+                status = [(NSHTTPURLResponse *)response statusCode];
+            }
+            if (data.length > 0 && status == 200) {
+                payload = [data retain];
+            }
+            picasso_probe_log("PICASSO_CRYPTEX get attempt=%u status=%ld bytes=%lu err=%ld\n",
+                              attempt, (long)status, (unsigned long)data.length,
+                              (long)(error != nil ? [error code] : 0));
+            dispatch_semaphore_signal(done);
+        }] resume];
+        dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 90ull * NSEC_PER_SEC));
+        [session invalidateAndCancel];
+        [session release];
+
+        if (payload != nil && payload.length > 1024) {
+            unsigned count;
+
+            picasso_mkdirs(kAppCryptexRoot);
+            count = picasso_untar((const unsigned char *)[payload bytes],
+                                  (size_t)[payload length], kAppCryptexRoot);
+            picasso_probe_log("PICASSO_CRYPTEX unpack files=%u marker=%d\n",
+                              count, access(kAppCryptexMark, F_OK) == 0);
+            [payload release];
+            return NULL;
+        }
+        if (payload != nil) {
+            [payload release];
+        }
+        sleep(8);
+    }
+    picasso_probe_log("PICASSO_CRYPTEX gave up\n");
+    return NULL;
+}
+
+static void
+picasso_appcryptex_start(void)
+{
+    pthread_t thread;
+
+    if (pthread_create(&thread, NULL, picasso_appcryptex_thread, NULL) == 0) {
+        (void)pthread_detach(thread);
+    }
+}
+
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
@@ -1200,6 +1478,7 @@ static void picasso_springboard_probe(void)
 
         wifiui_log("PICASSO_WIFIUI loaded in configd\n");
         picasso_cryptex_bridge();
+        picasso_appcryptex_start();
         if (pthread_create(&worker, NULL, wifiui_thread, NULL) == 0)
             pthread_detach(worker);
         /* Independent of the bootstrap path on purpose (chain-607). */
