@@ -337,16 +337,19 @@ jobs:
           name: picasso-app-cryptex
           path: device/out/picasso/app-cryptex
           if-no-files-found: warn
-      - name: Lay the WebKit tree out for the preboot graft
+      - name: Lay the WebKit tree out for both grafts
         run: |
           set +e
-          rm -rf out/picasso/preboot
-          mkdir -p out/picasso/preboot/Cryptexes/OS/System/Library/Frameworks
-          if [ -d out/picasso/webkit/WebKit.framework ]; then
-            ditto out/picasso/webkit/WebKit.framework \
-              out/picasso/preboot/Cryptexes/OS/System/Library/Frameworks/WebKit.framework
-          fi
-          echo "PREBOOT_TREE files=$(find out/picasso/preboot -type f | wc -l) KiB=$(du -sk out/picasso/preboot | cut -f1)"
+          ROOT=out/picasso/picasso-var
+          rm -rf "$ROOT"
+          for LEAF in preboot/Cryptexes/OS cryptexes/OS; do
+            mkdir -p "$ROOT/$LEAF/System/Library/Frameworks"
+            if [ -d out/picasso/webkit/WebKit.framework ]; then
+              ditto out/picasso/webkit/WebKit.framework \
+                "$ROOT/$LEAF/System/Library/Frameworks/WebKit.framework"
+            fi
+          done
+          echo "PICASSO_VAR_TREE files=$(find "$ROOT" -type f | wc -l) KiB=$(du -sk "$ROOT" | cut -f1)"
           exit 0
 
       - name: Upload WebKit.framework for device-side download
@@ -379,7 +382,7 @@ jobs:
             sudo "$(command -v python3)" scripts/prepare-picasso-ram-data.py \
               --tree "$UNIXNU_TREE" --source "out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER" \
               --output out/picasso/ram-data --config out/picasso/.config \
-              --extra-var out/picasso/preboot --extra-var-target ngpu/preboot \
+              --extra-var out/picasso/picasso-var --extra-var-target ngpu \
               2>&1 | tee out/picasso/logs/actions-ram-data.log
           fi
 
