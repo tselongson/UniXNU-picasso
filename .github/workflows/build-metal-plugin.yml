@@ -1,0 +1,61 @@
+name: build-metal-plugin
+
+# Builds the Adreno Metal plugin bundle (NativeAdrenoMetal.bundle) that the
+# kernel's GPU addon mounts over /System/Library/Extensions. The bundle is the
+# only userspace piece missing on the picasso image: the kernel already
+# registers AGXAccelerator, publishes MetalPluginName/MetalPluginClassName and
+# serves the NativeAdreno ABI v1 that Turnip's darwin backend speaks.
+#
+# Manual only: the full chain (Mesa/Turnip, Rust bridge, Metal frontend) takes
+# tens of minutes and is not part of the boot-image build.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  plugin:
+    runs-on: macos-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        # 17.0 proves the pinned pipeline unchanged; 16.7 matches this port's
+        # rootfs and tells us whether the frontend still compiles that low.
+        minos: ['17.0', '16.7']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Report host
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Build plugin bundle (iOS ${{ matrix.minos }})
+        env:
+          MINOS: ${{ matrix.minos }}
+        run: |
+          set -o pipefail
+          bash scripts/build-metal-plugin-ci.sh "$RUNNER_TEMP/metal" "$MINOS" 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metal-plugin-logs-ios${{ matrix.minos }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/metal/unixnu/.cache/mesa-tu-ios-configure.log
+            ${{ runner.temp }}/metal/unixnu/.cache/mesa-tu-ios-build.log
+            ${{ runner.temp }}/metal/unixnu/build/build-ios.log
+
+      - name: Upload bundle
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NativeAdrenoMetal-bundle-ios${{ matrix.minos }}
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/metal/unixnu/build/adreno-metal-plugin/NativeAdrenoMetal.bundle
+            ${{ runner.temp }}/metal/unixnu/build/adreno-metal-plugin/trust.json
