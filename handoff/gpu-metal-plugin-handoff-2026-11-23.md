@@ -168,7 +168,7 @@ bash scripts/build-metal-plugin-ci.sh "$HOME/metal-work" 16.7
 - 提交 CI 前：`python3 work/preflight-c.py`
 - 分支：工作分支 `kd439-pool`；`main` 上放着 workflow 与构建脚本（workflow_dispatch 只认 main）
 
-## 7. 本轮本地留下的文件
+## 7. 本轮留下的文件（已同步到仓库 `handoff/metal-plugin/`）
 
 ```
 work/ci/build-metal-plugin-ci.sh        # 与 main 上一致
@@ -181,3 +181,7 @@ work/refs/adrenometal/                  # 上游 Metal 前端全量源码（142 
 work/refs/build-scripts/                # 上游构建脚本快照
 work/refs/unixnu.git                    # 上游超项目 bare clone（50 分支）
 ```
+
+设备侧四件（打包器 / 信任模块 / 信任准备 / 0065 补丁）已推到 `kd439-pool` 的 `handoff/metal-plugin/`，
+换机后直接 `git clone` 取，不用从这台机器搬。
+
