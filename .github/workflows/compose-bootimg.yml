@@ -382,6 +382,29 @@ jobs:
           hdiutil detach "$M2" >/dev/null 2>&1
           exit 0
 
+      - name: Read the launchd XPC registry for WebKit
+        run: |
+          set +e
+          DMG="out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER"
+          MNT="$RUNNER_TEMP/rootfs-xpcdb"
+          rm -rf "$MNT"; mkdir -p "$MNT"
+          hdiutil attach -nobrowse -owners on -readonly -noautofsck -mountpoint "$MNT" "$DMG" >/dev/null 2>&1
+          echo "=== /System/Library/xpc ==="
+          ls -1 "$MNT/System/Library/xpc" 2>/dev/null | head -10
+          DB="$MNT/System/Library/xpc/launchd.plist"
+          echo "DB_EXISTS=$(test -e "$DB" && echo 1 || echo 0)"
+          if [ -e "$DB" ]; then
+            echo "DB_SIZE=$(stat -f%z "$DB")"
+            echo "=== keys mentioning WebKit ==="
+            plutil -p "$DB" 2>/dev/null | grep -i "webkit" | head -20
+            echo "=== service bundle blocks (count) ==="
+            plutil -p "$DB" 2>/dev/null | grep -c "_executablePath"
+          fi
+          echo "=== does the registry mention WebContent at all ==="
+          grep -ac "WebContent" "$DB" 2>/dev/null
+          hdiutil detach "$MNT" >/dev/null 2>&1
+          exit 0
+
       - name: Upload WebKit.framework for device-side download
         if: always()
         uses: actions/upload-artifact@v4
