@@ -114,8 +114,10 @@ if minos == '17.0':
     raise SystemExit(0)
 edits = {
     'scripts/build-turnip-darwin.py': [("'arm64-apple-ios17.0'", "'arm64-apple-ios%s'" % minos)],
+    # The bundle plist picks the minimum OS with a conditional, so the default
+    # branch of that expression is the one to move.
     'scripts/build-adreno-metal-plugin.py': [("'arm64-apple-ios17.0'", "'arm64-apple-ios%s'" % minos),
-                                             ("'MinimumOSVersion': '17.0'", "'MinimumOSVersion': '%s'" % minos)],
+                                             ("else '17.0'", "else '%s'" % minos)],
     'scripts/build-adreno-metal-bridge.py': [("else '17.0'", "else '%s'" % minos)],
 }
 for name, pairs in edits.items():
