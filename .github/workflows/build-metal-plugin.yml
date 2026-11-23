@@ -11,6 +11,11 @@ name: build-metal-plugin
 
 on:
   workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Comma-separated iOS deployment targets to build'
+        required: true
+        default: '17.0,16.7'
 
 jobs:
   plugin:
@@ -21,7 +26,7 @@ jobs:
       matrix:
         # 17.0 proves the pinned pipeline unchanged; 16.7 matches this port's
         # rootfs and tells us whether the frontend still compiles that low.
-        minos: ['17.0', '16.7']
+        minos: ${{ fromJSON(format('["{0}"]', replace(inputs.targets, ',', '","'))) }}
     steps:
       - uses: actions/checkout@v4
 
