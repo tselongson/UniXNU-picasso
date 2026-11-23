@@ -27,7 +27,6 @@ static void picasso_path_dump(void);
 static void picasso_ls_store_drop(void);
 static void picasso_app_web_probe(const char *who);
 static void picasso_metal_probe(void);
-static void picasso_nsxpc_probe(void);
 static void picasso_sb_launch_probe(void);
 static void picasso_sb_view(void);
 static void picasso_xpc_exec_probe(void);
@@ -1177,7 +1176,6 @@ picasso_web_probe_start(void)
                     picasso_webkit_start();
                 }
                 picasso_metal_probe();
-                picasso_nsxpc_probe();
                 picasso_sb_view();
                 picasso_sb_launch_probe();
             }
@@ -2517,42 +2515,6 @@ picasso_metal_probe(void)
         return;
     }
     picasso_probe_log("PICASSO_METAL device=ok name=%s\n", [[device name] UTF8String]);
-}
-
-/* ---------------------------------------------------------------------------
- * Can this process reach WebKit's XPC services at all?
- *
- * The launchd registry (System/Library/xpc/launchd.plist) maps the WebKit
- * framework to its service bundles, but whether a given host may connect is a
- * separate question.  NSXPCConnection is the public way to ask: a refused
- * lookup invalidates the connection immediately, while a healthy one stays
- * alive until we drop it.
- * ------------------------------------------------------------------------- */
-
-static void
-picasso_nsxpc_probe(void)
-{
-    NSXPCConnection *connection =
-        [[NSXPCConnection alloc] initWithMachServiceName:@"com.apple.WebKit.Networking"
-                                                 options:0];
-
-    if (connection == nil) {
-        picasso_probe_log("PICASSO_NSXPC create=nil\n");
-        return;
-    }
-    connection.invalidationHandler = ^{
-        picasso_probe_log("PICASSO_NSXPC invalidated\n");
-    };
-    connection.interruptionHandler = ^{
-        picasso_probe_log("PICASSO_NSXPC interrupted\n");
-    };
-    [connection resume];
-    picasso_probe_log("PICASSO_NSXPC resumed\n");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8ull * NSEC_PER_SEC),
-                   dispatch_get_main_queue(), ^{
-        picasso_probe_log("PICASSO_NSXPC survived8s\n");
-        [connection invalidate];
-    });
 }
 
 __attribute__((constructor))
