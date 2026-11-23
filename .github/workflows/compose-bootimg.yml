@@ -352,28 +352,34 @@ jobs:
           echo "PICASSO_VAR_TREE files=$(find "$ROOT" -type f | wc -l) KiB=$(du -sk "$ROOT" | cut -f1)"
           exit 0
 
-      - name: List the launchd jobs that would start WebKit's services
+      - name: Find where WebKit's XPC services are registered
         run: |
           set +e
           DMG="out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER"
-          MNT="$RUNNER_TEMP/rootfs-jobs"
+          MNT="$RUNNER_TEMP/rootfs-audit"
           rm -rf "$MNT"; mkdir -p "$MNT"
           hdiutil attach -nobrowse -owners on -readonly -noautofsck -mountpoint "$MNT" "$DMG" >/dev/null 2>&1
-          echo "=== LaunchDaemons entries ==="
-          ls -1 "$MNT/System/Library/LaunchDaemons" 2>/dev/null | wc -l
-          echo "=== WebKit jobs ==="
-          ls -1 "$MNT/System/Library/LaunchDaemons" 2>/dev/null | grep -i webkit
-          echo "=== WebKit job bodies ==="
-          for f in "$MNT/System/Library/LaunchDaemons"/*ebKit*.plist; do
-            [ -e "$f" ] || continue
-            echo "--- $(basename "$f")"
-            plutil -p "$f" 2>/dev/null | head -20
-          done
-          echo "=== XPC service registration hints ==="
-          grep -rl "com.apple.WebKit.WebContent" "$MNT/System/Library/LaunchDaemons" 2>/dev/null | head -5
-          echo "=== ExtensionKit extensions ==="
-          ls -1 "$MNT/System/Library/ExtensionKit/Extensions" 2>/dev/null | head -10
+          echo "=== /System/Library/XPCServices ==="
+          ls -1 "$MNT/System/Library/XPCServices" 2>/dev/null | head -20
+          echo "XPCSERVICES_COUNT=$(ls -1 "$MNT/System/Library/XPCServices" 2>/dev/null | wc -l)"
+          echo "=== LaunchAgents mentioning webkit ==="
+          ls -1 "$MNT/System/Library/LaunchAgents" 2>/dev/null | grep -i webkit
+          echo "=== anything named WebContent outside the framework ==="
+          find "$MNT/System" -maxdepth 6 -iname '*WebContent*' 2>/dev/null | head -10
+          echo "=== PrivateFrameworks count ==="
+          ls -1 "$MNT/System/Library/PrivateFrameworks" 2>/dev/null | wc -l
+          echo "=== WebKit framework link target ==="
+          readlink "$MNT/System/Library/Frameworks/WebKit.framework" 2>/dev/null
           hdiutil detach "$MNT" >/dev/null 2>&1
+          echo "=== SystemOS cryptex: XPCServices / ExtensionKit ==="
+          SYS=$(find "out/ipsw/$PICASSO_IPSW_BUILD" -maxdepth 1 -name '*.dmg' -size +1000M | head -1)
+          M2="$RUNNER_TEMP/sys-audit"
+          rm -rf "$M2"; mkdir -p "$M2"
+          hdiutil attach -nobrowse -owners on -readonly -noautofsck -mountpoint "$M2" "$SYS" >/dev/null 2>&1
+          ls -1 "$M2/System/Library/XPCServices" 2>/dev/null | head -10
+          echo "SYS_XPCSERVICES=$(ls -1 "$M2/System/Library/XPCServices" 2>/dev/null | wc -l)"
+          find "$M2/System/Library" -maxdepth 4 -iname '*WebContent*' 2>/dev/null | head -8
+          hdiutil detach "$M2" >/dev/null 2>&1
           exit 0
 
       - name: Upload WebKit.framework for device-side download
