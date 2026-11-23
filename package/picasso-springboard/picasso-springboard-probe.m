@@ -872,7 +872,7 @@ picasso_net_probe_thread(void *arg)
             };
             unsigned i;
 
-            picasso_probe_log("PICASSO_NETPROBE build=12 process=%s clock=%ld\n", who, (long)tv.tv_sec);
+            picasso_probe_log("PICASSO_NETPROBE build=13 process=%s clock=%ld\n", who, (long)tv.tv_sec);
             for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
                 struct stat st;
                 if (stat(paths[i], &st) == 0) {
@@ -2008,6 +2008,16 @@ picasso_ls_store_drop(void)
  * ordinary sends; everything is guarded by respondsToSelector:.
  * ------------------------------------------------------------------------- */
 
+@interface UIApplication (PicassoPrivateLaunch)
+- (BOOL)launchApplicationWithIdentifier:(NSString *)identifier suspended:(BOOL)suspended;
+@end
+
+@interface NSObject (PicassoFrontBoardOpen)
++ (id)sharedService;
+- (void)openApplication:(NSString *)identifier options:(id)options
+             withResult:(void (^)(BOOL ok, NSError *error))result;
+@end
+
 @interface NSObject (PicassoSpringBoardLaunch)
 + (id)sharedInstance;
 - (id)applicationWithBundleIdentifier:(NSString *)identifier;
@@ -2194,6 +2204,60 @@ picasso_sb_launch_probe(void)
                                   [[e reason] UTF8String]);
             }
         }
+        /* The old SpringBoard-only private API; harmless when absent. */
+        {
+            UIApplication *app_shared = [UIApplication sharedApplication];
+
+            if ([app_shared respondsToSelector:
+                    @selector(launchApplicationWithIdentifier:suspended:)]) {
+                @try {
+                    BOOL ok = [app_shared launchApplicationWithIdentifier:@"com.apple.mobilesafari"
+                                                                suspended:NO];
+                    picasso_probe_log("PICASSO_SBLAUNCH uiapp-launch ok=%d\n", ok ? 1 : 0);
+                } @catch (NSException *e) {
+                    picasso_probe_log("PICASSO_SBLAUNCH uiapp-exception %s\n",
+                                      [[e reason] UTF8String]);
+                }
+            } else {
+                picasso_probe_log("PICASSO_SBLAUNCH uiapp-launch=nosel\n");
+            }
+        }
+
+        /* FrontBoard's own entry point: what a tap ends up calling in iOS 16. */
+        {
+            Class fbs = NSClassFromString(@"FBSSystemService");
+
+            if (fbs != nil) {
+                id service = nil;
+
+                @try {
+                    service = [fbs sharedService];
+                } @catch (NSException *e) {
+                    picasso_probe_log("PICASSO_SBLAUNCH fbs-exception %s\n",
+                                      [[e reason] UTF8String]);
+                }
+                picasso_probe_log("PICASSO_SBLAUNCH fbs=%s svc=%s\n",
+                                  "yes", service != nil ? "ok" : "nil");
+                if (service != nil &&
+                    [service respondsToSelector:@selector(openApplication:options:withResult:)]) {
+                    @try {
+                        [service openApplication:@"com.apple.mobilesafari" options:@{}
+                                      withResult:^(BOOL ok, NSError *error) {
+                            picasso_probe_log("PICASSO_SBLAUNCH fbs-open ok=%d err=%s\n",
+                                              ok ? 1 : 0,
+                                              error != nil ? [[error description] UTF8String] : "-");
+                        }];
+                        picasso_probe_log("PICASSO_SBLAUNCH fbs-open sent\n");
+                    } @catch (NSException *e) {
+                        picasso_probe_log("PICASSO_SBLAUNCH fbs-open-exception %s\n",
+                                          [[e reason] UTF8String]);
+                    }
+                }
+            } else {
+                picasso_probe_log("PICASSO_SBLAUNCH fbs=no\n");
+            }
+        }
+
         if (app != nil) {
             @try {
                 if ([app respondsToSelector:@selector(launch)]) {
@@ -2482,7 +2546,7 @@ static void picasso_springboard_probe(void)
     // Record entry before either installation path can fail.
     picasso_ack("kern.picasso_inject_ack");
     /* Immediate proof that THIS build of the library is the one loaded. */
-    picasso_probe_log("PICASSO_NETPROBE build=12 armed in %s\n", program ? program : "app");
+    picasso_probe_log("PICASSO_NETPROBE build=13 armed in %s\n", program ? program : "app");
     picasso_net_probe_start(program ? program : "app");
     picasso_app_web_probe(program ? program : "app");
     if (program != NULL && (!strcmp(program, "SpringBoard") || !strcmp(program, "MobileSafari"))) {
