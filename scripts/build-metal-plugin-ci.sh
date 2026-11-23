@@ -143,6 +143,40 @@ grep -n "apple-ios\|UHAVE_ENDIAN_H" "$ROOT/scripts/build-turnip-darwin.py" "$ROO
 step "build Turnip (ios)"
 python3 "$ROOT/scripts/build-turnip-darwin.py" --target ios
 
+step "iOS read_pages patch"
+# metal2vulkan's copied-buffer first read has a kernel-side reader for Linux,
+# macOS and Windows only; an iOS build finds no `read_pages` at all. The macOS
+# one is mach_vm_read_overwrite of the process's own task, which iOS has too, so
+# the fix is extending that cfg. It enters as the next recorded translator patch
+# so the bridge's source-identity check stays exact.
+cat > "$ROOT/drivers/AdrenoMetal/bridge/patches/0065-ios-read-pages.patch" <<'PATCH'
+diff --git a/crates/metal2vulkan-runtime/src/copied.rs b/crates/metal2vulkan-runtime/src/copied.rs
+--- a/crates/metal2vulkan-runtime/src/copied.rs
++++ b/crates/metal2vulkan-runtime/src/copied.rs
+@@ -2640,8 +2640,8 @@ pub(crate) fn read_pages(pages: NonNull<u8>, into: &mut [u8]) -> bool {
+     true
+ }
+ 
+-/// [`read_pages`] on macOS.
+-#[cfg(target_os = "macos")]
++/// [`read_pages`] on macOS and iOS.
++#[cfg(any(target_os = "macos", target_os = "ios"))]
+ pub(crate) fn read_pages(pages: NonNull<u8>, into: &mut [u8]) -> bool {
+     unsafe extern "C" {
+         /// `<mach/mach_init.h>`: the port of this process's task.
+PATCH
+python3 - "$ROOT" <<'PY'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1]) / 'scripts/build-adreno-metal-bridge.py'
+text = path.read_text()
+old = "    '0064-copies-leave-unreachable-pages-alone.patch']]"
+new = "    '0064-copies-leave-unreachable-pages-alone.patch',\n    '0065-ios-read-pages.patch']]"
+if old not in text:
+    raise SystemExit('bridge patch list changed; re-check where 0065 goes')
+path.write_text(text.replace(old, new))
+print('bridge patch list now carries 0065')
+PY
+
 step "build plugin bundle (ios)"
 python3 "$ROOT/scripts/build-adreno-metal-plugin.py" --target ios --no-replay
 
