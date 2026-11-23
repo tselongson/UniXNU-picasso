@@ -352,6 +352,30 @@ jobs:
           echo "PICASSO_VAR_TREE files=$(find "$ROOT" -type f | wc -l) KiB=$(du -sk "$ROOT" | cut -f1)"
           exit 0
 
+      - name: List the launchd jobs that would start WebKit's services
+        run: |
+          set +e
+          DMG="out/ipsw/$PICASSO_IPSW_BUILD/$PICASSO_OS_MEMBER"
+          MNT="$RUNNER_TEMP/rootfs-jobs"
+          rm -rf "$MNT"; mkdir -p "$MNT"
+          hdiutil attach -nobrowse -owners on -readonly -noautofsck -mountpoint "$MNT" "$DMG" >/dev/null 2>&1
+          echo "=== LaunchDaemons entries ==="
+          ls -1 "$MNT/System/Library/LaunchDaemons" 2>/dev/null | wc -l
+          echo "=== WebKit jobs ==="
+          ls -1 "$MNT/System/Library/LaunchDaemons" 2>/dev/null | grep -i webkit
+          echo "=== WebKit job bodies ==="
+          for f in "$MNT/System/Library/LaunchDaemons"/*ebKit*.plist; do
+            [ -e "$f" ] || continue
+            echo "--- $(basename "$f")"
+            plutil -p "$f" 2>/dev/null | head -20
+          done
+          echo "=== XPC service registration hints ==="
+          grep -rl "com.apple.WebKit.WebContent" "$MNT/System/Library/LaunchDaemons" 2>/dev/null | head -5
+          echo "=== ExtensionKit extensions ==="
+          ls -1 "$MNT/System/Library/ExtensionKit/Extensions" 2>/dev/null | head -10
+          hdiutil detach "$MNT" >/dev/null 2>&1
+          exit 0
+
       - name: Upload WebKit.framework for device-side download
         if: always()
         uses: actions/upload-artifact@v4
