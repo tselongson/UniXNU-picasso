@@ -109,18 +109,8 @@ step "deployment target $MINOS"
 python3 - "$ROOT" "$MINOS" <<'PY'
 import pathlib, sys
 root, minos = pathlib.Path(sys.argv[1]), sys.argv[2]
-if minos == '17.0':
-    print('keeping the upstream 17.0 target')
-    raise SystemExit(0)
-edits = {
-    'scripts/build-turnip-darwin.py': [("'arm64-apple-ios17.0'", "'arm64-apple-ios%s'" % minos)],
-    # The bundle plist picks the minimum OS with a conditional, so the default
-    # branch of that expression is the one to move.
-    'scripts/build-adreno-metal-plugin.py': [("'arm64-apple-ios17.0'", "'arm64-apple-ios%s'" % minos),
-                                             ("else '17.0'", "else '%s'" % minos)],
-    'scripts/build-adreno-metal-bridge.py': [("else '17.0'", "else '%s'" % minos)],
-}
-for name, pairs in edits.items():
+
+def edit(name, pairs):
     path = root / name
     text = path.read_text()
     for old, new in pairs:
@@ -129,8 +119,26 @@ for name, pairs in edits.items():
         text = text.replace(old, new)
     path.write_text(text)
     print('patched', name)
+
+# The iPhoneOS 26 SDK ships <endian.h> without the glibc __BYTE_ORDER macros,
+# so Mesa's header probe takes the glibc branch and leaves UTIL_ARCH_* unset;
+# undefining the probe sends u_endian.h down its __APPLE__ branch instead. The
+# C11 build also needs _DARWIN_C_SOURCE for dlfcn/POSIX declarations.
+edit('scripts/build-turnip-darwin.py',
+     [("'-isysroot', sdk, '-fstack-protector-strong']",
+       "'-isysroot', sdk, '-fstack-protector-strong', '-UHAVE_ENDIAN_H', '-D_DARWIN_C_SOURCE=1']")])
+if minos != '17.0':
+    edit('scripts/build-turnip-darwin.py', [("'arm64-apple-ios17.0'", "'arm64-apple-ios%s'" % minos)])
+    # The bundle plist picks the minimum OS with a conditional, so the default
+    # branch of that expression is the one to move.
+    edit('scripts/build-adreno-metal-plugin.py',
+         [("'arm64-apple-ios17.0'", "'arm64-apple-ios%s'" % minos),
+          ("else '17.0'", "else '%s'" % minos)])
+    edit('scripts/build-adreno-metal-bridge.py', [("else '17.0'", "else '%s'" % minos)])
+else:
+    print('keeping the upstream 17.0 target')
 PY
-grep -n "apple-ios" "$ROOT/scripts/build-turnip-darwin.py" "$ROOT/scripts/build-adreno-metal-plugin.py" | head
+grep -n "apple-ios\|UHAVE_ENDIAN_H" "$ROOT/scripts/build-turnip-darwin.py" "$ROOT/scripts/build-adreno-metal-plugin.py" | head
 
 step "build Turnip (ios)"
 python3 "$ROOT/scripts/build-turnip-darwin.py" --target ios
