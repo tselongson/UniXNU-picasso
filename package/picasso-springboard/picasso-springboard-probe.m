@@ -27,6 +27,7 @@ static void picasso_path_dump(void);
 static void picasso_ls_store_drop(void);
 static void picasso_app_web_probe(const char *who);
 static void picasso_metal_probe(void);
+static void picasso_bootstrap_probe(void);
 static void picasso_sb_launch_probe(void);
 static void picasso_sb_view(void);
 static void picasso_xpc_exec_probe(void);
@@ -872,7 +873,7 @@ picasso_net_probe_thread(void *arg)
             };
             unsigned i;
 
-            picasso_probe_log("PICASSO_NETPROBE build=14 process=%s clock=%ld\n", who, (long)tv.tv_sec);
+            picasso_probe_log("PICASSO_NETPROBE build=15 process=%s clock=%ld\n", who, (long)tv.tv_sec);
             for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
                 struct stat st;
                 if (stat(paths[i], &st) == 0) {
@@ -1176,6 +1177,7 @@ picasso_web_probe_start(void)
                     picasso_webkit_start();
                 }
                 picasso_metal_probe();
+                picasso_bootstrap_probe();
                 picasso_sb_view();
                 picasso_sb_launch_probe();
             }
@@ -2517,6 +2519,44 @@ picasso_metal_probe(void)
     picasso_probe_log("PICASSO_METAL device=ok name=%s\n", [[device name] UTF8String]);
 }
 
+/* ---------------------------------------------------------------------------
+ * Is the WebKit XPC service reachable from this process?
+ *
+ * launchd registers the service bundles (System/Library/xpc/launchd.plist), but
+ * whether a given caller may look the name up is a separate Mach-level fact.
+ * bootstrap_look_up answers exactly that: success means launchd will spawn the
+ * helper on demand, 1102 (unknown service) means this process is not a client
+ * of it at all.
+ * ------------------------------------------------------------------------- */
+
+/* The iOS SDK does not expose servers/bootstrap.h; both symbols live in
+ * libSystem and are what launchd itself uses for the lookup. */
+extern mach_port_t bootstrap_port;
+extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name,
+                                       mach_port_t *service_port);
+
+static void
+picasso_bootstrap_probe(void)
+{
+    static const char *const names[] = {
+        "com.apple.WebKit.WebContent",
+        "com.apple.WebKit.Networking",
+        "com.apple.WebKit.GPU",
+    };
+    unsigned i;
+
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        mach_port_t port = MACH_PORT_NULL;
+        kern_return_t kr = bootstrap_look_up(bootstrap_port, (char *)names[i], &port);
+
+        picasso_probe_log("PICASSO_BOOTSTRAP %s kr=%d port=%u\n", names[i], (int)kr,
+                          (unsigned)port);
+        if (kr == KERN_SUCCESS && port != MACH_PORT_NULL) {
+            mach_port_deallocate(mach_task_self(), port);
+        }
+    }
+}
+
 __attribute__((constructor))
 static void picasso_springboard_probe(void)
 {
@@ -2546,7 +2586,7 @@ static void picasso_springboard_probe(void)
     // Record entry before either installation path can fail.
     picasso_ack("kern.picasso_inject_ack");
     /* Immediate proof that THIS build of the library is the one loaded. */
-    picasso_probe_log("PICASSO_NETPROBE build=14 armed in %s\n", program ? program : "app");
+    picasso_probe_log("PICASSO_NETPROBE build=15 armed in %s\n", program ? program : "app");
     picasso_net_probe_start(program ? program : "app");
     picasso_app_web_probe(program ? program : "app");
     if (program != NULL && (!strcmp(program, "SpringBoard") || !strcmp(program, "MobileSafari"))) {
