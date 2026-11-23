@@ -13,53 +13,84 @@ on:
   workflow_dispatch:
     inputs:
       targets:
-        description: 'Comma-separated iOS deployment targets to build'
+        description: 'Which deployment targets to build: 17.0, 16.7, or both (17.0+16.7)'
         required: true
-        default: '17.0,16.7'
+        default: '17.0+16.7'
 
 jobs:
-  plugin:
+  ios17:
+    # 17.0 proves the pinned pipeline unchanged.
+    if: contains(inputs.targets, '17.0')
     runs-on: macos-latest
     timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      matrix:
-        # 17.0 proves the pinned pipeline unchanged; 16.7 matches this port's
-        # rootfs and tells us whether the frontend still compiles that low.
-        minos: ${{ fromJSON(format('["{0}"]', replace(inputs.targets, ',', '","'))) }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Report host
         run: |
           sw_vers
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-path
-
-      - name: Build plugin bundle (iOS ${{ matrix.minos }})
+      - name: Build plugin bundle (iOS 17.0)
         env:
-          MINOS: ${{ matrix.minos }}
+          MINOS: '17.0'
         run: |
           set -o pipefail
           bash scripts/build-metal-plugin-ci.sh "$RUNNER_TEMP/metal" "$MINOS" 2>&1 | tee "$RUNNER_TEMP/build.log"
-
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: metal-plugin-logs-ios${{ matrix.minos }}
+          name: metal-plugin-logs-ios17.0
           if-no-files-found: warn
           path: |
             ${{ runner.temp }}/build.log
             ${{ runner.temp }}/metal/unixnu/.cache/mesa-tu-ios-configure.log
             ${{ runner.temp }}/metal/unixnu/.cache/mesa-tu-ios-build.log
             ${{ runner.temp }}/metal/unixnu/build/build-ios.log
-
       - name: Upload bundle
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: NativeAdrenoMetal-bundle-ios${{ matrix.minos }}
+          name: NativeAdrenoMetal-bundle-ios17.0
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/metal/unixnu/build/adreno-metal-plugin/NativeAdrenoMetal.bundle
+            ${{ runner.temp }}/metal/unixnu/build/adreno-metal-plugin/trust.json
+
+  ios16:
+    # 16.7 matches this port's rootfs (iOS 16.7.16 / 20H392).
+    if: contains(inputs.targets, '16.7')
+    runs-on: macos-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Report host
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+      - name: Build plugin bundle (iOS 16.7)
+        env:
+          MINOS: '16.7'
+        run: |
+          set -o pipefail
+          bash scripts/build-metal-plugin-ci.sh "$RUNNER_TEMP/metal" "$MINOS" 2>&1 | tee "$RUNNER_TEMP/build.log"
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metal-plugin-logs-ios16.7
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/build.log
+            ${{ runner.temp }}/metal/unixnu/.cache/mesa-tu-ios-configure.log
+            ${{ runner.temp }}/metal/unixnu/.cache/mesa-tu-ios-build.log
+            ${{ runner.temp }}/metal/unixnu/build/build-ios.log
+      - name: Upload bundle
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NativeAdrenoMetal-bundle-ios16.7
           if-no-files-found: error
           path: |
             ${{ runner.temp }}/metal/unixnu/build/adreno-metal-plugin/NativeAdrenoMetal.bundle
